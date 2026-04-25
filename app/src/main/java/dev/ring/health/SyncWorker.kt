@@ -1,0 +1,415 @@
+package dev.ring.health
+
+import android.annotation.SuppressLint
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.Context
+import android.content.pm.ServiceInfo
+import android.os.Build
+import android.util.Log
+import androidx.core.app.NotificationCompat
+import androidx.work.CoroutineWorker
+import androidx.work.ForegroundInfo
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
+import androidx.work.WorkManager
+import androidx.work.WorkerParameters
+import dev.ring.health.ColmiProtocol.ActivitySample
+import dev.ring.health.ColmiProtocol.BatteryStatus
+import dev.ring.health.ColmiProtocol.HrSample
+import dev.ring.health.ColmiProtocol.HrvSample
+import dev.ring.health.ColmiProtocol.SLEEP_DEEP
+import dev.ring.health.ColmiProtocol.SLEEP_LIGHT
+import dev.ring.health.ColmiProtocol.SLEEP_REM
+import dev.ring.health.ColmiProtocol.SleepSession
+import dev.ring.health.ColmiProtocol.Spo2Sample
+import dev.ring.health.ColmiProtocol.StressSample
+import dev.ring.health.Prefs.lastActivityMs
+import dev.ring.health.Prefs.lastHrMs
+import dev.ring.health.Prefs.lastHrvMs
+import dev.ring.health.Prefs.lastSleepMs
+import dev.ring.health.Prefs.lastSpo2Ms
+import dev.ring.health.Prefs.lastStressMs
+import dev.ring.health.Prefs.lastSyncMs
+import dev.ring.health.Prefs.ringAddress
+import dev.ring.health.Prefs.vmUrl
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.Calendar
+import java.util.concurrent.TimeUnit
+
+private const val TAG = "SyncWorker"
+private const val NOTIF_CHANNEL = "ring_sync"
+private const val NOTIF_ID = 1
+
+class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
+
+    @SuppressLint("MissingPermission")
+    override suspend fun doWork(): Result {
+        setForeground(buildForegroundInfo("Syncing ring…"))
+
+        val address = applicationContext.ringAddress
+        if (address.isNullOrBlank()) {
+            Log.w(TAG, "No ring address configured")
+            return Result.failure()
+        }
+        val vmUrl = applicationContext.vmUrl
+        if (vmUrl.isBlank()) {
+            Log.w(TAG, "No VictoriaMetrics URL configured")
+            return Result.failure()
+        }
+
+        val conn = ColmiConnection(applicationContext, address)
+        return try {
+            val connected = conn.connect()
+            if (!connected) {
+                Log.w(TAG, "Could not connect to ring")
+                scheduleNext(applicationContext)
+                return Result.success()
+            }
+
+            // ── Battery ───────────────────────────────────────────────────
+            conn.writePacket(ColmiProtocol.batteryRequest())
+            val battery = collectBattery(conn)
+
+            // ── Heart rate — today + yesterday ────────────────────────────
+            val hrSamples = mutableListOf<HrSample>()
+            for (daysBack in 0..1) {
+                val day = Calendar.getInstance().apply {
+                    add(Calendar.DAY_OF_MONTH, -daysBack)
+                    set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+                }
+                conn.writePacket(ColmiProtocol.hrRequest(day))
+                hrSamples += collectHr(conn, day)
+            }
+
+            // ── HRV — today + yesterday ───────────────────────────────────
+            val hrvSamples = mutableListOf<HrvSample>()
+            for (daysAgo in 0..1) {
+                val day = Calendar.getInstance().apply {
+                    add(Calendar.DAY_OF_MONTH, -daysAgo)
+                    set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+                }
+                conn.writePacket(ColmiProtocol.hrvRequest(daysAgo))
+                hrvSamples += collectHrv(conn, day)
+            }
+
+            // ── Activity (steps/calories/distance) — today + yesterday ────
+            val activitySamples = mutableListOf<ActivitySample>()
+            for (daysAgo in 0..1) {
+                conn.writePacket(ColmiProtocol.activityRequest(daysAgo))
+                activitySamples += collectActivity(conn)
+            }
+
+            // ── Stress — today ────────────────────────────────────────────
+            val today = Calendar.getInstance().apply {
+                set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+                set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+            }
+            conn.writePacket(ColmiProtocol.stressRequest())
+            val stressSamples = collectStress(conn, today)
+
+            // ── SpO2 ──────────────────────────────────────────────────────
+            conn.writeCommand(ColmiProtocol.spo2Request())
+            val spo2Samples = collectSpo2(conn)
+
+            // ── Sleep ─────────────────────────────────────────────────────
+            conn.writeCommand(ColmiProtocol.sleepRequest())
+            val sleepSessions = collectSleep(conn)
+
+            // ── Compute + push metrics ────────────────────────────────────
+            val metrics = buildMetrics(
+                applicationContext,
+                battery, hrSamples, hrvSamples,
+                activitySamples, stressSamples, spo2Samples, sleepSessions
+            )
+
+            if (metrics.isEmpty()) {
+                Log.i(TAG, "No new metrics to push")
+            } else {
+                val pushed = MetricsPusher(vmUrl).push(metrics)
+                if (!pushed) {
+                    scheduleNext(applicationContext)
+                    return Result.success()
+                }
+
+                // Advance cursors
+                hrSamples.maxOfOrNull { it.timestampMs }
+                    ?.let { applicationContext.lastHrMs = it }
+                hrvSamples.maxOfOrNull { it.timestampMs }
+                    ?.let { applicationContext.lastHrvMs = it }
+                activitySamples.maxOfOrNull { it.timestampMs }
+                    ?.let { applicationContext.lastActivityMs = it }
+                stressSamples.maxOfOrNull { it.timestampMs }
+                    ?.let { applicationContext.lastStressMs = it }
+                spo2Samples.maxOfOrNull { it.timestampMs }
+                    ?.let { applicationContext.lastSpo2Ms = it }
+                sleepSessions.maxOfOrNull { it.startMs }
+                    ?.let { applicationContext.lastSleepMs = it }
+            }
+
+            applicationContext.lastSyncMs = System.currentTimeMillis()
+            Log.i(TAG, "Sync complete, pushed ${metrics.size} metrics")
+            scheduleNext(applicationContext)
+            Result.success()
+
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    // ── Collection helpers ─────────────────────────────────────────────────
+
+    private suspend fun collectBattery(conn: ColmiConnection): BatteryStatus? {
+        return withTimeoutOrNull(10_000) {
+            while (true) {
+                val pkt = conn.notifyV1.receive()
+                if (pkt.size >= 3 && pkt[0] == ColmiProtocol.CMD_BATTERY) {
+                    return@withTimeoutOrNull ColmiProtocol.parseBatteryPacket(pkt)
+                }
+            }
+            @Suppress("UNREACHABLE_CODE") null
+        }
+    }
+
+    private suspend fun collectHr(conn: ColmiConnection, day: Calendar): List<HrSample> {
+        val samples = mutableListOf<HrSample>()
+        var totalPackets = -1
+        withTimeoutOrNull(15_000) {
+            while (true) {
+                val pkt = conn.notifyV1.receive()
+                if (pkt.isEmpty() || pkt[0] != ColmiProtocol.CMD_SYNC_HEART_RATE) continue
+                val nr = pkt[1].toInt() and 0xff
+                if (nr == 0xff) break
+                if (nr == 0) { totalPackets = pkt[2].toInt() and 0xff; continue }
+                val parsed = ColmiProtocol.parseHrPacket(pkt, day) ?: continue
+                samples += parsed
+                if (totalPackets > 0 && nr == totalPackets - 1) break
+            }
+        }
+        return samples
+    }
+
+    private suspend fun collectHrv(conn: ColmiConnection, day: Calendar): List<HrvSample> {
+        val samples = mutableListOf<HrvSample>()
+        withTimeoutOrNull(15_000) {
+            while (true) {
+                val pkt = conn.notifyV1.receive()
+                if (pkt.isEmpty() || pkt[0] != ColmiProtocol.CMD_SYNC_HRV) continue
+                val nr = pkt[1].toInt() and 0xff
+                if (nr == 0xff) break
+                if (nr == 0) continue
+                val parsed = ColmiProtocol.parseHrvPacket(pkt, day) ?: continue
+                samples += parsed
+                if (nr == 4) break
+            }
+        }
+        return samples
+    }
+
+    private suspend fun collectActivity(conn: ColmiConnection): List<ActivitySample> {
+        val samples = mutableListOf<ActivitySample>()
+        withTimeoutOrNull(20_000) {
+            while (true) {
+                val pkt = conn.notifyV1.receive()
+                if (pkt.isEmpty() || pkt[0] != ColmiProtocol.CMD_SYNC_ACTIVITY) continue
+                val nr = pkt[1].toInt() and 0xff
+                if (nr == 0xff) break  // empty history
+                if (nr == 0xf0) continue  // initial/header packet
+                val parsed = ColmiProtocol.parseActivityPacket(pkt)
+                if (parsed != null) samples += parsed
+                if (pkt.size > 6) {
+                    val current = pkt[5].toInt() and 0xff
+                    val total   = pkt[6].toInt() and 0xff
+                    if (total > 0 && current == total - 1) break
+                }
+            }
+        }
+        return samples
+    }
+
+    private suspend fun collectStress(conn: ColmiConnection, today: Calendar): List<StressSample> {
+        val samples = mutableListOf<StressSample>()
+        withTimeoutOrNull(15_000) {
+            while (true) {
+                val pkt = conn.notifyV1.receive()
+                if (pkt.isEmpty() || pkt[0] != ColmiProtocol.CMD_SYNC_STRESS) continue
+                val nr = pkt[1].toInt() and 0xff
+                if (nr == 0xff) break
+                if (nr == 0) continue
+                samples += ColmiProtocol.parseStressPacket(pkt, today)
+                if (nr == 4) break
+            }
+        }
+        return samples
+    }
+
+    private suspend fun collectSpo2(conn: ColmiConnection): List<Spo2Sample> {
+        return withTimeoutOrNull(20_000) {
+            while (true) {
+                val pkt = conn.notifyV2.receive()
+                if (pkt.size >= 2 &&
+                    pkt[0] == ColmiProtocol.CMD_BIG_DATA_V2 &&
+                    pkt[1] == ColmiProtocol.BIG_DATA_TYPE_SPO2
+                ) {
+                    return@withTimeoutOrNull ColmiProtocol.parseSpo2Packet(pkt)
+                }
+            }
+            @Suppress("UNREACHABLE_CODE") emptyList()
+        } ?: emptyList()
+    }
+
+    private suspend fun collectSleep(conn: ColmiConnection): List<SleepSession> {
+        return withTimeoutOrNull(20_000) {
+            while (true) {
+                val pkt = conn.notifyV2.receive()
+                if (pkt.size >= 2 &&
+                    pkt[0] == ColmiProtocol.CMD_BIG_DATA_V2 &&
+                    pkt[1] == ColmiProtocol.BIG_DATA_TYPE_SLEEP
+                ) {
+                    return@withTimeoutOrNull ColmiProtocol.parseSleepPacket(pkt)
+                }
+            }
+            @Suppress("UNREACHABLE_CODE") emptyList()
+        } ?: emptyList()
+    }
+
+    // ── Metric computation ─────────────────────────────────────────────────
+
+    private fun buildMetrics(
+        ctx: Context,
+        battery: BatteryStatus?,
+        hrSamples: List<HrSample>,
+        hrvSamples: List<HrvSample>,
+        activitySamples: List<ActivitySample>,
+        stressSamples: List<StressSample>,
+        spo2Samples: List<Spo2Sample>,
+        sessions: List<SleepSession>
+    ): List<Metric> {
+        val metrics = mutableListOf<Metric>()
+        val labels  = mapOf("device" to "colmi_r02")
+        val nowMs   = System.currentTimeMillis()
+
+        val lastHrMs       = ctx.lastHrMs
+        val lastHrvMs      = ctx.lastHrvMs
+        val lastActivityMs = ctx.lastActivityMs
+        val lastStressMs   = ctx.lastStressMs
+        val lastSpo2Ms     = ctx.lastSpo2Ms
+        val lastSleepMs    = ctx.lastSleepMs
+
+        // ── Battery (always push — instantaneous reading) ─────────────────
+        if (battery != null) {
+            metrics += Metric("ring_battery_pct",  labels, battery.level.toDouble(), nowMs)
+            metrics += Metric("ring_charging",     labels, if (battery.charging) 1.0 else 0.0, nowMs)
+        }
+
+        // ── Heart rate: raw 5-min samples (ring's native granularity) ─────
+        // Aggregations like RHR (overnight min) are computed in Grafana.
+        for (s in hrSamples.filter { it.timestampMs > lastHrMs && it.bpm > 0 }) {
+            metrics += Metric("biometric_hr_bpm", labels, s.bpm.toDouble(), s.timestampMs)
+        }
+
+        // ── HRV: raw 30-min samples (ring's native granularity) ───────────
+        for (s in hrvSamples.filter { it.timestampMs > lastHrvMs && it.valueMs > 0 }) {
+            metrics += Metric("biometric_hrv_rmssd", labels, s.valueMs.toDouble(), s.timestampMs)
+        }
+
+        // ── Activity: steps/calories/distance per hourly slot ─────────────
+        for (s in activitySamples.filter { it.timestampMs > lastActivityMs }) {
+            metrics += Metric("biometric_steps",            labels, s.steps.toDouble(),          s.timestampMs)
+            metrics += Metric("biometric_calories",         labels, s.calories.toDouble(),        s.timestampMs)
+            metrics += Metric("biometric_distance_meters",  labels, s.distanceMeters.toDouble(),  s.timestampMs)
+        }
+
+        // ── Stress: level per 30-min slot ────────────────────────────────
+        for (s in stressSamples.filter { it.timestampMs > lastStressMs }) {
+            metrics += Metric("biometric_stress", labels, s.level.toDouble(), s.timestampMs)
+        }
+
+        // ── SpO2: hourly average ──────────────────────────────────────────
+        for (s in spo2Samples.filter { it.timestampMs > lastSpo2Ms }) {
+            metrics += Metric("biometric_spo2_pct", labels, s.pct.toDouble(), s.timestampMs)
+        }
+
+        // ── Sleep: total + stage breakdown ────────────────────────────────
+        val newSessions = sessions.filter { it.startMs > lastSleepMs && it.durationMinutes > 0 }
+        newSessions.maxByOrNull { it.startMs }?.let { s ->
+            metrics += Metric("biometric_sleep_minutes", labels, s.durationMinutes.toDouble(), s.startMs)
+
+            val deepMin  = s.stages.filter { it.stage == SLEEP_DEEP  }.sumOf { it.durationMinutes }
+            val remMin   = s.stages.filter { it.stage == SLEEP_REM   }.sumOf { it.durationMinutes }
+            val lightMin = s.stages.filter { it.stage == SLEEP_LIGHT }.sumOf { it.durationMinutes }
+            if (deepMin  > 0) metrics += Metric("biometric_sleep_deep_minutes",  labels, deepMin.toDouble(),  s.startMs)
+            if (remMin   > 0) metrics += Metric("biometric_sleep_rem_minutes",   labels, remMin.toDouble(),   s.startMs)
+            if (lightMin > 0) metrics += Metric("biometric_sleep_light_minutes", labels, lightMin.toDouble(), s.startMs)
+        }
+
+        return metrics
+    }
+
+    // ── Foreground notification ────────────────────────────────────────────
+
+    private fun buildForegroundInfo(text: String): ForegroundInfo {
+        val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (nm.getNotificationChannel(NOTIF_CHANNEL) == null) {
+            nm.createNotificationChannel(
+                NotificationChannel(NOTIF_CHANNEL, "Ring sync", NotificationManager.IMPORTANCE_LOW)
+            )
+        }
+        val notif = NotificationCompat.Builder(applicationContext, NOTIF_CHANNEL)
+            .setSmallIcon(android.R.drawable.ic_popup_sync)
+            .setContentTitle("Ring Health")
+            .setContentText(text)
+            .setOngoing(true)
+            .build()
+
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ForegroundInfo(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        } else {
+            ForegroundInfo(NOTIF_ID, notif)
+        }
+    }
+
+    companion object {
+        private const val SYNC_INTERVAL_MINUTES = 5L
+
+        // Kick off the first sync immediately; each run re-schedules the next one.
+        // PeriodicWorkRequest has a hard 15-min OS floor, so we use self-chaining
+        // OneTimeWorkRequests with an initial delay instead.
+        fun schedule(ctx: Context) {
+            val wm = WorkManager.getInstance(ctx)
+            wm.cancelUniqueWork("ring_sync_periodic")
+            val request = OneTimeWorkRequestBuilder<SyncWorker>()
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .build()
+            wm.enqueueUniqueWork(
+                "ring_sync",
+                androidx.work.ExistingWorkPolicy.KEEP,
+                request
+            )
+        }
+
+        internal fun scheduleNext(ctx: Context) {
+            val request = OneTimeWorkRequestBuilder<SyncWorker>()
+                .setInitialDelay(SYNC_INTERVAL_MINUTES, TimeUnit.MINUTES)
+                .build()
+            WorkManager.getInstance(ctx).enqueueUniqueWork(
+                "ring_sync",
+                androidx.work.ExistingWorkPolicy.REPLACE,
+                request
+            )
+        }
+
+        fun runNow(ctx: Context) {
+            val request = OneTimeWorkRequestBuilder<SyncWorker>()
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .build()
+            WorkManager.getInstance(ctx).enqueueUniqueWork(
+                "ring_sync",
+                androidx.work.ExistingWorkPolicy.REPLACE,
+                request
+            )
+        }
+    }
+}

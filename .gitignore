@@ -1,0 +1,41 @@
+# ── Gradle / build outputs ────────────────────────────────────────────
+.gradle/
+build/
+out/
+release/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# ── Local environment ─────────────────────────────────────────────────
+local.properties
+.kotlin/
+
+# ── Android Studio / IntelliJ ─────────────────────────────────────────
+.idea/
+*.iml
+captures/
+.navigation/
+
+# ── Keystores / signing ───────────────────────────────────────────────
+*.jks
+*.keystore
+keystore.properties
+
+# ── OS noise ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Editor / agent state ──────────────────────────────────────────────
+.claude/
+.cursor/
+.vscode/
+*.swp
+*~
+
+# ── Logs / scratch ────────────────────────────────────────────────────
+*.log
+hs_err_pid*
+/tmp/
