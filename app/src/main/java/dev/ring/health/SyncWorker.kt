@@ -332,17 +332,17 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             metrics += Metric("biometric_spo2_pct", labels, s.pct.toDouble(), s.timestampMs)
         }
 
-        // ── Sleep: total + stage breakdown ────────────────────────────────
+        // ── Sleep: total + stage breakdown for every new session ─────────
         val newSessions = sessions.filter { it.startMs > lastSleepMs && it.durationMinutes > 0 }
-        newSessions.maxByOrNull { it.startMs }?.let { s ->
-            metrics += Metric("biometric_sleep_minutes", labels, s.durationMinutes.toDouble(), s.startMs)
+        for (s in newSessions) {
+            metrics += Metric("biometric_sleep_total_min", labels, s.durationMinutes.toDouble(), s.startMs)
 
             val deepMin  = s.stages.filter { it.stage == SLEEP_DEEP  }.sumOf { it.durationMinutes }
             val remMin   = s.stages.filter { it.stage == SLEEP_REM   }.sumOf { it.durationMinutes }
             val lightMin = s.stages.filter { it.stage == SLEEP_LIGHT }.sumOf { it.durationMinutes }
-            if (deepMin  > 0) metrics += Metric("biometric_sleep_deep_minutes",  labels, deepMin.toDouble(),  s.startMs)
-            if (remMin   > 0) metrics += Metric("biometric_sleep_rem_minutes",   labels, remMin.toDouble(),   s.startMs)
-            if (lightMin > 0) metrics += Metric("biometric_sleep_light_minutes", labels, lightMin.toDouble(), s.startMs)
+            if (deepMin  > 0) metrics += Metric("biometric_sleep_deep_min",  labels, deepMin.toDouble(),  s.startMs)
+            if (remMin   > 0) metrics += Metric("biometric_sleep_rem_min",   labels, remMin.toDouble(),   s.startMs)
+            if (lightMin > 0) metrics += Metric("biometric_sleep_light_min", labels, lightMin.toDouble(), s.startMs)
         }
 
         return metrics

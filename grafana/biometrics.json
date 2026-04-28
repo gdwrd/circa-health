@@ -643,12 +643,16 @@
       "fieldConfig": {
         "defaults": {
           "unit": "h",
+          "decimals": 1,
+          "min": 0,
           "custom": {
             "drawStyle": "bars",
+            "barAlignment": 0,
             "lineWidth": 1,
-            "fillOpacity": 80,
+            "fillOpacity": 85,
             "stacking": { "mode": "normal", "group": "A" },
-            "spanNulls": false
+            "spanNulls": false,
+            "showPoints": "never"
           },
           "color": { "mode": "palette-classic" }
         },

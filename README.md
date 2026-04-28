@@ -3,10 +3,18 @@
 A self-hosted biometric pipeline for the **Colmi R02** smart ring.
 
 ```
-┌──────────┐   BLE/GATT   ┌────────────────┐   HTTP   ┌─────────────────┐   PromQL   ┌─────────┐
-│ Colmi R02│ ──────────▶ │  Android app   │ ──────▶ │ VictoriaMetrics │ ────────▶ │ Grafana │
-│   ring   │              │ (this project) │          │   (your host)   │            │         │
-└──────────┘              └────────────────┘          └─────────────────┘            └─────────┘
+┌──────────┐   BLE/GATT   ┌────────────────┐  
+│ Colmi R02│ ──────────▶ │  Android app   │
+│   ring   │              │ (this project) │
+└──────────┘              └────────────────┘
+                                  |
+                                  | HTTP
+                                  |
+                                  V
+┌──────────┐    PromQL    ┌────────────────┐
+│  Grafana │ ◀────────── │ VictoriaMetrics│
+│          │              │  (your host)   │
+└──────────┘              └────────────────┘
 ```
 
 The Android app pulls heart rate, HRV, SpO₂, stress, steps, calories, distance,
@@ -15,7 +23,9 @@ Prometheus-style metrics to a self-hosted [VictoriaMetrics](https://victoriametr
 instance. A [Grafana](https://grafana.com/) dashboard is included.
 
 No vendor cloud, no telemetry, no account — your biometric data never leaves
-your network.
+your network. In this case I'm using a VPN on the phone so that it is constantly
+able to connect to the home network which hosts VictoriaMetrics, etc. The ring 
+does keep data for a day or two though, so there is no need to sync constantly. 
 
 ## Why
 
@@ -153,6 +163,11 @@ we've already shipped.
 - The ring will *not* talk to two BLE clients at once. Uninstall (or at least
   unpair from) Gadgetbridge / the official Colmi app before using this one.
 - `minSdk = 31` because `BLUETOOTH_CONNECT` is an API-31 runtime permission.
+- Sleep metrics are emitted **once per detected sleep session**, timestamped at
+  the session's start time. The "Sleep stages over time" panel therefore shows
+  one bar per night, anchored at the moment you fell asleep, rather than a
+  tidy per-calendar-day total. Aggregating sessions onto calendar-day buckets
+  in PromQL is on the TODO list — patches welcome.
 - Cleartext HTTP is allowed by the network security config so that you can
   point at a local VictoriaMetrics over plain HTTP. If you front your
   endpoint with TLS you can tighten `app/src/main/res/xml/network_security_config.xml`.
