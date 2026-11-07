@@ -72,37 +72,19 @@ done in Grafana / PromQL rather than at write time, so you keep the raw data.
 
 ## Server side: VictoriaMetrics + Grafana
 
-Any docker-compose stack with VictoriaMetrics and Grafana works. Minimal
-example:
+A ready-to-run stack lives in [`infra/`](infra/). It provisions the
+VictoriaMetrics data source (UID `victoriametrics`) and the
+[`grafana/biometrics.json`](grafana/biometrics.json) dashboard automatically.
 
-```yaml
-services:
-  victoriametrics:
-    image: victoriametrics/victoria-metrics:latest
-    ports:
-      - "8428:8428"
-    volumes:
-      - vm-data:/victoria-metrics-data
-    command:
-      - "--retentionPeriod=10y"
-
-  grafana:
-    image: grafana/grafana-oss:latest
-    ports:
-      - "3000:3000"
-    volumes:
-      - grafana-data:/var/lib/grafana
-
-volumes:
-  vm-data:
-  grafana-data:
+```bash
+# on the server, with the repo (or just infra/ + grafana/) copied over
+cd infra
+cp .env.example .env   # set GRAFANA_ADMIN_PASSWORD (and GRAFANA_PORT, default 3001)
+docker compose up -d
 ```
 
-Then in Grafana, add a Prometheus data source pointing at
-`http://victoriametrics:8428` and import [`grafana/biometrics.json`](grafana/biometrics.json).
-
-The dashboard expects a data source with UID `victoriametrics` — adjust the
-JSON or your data source UID to match.
+VictoriaMetrics listens on `:8428`, Grafana on `:3001` (login `admin` / your
+password). Point the app at `http://<server-ip>:8428`.
 
 ## Building the Android app
 

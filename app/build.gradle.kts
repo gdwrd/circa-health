@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -15,9 +17,24 @@ android {
         versionName = "1.0"
     }
 
+    // Release signing: reads keystore.properties (gitignored) if present, else unsigned.
+    val ksProps = rootProject.file("keystore.properties")
+    if (ksProps.exists()) {
+        val p = Properties().apply { ksProps.inputStream().use { load(it) } }
+        signingConfigs {
+            create("release") {
+                storeFile = file(p.getProperty("storeFile"))
+                storePassword = p.getProperty("storePassword")
+                keyAlias = p.getProperty("keyAlias")
+                keyPassword = p.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (ksProps.exists()) signingConfig = signingConfigs.getByName("release")
         }
     }
 

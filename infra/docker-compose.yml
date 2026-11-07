@@ -1,0 +1,32 @@
+services:
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.131.0
+    container_name: ring-victoriametrics
+    restart: unless-stopped
+    ports:
+      - "8428:8428"
+    volumes:
+      - vm-data:/victoria-metrics-data
+    command:
+      - "--retentionPeriod=10y"
+
+  grafana:
+    image: grafana/grafana-oss:12.4.3
+    container_name: ring-grafana
+    restart: unless-stopped
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../grafana/biometrics.json:/var/lib/grafana/dashboards/biometrics.json:ro
+    depends_on:
+      - victoriametrics
+
+volumes:
+  vm-data:
+  grafana-data:
