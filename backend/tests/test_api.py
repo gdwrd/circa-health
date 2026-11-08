@@ -84,3 +84,70 @@ def test_night_without_end_ts(monkeypatch) -> None:
     monkeypatch.setattr(vm, "series", lambda expr, s, e, step: {t0: 420.0} if expr == "biometric_sleep_total_min" else {})
     n = main._night(d)
     assert n is not None and n["end"] == t0 + 420 * 60 and n["total_min"] == 420
+
+
+def _strain_day(monkeypatch, d: date, calm: bool = False) -> None:
+    """Score d from a faked night: strained = HR falling late to 75, HRV 20 ms, 60 min awake; calm = usual values."""
+    t0 = (vm.midnight(d) - timedelta(hours=1)).timestamp()
+    hr = [55.0] * 4 if calm else [90.0, 85.0, 80.0, 75.0]
+    night = {"biometric_sleep_total_min": {t0: 420.0}, "biometric_sleep_awake_min": {t0: 20.0 if calm else 60.0},
+             "biometric_hr_bpm": {t0 + i * 300: v for i, v in enumerate(hr)},
+             "biometric_hrv_rmssd": {t0: 50.0 if calm else 20.0}}
+    monkeypatch.setattr(vm, "series", lambda e, s, en, st: night.get(e, {}))
+    monkeypatch.setattr(vm, "forward_import", lambda b: httpx.Response(204))
+    main._score_day(d)
+
+
+def _calm_history(d: date, signals: dict | None = None, first: int = 1) -> None:
+    for i in range(first, 15):
+        c = {"inputs": {"rhr": 55.0 + i % 2, "hrv": 50.0 + i % 3, "awake": 20.0, "recovery": 0.3}}
+        if i == first and signals:
+            c["signals"] = signals
+        db.save_day(d - timedelta(i), (None, None, None), c, {})
+
+
+def test_strain_signals_streak_explain_and_trend(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "s.db"))
+    monkeypatch.delenv("TZ", raising=False)
+    db.init()
+    d = date.today()
+    _calm_history(d, {"streak": 1})
+    db.add_journal((d - timedelta(1)).isoformat(), "alcohol", None, None, 1)
+    db.add_journal((d - timedelta(1)).isoformat(), "caffeine_late", None, None, 2)
+    db.add_journal(d.isoformat(), "sick", None, None, 3)  # today's entry does not explain last night
+    _strain_day(monkeypatch, d)
+    sig = db.days(d, d)[0]["c"]["signals"]
+    assert set(sig["flags"]) == {"rhr", "hrv", "awake", "recovery"} and sig["streak"] == 2 and sig["level"] == "high"
+    monkeypatch.setattr(main, "_vitals", lambda: {})
+    with TestClient(app) as c:
+        j = c.get("/today", headers=H).json()["signals"]
+        assert j["status"] == "ok" and j["reason"] is None and j["explain"] == ["alcohol"]
+        assert {"index", "level", "flags", "streak", "available", "nights"} <= set(j) and j["nights"] == 14
+        t = c.get("/trends?metric=strain&days=3", headers=H).json()["points"]
+        assert t[-1]["value"] == sig["index"] and t[-2]["value"] is None
+
+
+def test_strain_streak_resets_and_medication_window(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "m.db"))
+    monkeypatch.delenv("TZ", raising=False)
+    db.init()
+    d = date.today()
+    _calm_history(d, {"streak": 3})
+    _strain_day(monkeypatch, d, calm=True)
+    sig = db.days(d, d)[0]["c"]["signals"]
+    assert sig["streak"] == 0 and sig["flags"] == {} and sig["level"] == "calm"
+    # d-1 missing below: a gap restarts the streak at 1
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "gap.db"))
+    db.init()
+    _calm_history(d, {"streak": 3}, first=2)
+    _strain_day(monkeypatch, d)
+    assert db.days(d, d)[0]["c"]["signals"]["streak"] == 1
+    _calm_history(d, {"streak": 3})
+    db.set_settings({"medication_started": (d - timedelta(3)).isoformat()})
+    _strain_day(monkeypatch, d)
+    sig = db.days(d, d)[0]["c"]["signals"]
+    assert sig["reason"] == "medication" and "rhr" not in sig["flags"] and "hrv" not in sig["flags"]
+    assert sig["nights"] == 3 and sig["available"] == 2  # awake + recovery still scored
+    monkeypatch.setattr(main, "_vitals", lambda: {})
+    with TestClient(app) as c:
+        assert c.get("/today", headers=H).json()["signals"]["status"] == "learning"

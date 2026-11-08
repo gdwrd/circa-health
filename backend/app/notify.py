@@ -3,13 +3,19 @@ from contextlib import closing
 from datetime import date, datetime, timedelta
 from statistics import median
 
-from . import db, vm
+from . import db, scoring, vm
 
 log = logging.getLogger("ring")
 
 WORDS = {"resting_hr": "resting heart rate", "hrv_balance": "heart rate variability", "sleep": "last night's sleep",
          "sleep_balance": "sleep balance", "previous_day_activity": "yesterday's activity",
          "activity_balance": "recent activity balance", "recovery_index": "overnight recovery"}
+
+
+NOUNS = {"rhr": ("Resting HR", " bpm"), "hrv": ("HRV", " %"), "awake": ("awake time", " min"),
+         "spo2": ("blood oxygen", " %"), "temp": ("temperature", " °C")}
+LOGGED = {"alcohol": "alcohol", "workout": "a workout", "sick": "feeling unwell", "travel": "travel",
+          "stress": "stress", "late_meal": "a late meal"}
 
 
 def _now() -> datetime:
@@ -109,9 +115,45 @@ def _weekly(now: datetime, dates: set[date]) -> None:
     _add("weekly", "Your week", body, now)
 
 
+def explain(d: date) -> list[str]:
+    """Journal kinds logged the day before d that commonly raise the strain inputs."""
+    y = (d - timedelta(1)).isoformat()
+    kinds = {r["kind"] for r in db.journal(y) if r["date"] == y}
+    return [k for k in scoring.EXPLAIN if k in kinds]
+
+
+def _join(parts: list[str]) -> str:
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+def _strain(now: datetime, dates: set[date]) -> None:
+    """Level above calm for 2+ nights, at most once per 3 days. Copy says "may", never names an illness."""
+    d = now.date()
+    row = next(iter(db.days(d, d)), None)
+    sig = row and row["c"].get("signals")
+    if not sig or sig["level"] in (None, "calm") or sig["streak"] < 2:
+        return
+    last = db.query("SELECT created_at FROM notifications WHERE kind='strain' ORDER BY id DESC LIMIT 1")
+    if last and now - datetime.fromisoformat(last[0]["created_at"]) < timedelta(days=3):
+        return
+    parts = []
+    for k in sig["flags"]:
+        if k == "recovery":
+            parts.append("overnight recovery later")
+            continue
+        delta = 100 * sig["deltas"][k] / sig["usual"][k] if k == "hrv" else sig["deltas"][k]
+        name, unit = NOUNS[k]
+        parts.append(f"{name} {round(delta):+d}{unit}".replace("-", "−"))
+    body = f"{_join(parts)} vs your usual for {sig['streak']} nights. Rest and hydrate; see a doctor if you feel unwell."
+    logged = explain(d)
+    if logged:
+        body += f" You logged {_join([LOGGED[k] for k in logged])} yesterday, which can cause this."
+    _add("strain", "Your body may be under strain", body, now)
+
+
 def evaluate(dates: set[date]) -> None:
     now = _now()
-    for rule in (_readiness, _bedtime, _inactivity, _battery, _weekly):
+    for rule in (_readiness, _bedtime, _inactivity, _battery, _weekly, _strain):
         try:
             rule(now, dates)
         except Exception:

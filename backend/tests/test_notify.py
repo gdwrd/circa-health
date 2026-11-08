@@ -1,3 +1,4 @@
+import re
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -160,3 +161,47 @@ def test_weekly_needs_three_days(monkeypatch, env) -> None:
     at(monkeypatch, 9)
     notify.evaluate(set())
     assert kinds() == []
+
+
+def seed_strain(d: date, streak: int, level: str = "elevated") -> None:
+    sig = {"index": 40, "level": level, "flags": {"rhr": 3.0, "hrv": 2.0, "recovery": 2.5}, "streak": streak,
+           "deltas": {"rhr": 6.2, "hrv": -10.0, "recovery": 0.3}, "usual": {"rhr": 55.0, "hrv": 50.0, "recovery": 0.3}}
+    db.save_day(d, (None, None, None), {"signals": sig}, {})
+
+
+ILLNESS = re.compile(r"(sick|ill|illness|infection|flu|covid)", re.I)
+
+
+def test_strain_needs_streak_two_and_not_calm(monkeypatch) -> None:
+    seed_strain(D, 1)
+    at(monkeypatch, 9)
+    notify.evaluate(set())
+    seed_strain(D, 3, "calm")
+    notify.evaluate(set())
+    assert kinds() == []
+    seed_strain(D, 2)
+    notify.evaluate(set())
+    (n,) = notify.pending()
+    assert n["title"] == "Your body may be under strain"
+    assert n["body"] == ("Resting HR +6 bpm, HRV −20 % and overnight recovery later vs your usual for 2 nights. "
+                         "Rest and hydrate; see a doctor if you feel unwell.")
+
+
+def test_strain_once_per_three_days_and_explain(monkeypatch) -> None:
+    seed_strain(D, 2)
+    db.add_journal((D - timedelta(1)).isoformat(), "sick", None, None, 1)
+    db.add_journal((D - timedelta(1)).isoformat(), "alcohol", None, None, 2)
+    at(monkeypatch, 9)
+    notify.evaluate(set())
+    for k in (1, 2):
+        seed_strain(D + timedelta(k), 2 + k)
+        at(monkeypatch, 9, day=D + timedelta(k))
+        notify.evaluate(set())
+    assert kinds() == ["strain"]
+    body = notify.pending()[0]["body"]
+    assert body.endswith(" You logged alcohol and feeling unwell yesterday, which can cause this.")
+    assert not ILLNESS.search(body) and not ILLNESS.search(notify.pending()[0]["title"])
+    seed_strain(D + timedelta(3), 5)
+    at(monkeypatch, 9, day=D + timedelta(3))
+    notify.evaluate(set())
+    assert kinds() == ["strain", "strain"]

@@ -3,8 +3,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.scoring import (activity_score, baseline, readiness_score, resilience,
-                         sleep_score, stress_zones)
+from app.scoring import (activity_score, baseline, readiness_score, resilience, robust,
+                         sleep_score, strain, stress_zones)
 
 GOOD = {"total_min": 480, "awake_min": 8, "rem_min": 100, "deep_min": 100, "midpoint_h": 2.0}
 SHORT = {"total_min": 240, "awake_min": 20, "rem_min": 40, "deep_min": 30, "midpoint_h": 1.0}
@@ -71,3 +71,32 @@ def test_resilience():
     assert resilience([1] * 4, [90] * 14) is None
     assert resilience([0.5] * 14, [92] * 14) == "exceptional"
     assert resilience([7] * 14, [50] * 14) == "limited"
+
+
+def test_robust_needs_seven_and_floors():
+    assert robust([50, 51, 52, 53, 54, 55]) is None
+    assert robust([50, None, 51, 52, 53, 54, 55, None]) is None
+    m, spread = robust([50, 52, 54, 56, 58, 60, 100])
+    assert m == 56 and abs(spread - 1.4826 * 4) < 1e-9  # MAD ignores the outlier
+    assert robust([55] * 7, 1.5) == (55, 1.5)
+
+
+BASES = {"rhr": (55, 2.0), "hrv": (50, 10.0), "awake": (20, 10.0), "recovery": (0.3, 0.1)}
+
+
+def test_strain_calm_night():
+    r = strain({"rhr": 55, "hrv": 52, "awake": 18, "recovery": 0.3}, BASES)
+    assert r["index"] < 25 and r["level"] == "calm" and r["flags"] == {} and r["available"] == 4
+
+
+def test_strain_two_flags():
+    r = strain({"rhr": 61, "hrv": 30, "awake": 20, "recovery": 0.3}, BASES)
+    assert r["flags"] == {"rhr": 3.0, "hrv": 2.0} and r["deltas"] == {"rhr": 6, "hrv": -20}
+    assert r["index"] == round(100 * (1 + 2 / 3) / 4) == 42 and r["level"] == "elevated"
+    assert strain({"rhr": 70, "hrv": 10}, BASES)["level"] == "high"
+
+
+def test_strain_missing_inputs():
+    r = strain({"rhr": 61, "hrv": None, "spo2": None, "temp": None}, BASES)
+    assert r["available"] == 1 and r["index"] is None and r["level"] is None
+    assert strain({"rhr": 61, "hrv": 50}, {**BASES, "rhr": None})["index"] is None

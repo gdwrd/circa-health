@@ -1,5 +1,5 @@
 """Pure scoring functions (no I/O). Scores are approximations against personal 14-day baselines."""
-from statistics import mean
+from statistics import mean, median
 
 Contribs = dict[str, float | None]
 
@@ -96,3 +96,34 @@ def resilience(stress_loads_14d: list[float | None], readiness_14d: list[float |
     r = sum(ready >= t for t in (60, 70, 80, 88))  # 0-4, higher readiness is better
     s = sum(load <= t for t in (6, 4, 2, 1))       # 0-4, lower stress load is better
     return _LEVELS[(r + s) // 2]
+
+
+# Strain inputs: +1 = higher is worse, -1 = lower is worse. temp is reserved (R09), always null for now.
+DIRS = {"rhr": 1, "hrv": -1, "awake": 1, "recovery": 1, "spo2": -1, "temp": 1}
+FLOORS = {"rhr": 1.5, "hrv": 5.0, "awake": 10.0, "recovery": 0.10, "spo2": 1.0}
+EXPLAIN = ("alcohol", "workout", "sick", "travel", "stress", "late_meal")
+
+
+def robust(values_14d: list[float | None], floor: float = 0.0) -> tuple[float, float] | None:
+    """Trailing 14-day (median, max(1.4826 x MAD, floor)); None until at least 7 values exist."""
+    vals = [v for v in values_14d[-14:] if v is not None]
+    if len(vals) < 7:
+        return None
+    m = median(vals)
+    return m, max(1.4826 * median(abs(v - m) for v in vals), floor)
+
+
+def strain(night: dict, base: dict) -> dict:
+    """night: {input: value}; base: {input: robust() result}. Positive z = worse; index needs 2 inputs."""
+    zs, deltas, usual = {}, {}, {}
+    for k, sign in DIRS.items():
+        x, b = night.get(k), base.get(k)
+        if x is None or b is None:
+            continue
+        zs[k] = sign * (x - b[0]) / b[1]
+        deltas[k], usual[k] = x - b[0], b[0]
+    flagged = [k for k, z in zs.items() if z >= 1.5]
+    index = round(100 * mean(max(0.0, min(1.0, z / 3)) for z in zs.values())) if len(zs) >= 2 else None
+    level = None if index is None else "calm" if index < 25 else "elevated" if index <= 50 else "high"
+    return {"index": index, "level": level, "flags": {k: round(zs[k], 2) for k in flagged},
+            "deltas": {k: deltas[k] for k in flagged}, "usual": {k: usual[k] for k in flagged}, "available": len(zs)}

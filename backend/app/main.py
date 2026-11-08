@@ -70,7 +70,8 @@ def _score_day(d: date) -> None:
                  "hr_p10": sorted(hr)[int(0.1 * (len(hr) - 1))] if hr else None,
                  "hrv_mean": mean(hrv) if hrv else None,
                  "recovery_frac": next(i for i, v in enumerate(hr) if v <= min(hr) * 1.05) / len(hr) if hr else None}
-        inputs |= {"rhr": night["hr_p10"], "hrv": night["hrv_mean"]}
+        inputs |= {"rhr": night["hr_p10"], "hrv": night["hrv_mean"], "awake": n["awake_min"],
+                   "recovery": night["recovery_frac"]}
         y = _hourly("biometric_steps", d - timedelta(1))
         ready = scoring.readiness_score(night, base, sum(y.values()) if y else None, goal)
 
@@ -90,9 +91,21 @@ def _score_day(d: date) -> None:
     zones = scoring.stress_zones(st) if st else None
     inputs["stress_load"] = zones and zones["stressed_hours"]
 
+    med = db.settings()["medication_started"]  # rhr/hrv baselines use only days on medication (new normal)
+    window = {k: [p["inputs"].get(k) for p in prior if not med or k not in ("rhr", "hrv") or p["date"].isoformat() >= med]
+              for k in scoring.DIRS}
+    rb = {k: scoring.robust(v, scoring.FLOORS.get(k, 0.0)) for k, v in window.items()}
+    sig = scoring.strain(inputs, rb)
+    prev = next((p for p in prior if p["date"] == d - timedelta(1)), None)
+    sig["streak"] = (((prev and prev["c"].get("signals")) or {}).get("streak", 0) + 1) if len(sig["flags"]) >= 2 else 0
+    sig["nights"] = sum(1 for v in window["rhr"] if v is not None)
+    med_short = bool(med) and med > (d - timedelta(14)).isoformat() and rb["rhr"] is None
+    sig["reason"] = "medication" if med_short else "baseline" if sig["index"] is None else None
+
     scores = tuple(r and r["score"] for r in (sleep, ready, activity))
     contributors = {"sleep": sleep and sleep["contributors"], "readiness": ready and ready["contributors"],
-                    "activity": activity and activity["contributors"], "inputs": inputs, "stress": zones, "session": n}
+                    "activity": activity and activity["contributors"], "inputs": inputs, "stress": zones, "session": n,
+                    "signals": sig}
     kept = {k: v for k, v in base.items() if v is not None}
     db.save_day(d, scores, contributors, kept)
     vals = {"score_sleep": scores[0], "score_readiness": scores[1], "score_activity": scores[2],
@@ -167,6 +180,7 @@ def today() -> dict:
     rows = db.days(d - timedelta(13), d)
     n = sum(1 for r in rows if r["inputs"].get("sleep_min") is not None)
     row = next((r for r in rows if r["date"] == d), None) or {"c": {}}
+    sig = row["c"].get("signals") or {"index": None, "level": None, "flags": {}, "streak": 0, "reason": "baseline"}
     return {
         "status": "ok" if n >= 5 else "learning", "date": d.isoformat(), "baseline_days": f"{n}/14",
         **{k: {"score": row.get(f"{k}_score"), "contributors": row["c"].get(k)} for k in ("sleep", "readiness", "activity")},
@@ -174,6 +188,7 @@ def today() -> dict:
         "resilience": scoring.resilience([r["inputs"].get("stress_load") for r in rows],
                                          [r["readiness_score"] for r in rows]),
         "vitals": _vitals(),
+        "signals": {**sig, "status": "learning" if sig["reason"] else "ok", "explain": notify.explain(d)},
     }
 
 
@@ -199,13 +214,14 @@ INPUTS = ("rhr", "hrv", "steps", "sleep_min", "stress_load")
 
 @api.get("/trends")
 def trends(metric: str, days: int = 30) -> dict:
-    if metric not in SCORES and metric not in INPUTS:
+    if metric not in SCORES and metric not in INPUTS and metric != "strain":
         raise HTTPException(422, "unknown metric")
     end = _today()
     start = end - timedelta(max(days, 1) - 1)
     base = db.baselines(metric, start, end) if metric in INPUTS else {}
     pts = [{"date": r["date"].isoformat(),
-            "value": r[SCORES[metric]] if metric in SCORES else r["inputs"].get(metric),
+            "value": r[SCORES[metric]] if metric in SCORES else
+            (r["c"].get("signals") or {}).get("index") if metric == "strain" else r["inputs"].get(metric),
             "baseline": base.get(r["date"].isoformat())} for r in db.days(start, end)]
     return {"metric": metric, "days": days, "points": pts}
 
