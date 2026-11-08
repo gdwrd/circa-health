@@ -1,5 +1,5 @@
 """Pure scoring functions (no I/O). Scores are approximations against personal 14-day baselines."""
-from statistics import mean, median
+from statistics import mean, median, pstdev
 
 Contribs = dict[str, float | None]
 
@@ -26,9 +26,10 @@ def baseline(values_14d: list[float | None]) -> float | None:
 
 
 def sleep_score(session: dict, need_min: float) -> dict:
-    """session: total_min (asleep), awake_min, rem_min, deep_min, midpoint_h (local hour 0-24)."""
+    """session: total_min (asleep), awake_min, rem_min, deep_min, midpoint_h (local hour 0-24),
+    regularity_sd (minutes, from regularity(); None while learning)."""
     asleep, awake = session["total_min"], session["awake_min"]
-    h = session["midpoint_h"]
+    h, sd = session["midpoint_h"], session.get("regularity_sd")
     outside = 0.0 if h <= 3 else min(h - 3, 24 - h)  # hours outside 00:00-03:00, wrapping at midnight
     eff = asleep / (asleep + awake) if asleep + awake else 0.0
     return _result({
@@ -38,7 +39,19 @@ def sleep_score(session: dict, need_min: float) -> dict:
         "rem": _lin(session["rem_min"], 0, 90),
         "deep": _lin(session["deep_min"], 0, 90),
         "timing": max(0.0, 100 - 33 * outside),
+        "regularity": None if sd is None else _lin(sd, 120, 30),
     })
+
+
+def regularity(midpoints_min: list[float]) -> float | None:
+    """SD (minutes) of the last 7 nights' sleep midpoints; None under 4 nights."""
+    m = midpoints_min[-7:]
+    return pstdev(m) if len(m) >= 4 else None
+
+
+def low_index(hr: list[float]) -> int:
+    """Index of the first sample within 5 % of the minimum (night HR near its low)."""
+    return next(i for i, v in enumerate(hr) if v <= min(hr) * 1.05)
 
 
 def readiness_score(night: dict, baselines: dict, yesterday_steps: float | None, goal: float) -> dict:

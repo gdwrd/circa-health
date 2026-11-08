@@ -3,10 +3,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.scoring import (activity_score, baseline, readiness_score, resilience, robust,
+from app.scoring import (activity_score, baseline, low_index, readiness_score, regularity, resilience, robust,
                          sleep_score, strain, stress_zones)
 
-GOOD = {"total_min": 480, "awake_min": 8, "rem_min": 100, "deep_min": 100, "midpoint_h": 2.0}
+GOOD = {"total_min": 480, "awake_min": 8, "rem_min": 100, "deep_min": 100, "midpoint_h": 2.0, "regularity_sd": 20}
 SHORT = {"total_min": 240, "awake_min": 20, "rem_min": 40, "deep_min": 30, "midpoint_h": 1.0}
 
 
@@ -100,3 +100,16 @@ def test_strain_missing_inputs():
     r = strain({"rhr": 61, "hrv": None, "spo2": None, "temp": None}, BASES)
     assert r["available"] == 1 and r["index"] is None and r["level"] is None
     assert strain({"rhr": 61, "hrv": 50}, {**BASES, "rhr": None})["index"] is None
+
+
+def test_regularity_curve_and_learning():
+    assert regularity([900, 900, 900]) is None  # under 4 nights
+    assert regularity([999, 0, 0, 0, 0, 0, 0, 0]) == 0  # only the last 7 nights count
+    assert regularity([840, 960, 840, 960]) == 60
+    c = lambda sd: sleep_score({**GOOD, "regularity_sd": sd}, 450)["contributors"]["regularity"]
+    assert c(30) == 100 and c(20) == 100 and c(120) == 0 and c(200) == 0 and c(75) == 50
+    assert c(None) is None and sleep_score({**GOOD, "regularity_sd": None}, 450)["score"] >= 95
+
+
+def test_low_index_first_near_minimum():
+    assert low_index([60, 58, 52, 50, 51]) == 2  # 52 <= 50 x 1.05

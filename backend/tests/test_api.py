@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta
 import httpx
 from fastapi.testclient import TestClient
 
-from app import db, main, vm
+from app import db, main, scoring, vm
 from app.main import app
 
 H = {"Authorization": "Bearer secret"}
@@ -82,7 +82,7 @@ def test_night_without_end_ts(monkeypatch) -> None:
     d = date.today()
     t0 = (vm.midnight(d) - timedelta(minutes=30)).timestamp()
     monkeypatch.setattr(vm, "series", lambda expr, s, e, step: {t0: 420.0} if expr == "biometric_sleep_total_min" else {})
-    n = main._night(d)
+    n = main._sessions(d)[0]
     assert n is not None and n["end"] == t0 + 420 * 60 and n["total_min"] == 420
 
 
@@ -151,3 +151,62 @@ def test_strain_streak_resets_and_medication_window(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(main, "_vitals", lambda: {})
     with TestClient(app) as c:
         assert c.get("/today", headers=H).json()["signals"]["status"] == "learning"
+
+
+def test_sleep_depth_naps_regularity_spo2_wear(tmp_path, monkeypatch) -> None:
+    """Yesterday (all 24 h past): 23:00-06:20 main night, 35 min nap kept, 10 min nap dropped, ring off 10:00 on."""
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "c1.db"))
+    monkeypatch.delenv("TZ", raising=False)
+    db.init()
+    d = date.today() - timedelta(1)
+    m = vm.midnight(d).timestamp()
+    t0, nap, short = m - 3600, m + 13 * 3600, m + 16 * 3600
+    for i in range(1, 6):  # same 23:00-06:20 nights; 400 min + 30 min naps
+        ps = vm.midnight(d - timedelta(i)).timestamp() - 3600
+        db.save_day(d - timedelta(i), (None, None, None), {"inputs": {"sleep_min": 400.0, "nap_min": 30.0},
+                    "session": {"start": ps, "end": ps + 440 * 60}}, {})
+    data = {"biometric_sleep_end_ts": {t0: t0 + 440 * 60, nap: nap + 40 * 60, short: short + 600},
+            "biometric_sleep_total_min": {t0: 420.0, nap: 35.0, short: 10.0},
+            "biometric_sleep_awake_min": {t0: 20.0, nap: 5.0},
+            "biometric_hr_bpm": {**{t0 + i * 300: v for i, v in enumerate([60.0, 58.0, 52.0, 50.0, 51.0, 55.0])},
+                                 m + 3 * 3600: 50.0, m + 8 * 3600: 70.0, m + 8 * 3600 + 300: 72.0,
+                                 m + 9 * 3600: 70.0, m + 10 * 3600: 0.0},
+            "biometric_spo2_pct": {t0 + 300: 95.0, t0 + 3600: 88.0, t0 + 7200: 0.0, m + 10 * 3600: 99.0},
+            "biometric_steps": {m + 8 * 3600: 300.0, m + 9 * 3600: 10.0, m + 12 * 3600: 0.0}}
+    monkeypatch.setattr(vm, "series", lambda e, s, en, st: {t: v for t, v in data.get(e, {}).items()
+                                                            if s.timestamp() <= t <= en.timestamp()})
+    monkeypatch.setattr(vm, "forward_import", lambda b: httpx.Response(204))
+    main._score_day(d)
+    c = db.days(d, d)[0]["c"]
+    i, x = c["inputs"], c["sleep_extra"]
+    assert i["sleep_min"] == 420 and i["nap_min"] == 35 and [n["total_min"] for n in x["naps"]] == [35]
+    assert c["readiness"]["sleep_balance"] == scoring._lin(430, 240, db.setting("sleep_need_min"))  # 400 + 30 nap
+    assert x["regularity"] == {"sd_min": 0, "nights": 6, "bed_start_median": 660, "bed_end_median": 1100}
+    assert c["sleep"]["regularity"] == 100
+    assert x["spo2"] == {"mean": 91.5, "min": 88.0, "low_count": 1, "n": 2} and i["spo2"] == 88
+    assert x["hr_low_t"] == t0 + 600
+    assert i["bed_start"] == 660 and i["bed_end"] == 1100  # 23:00 / 06:20 as minutes after noon
+    # worn: hours 3, 8, 9; awake = 24 - 7 (night) - 2 (naps); hour 12 has 0 steps but the ring was off
+    assert i["worn_hours"] == 3 and c["wear"] == {"worn_hours": 2, "awake_hours": 15}
+    assert c["activity"]["inactive_hours"] == 100  # 1 inactive worn hour; counting ring-off hours would give 0
+    monkeypatch.setattr(main, "_today", lambda: d)
+    monkeypatch.setattr(main, "_vitals", lambda: {})
+    with TestClient(app) as cl:
+        s = cl.get(f"/sleep?date={d}", headers=H).json()
+        assert s["naps"] == x["naps"] and len(s["hr"]) == 7 and s["hr_low"] == {"t": t0 + 600, "bpm": 52.0}
+        assert cl.get("/today", headers=H).json()["wear"] == {"worn_hours": 2, "awake_hours": 15}
+        assert cl.get("/trends?metric=bed_start&days=2", headers=H).json()["points"][-1]["value"] == 660
+
+
+def test_spo2_null_without_samples(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "o2.db"))
+    db.init()
+    d = date.today() - timedelta(1)
+    t0 = vm.midnight(d).timestamp() - 3600
+    monkeypatch.setattr(vm, "series", lambda e, s, en, st: {t0: 420.0} if e == "biometric_sleep_total_min" else
+                        {t0: 0.0} if e == "biometric_spo2_pct" else {})
+    monkeypatch.setattr(vm, "forward_import", lambda b: httpx.Response(204))
+    main._score_day(d)
+    c = db.days(d, d)[0]["c"]
+    assert c["sleep_extra"]["spo2"] is None and c["inputs"]["spo2"] is None and c["sleep_extra"]["regularity"]["sd_min"] is None
+    assert c["sleep"]["regularity"] is None and c["sleep_extra"]["naps"] == [] and c["inputs"]["nap_min"] == 0

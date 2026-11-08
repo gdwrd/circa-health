@@ -6,7 +6,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
-from statistics import mean
+from statistics import mean, median
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -29,64 +29,93 @@ def _hourly(metric: str, d: date) -> dict[int, float]:
     return {datetime.fromtimestamp(t, vm.tz()).hour: v for t, v in vm.series(metric, vm.midnight(d), end, "1h").items()}
 
 
-def _night(d: date) -> dict | None:
-    """Longest session ending on d. shortcut: start is the 5 min query grid point, upgrade if timing matters."""
+def _after_noon(ts: float) -> int:
+    """Local minutes after noon (as notify._bedtime): no wrap at midnight."""
+    t = datetime.fromtimestamp(ts, vm.tz())
+    return (t.hour * 60 + t.minute - 720) % 1440
+
+
+def _sessions(d: date) -> list[dict]:
+    """Sessions ending on d, longest (main) first. shortcut: start is the 5 min query grid point, upgrade if timing matters."""
     lo, hi = vm.midnight(d) - timedelta(hours=12), vm.midnight(d + timedelta(1))
     ends = vm.series("biometric_sleep_end_ts", lo, hi, "5m")
     parts = {k: vm.series(f"biometric_sleep_{k}_min", lo, hi, "5m") for k in ("total", "awake", "rem", "deep")}
     for t, total in parts["total"].items():  # sessions pushed before app v1.1 have no end_ts
         ends.setdefault(t, t + (total + parts["awake"].get(t, 0.0)) * 60)
-    best = None
+    out = []
     for end in set(ends.values()):
         if datetime.fromtimestamp(end, vm.tz()).date() != d:
             continue
         start = min(t for t, v in ends.items() if v == end)
-        s = {"start": start, "end": end, **{f"{k}_min": parts[k].get(start, 0.0) for k in parts}}
-        if best is None or s["total_min"] > best["total_min"]:
-            best = s
-    return best
+        out.append({"start": start, "end": end, **{f"{k}_min": parts[k].get(start, 0.0) for k in parts}})
+    return sorted(out, key=lambda s: -s["total_min"])
 
 
 def _score_day(d: date) -> None:
     goal, need = db.setting("step_goal"), db.setting("sleep_need_min")
     prior = db.days(d - timedelta(14), d - timedelta(1))
-    base = {k: scoring.baseline([p["inputs"].get(k) for p in prior]) for k in ("rhr", "hrv", "sleep_min", "steps")}
+
+    def val(i: dict, k: str) -> float | None:  # sleep balance counts naps
+        return i["sleep_min"] + (i.get("nap_min") or 0) if k == "sleep_min" and i.get(k) is not None else i.get(k)
+
+    base = {k: scoring.baseline([val(p["inputs"], k) for p in prior]) for k in ("rhr", "hrv", "sleep_min", "steps")}
     week = [p["inputs"] for p in prior if p["date"] >= d - timedelta(7)]
     now = datetime.now(vm.tz())
-    n = _night(d)
+    ss = _sessions(d)
+    n = ss[0] if ss else None
+    naps = [{k: x[k] for k in ("start", "end", "total_min")} for x in ss[1:] if x["total_min"] >= 20]
 
     def awake(ts: float) -> bool:
-        return ts <= now.timestamp() and not (n and n["start"] <= ts < n["end"])
+        return ts <= now.timestamp() and not any(x["start"] <= ts < x["end"] for x in ss)
 
-    inputs: dict = {"sleep_min": n and n["total_min"]}
+    inputs: dict = {"sleep_min": n and n["total_min"], "nap_min": sum(x["total_min"] for x in naps)}
+    extra: dict = {"naps": naps, "regularity": None, "spo2": None, "hr_low_t": None}
     sleep = ready = None
     if n:
         s, e = datetime.fromtimestamp(n["start"], vm.tz()), datetime.fromtimestamp(n["end"], vm.tz())
         mid = datetime.fromtimestamp((n["start"] + n["end"]) / 2, vm.tz())
-        sleep = scoring.sleep_score({**n, "midpoint_h": mid.hour + mid.minute / 60}, need)
-        hr = [v for v in vm.series("biometric_hr_bpm", s, e, "5m").values() if v > 0]
+        week_n = [p["c"]["session"] for p in prior if p["date"] >= d - timedelta(6) and p["c"].get("session")] + [n]
+        sd = scoring.regularity([_after_noon((x["start"] + x["end"]) / 2) for x in week_n])
+        extra["regularity"] = {"sd_min": sd, "nights": len(week_n),
+                               "bed_start_median": median(_after_noon(x["start"]) for x in week_n),
+                               "bed_end_median": median(_after_noon(x["end"]) for x in week_n)}
+        sleep = scoring.sleep_score({**n, "midpoint_h": mid.hour + mid.minute / 60, "regularity_sd": sd}, need)
+        hrs = {t: v for t, v in vm.series("biometric_hr_bpm", s, e, "5m").items() if v > 0}
+        hr = list(hrs.values())
+        low = scoring.low_index(hr) if hr else None
         hrv = [v for v in vm.series("biometric_hrv_rmssd", s, e, "30m").values() if v > 0]
+        # shortcut: 1 h step assumes periodic SpO2 is 30-60 min apart, upgrade if the ring samples faster
+        sp = [v for v in vm.series("biometric_spo2_pct", s, e, "1h").values() if v > 0]
+        extra["spo2"] = {"mean": mean(sp), "min": min(sp), "low_count": sum(v < 90 for v in sp), "n": len(sp)} if sp else None
+        extra["hr_low_t"] = list(hrs)[low] if hr else None
         night = {"sleep_score": sleep["score"], "need_min": need,
                  "hr_p10": sorted(hr)[int(0.1 * (len(hr) - 1))] if hr else None,
                  "hrv_mean": mean(hrv) if hrv else None,
-                 "recovery_frac": next(i for i, v in enumerate(hr) if v <= min(hr) * 1.05) / len(hr) if hr else None}
+                 "recovery_frac": low / len(hr) if hr else None}
         inputs |= {"rhr": night["hr_p10"], "hrv": night["hrv_mean"], "awake": n["awake_min"],
-                   "recovery": night["recovery_frac"]}
+                   "recovery": night["recovery_frac"], "spo2": min(sp) if sp else None,
+                   "bed_start": _after_noon(n["start"]), "bed_end": _after_noon(n["end"])}
         y = _hourly("biometric_steps", d - timedelta(1))
         ready = scoring.readiness_score(night, base, sum(y.values()) if y else None, goal)
+
+    end = vm.midnight(d + timedelta(1)) - timedelta(seconds=1)
+    worn = {datetime.fromtimestamp(t, vm.tz()).hour for t, v in vm.series("biometric_hr_bpm", vm.midnight(d), end, "5m").items()
+            if v > 0 and t <= now.timestamp()}
+    awake_h = [h for h in range(24) if awake((vm.midnight(d) + timedelta(hours=h)).timestamp())]
+    inputs["worn_hours"] = len(worn)
+    wear = {"worn_hours": sum(h in worn for h in awake_h), "awake_hours": len(awake_h)}  # both over awake hours
 
     steps, cal = _hourly("biometric_steps", d), _hourly("biometric_calories", d)
     activity = None
     if steps:
         inputs |= {"steps": sum(steps.values()), "calories": sum(cal.values()) if cal else None}
-        hours = [steps.get(h, 0.0) for h in range(24) if awake((vm.midnight(d) + timedelta(hours=h)).timestamp())]
+        hours = [steps.get(h, 0.0) for h in awake_h if h in worn]  # ring off is not inactive
         goal_days = None
         if scoring.baseline([w.get("steps") for w in week]) is not None:
             goal_days = sum(1 for w in week if (w.get("steps") or 0) >= goal)
         activity = scoring.activity_score({"steps": inputs["steps"], "calories": inputs["calories"],
                                            "awake_hourly_steps": hours}, goal,
                                           scoring.baseline([w.get("calories") for w in week]), goal_days)
-    end = vm.midnight(d + timedelta(1)) - timedelta(seconds=1)
     st = [v for t, v in vm.series("biometric_stress", vm.midnight(d), end, "30m").items() if v > 0 and awake(t)]
     zones = scoring.stress_zones(st) if st else None
     inputs["stress_load"] = zones and zones["stressed_hours"]
@@ -105,7 +134,7 @@ def _score_day(d: date) -> None:
     scores = tuple(r and r["score"] for r in (sleep, ready, activity))
     contributors = {"sleep": sleep and sleep["contributors"], "readiness": ready and ready["contributors"],
                     "activity": activity and activity["contributors"], "inputs": inputs, "stress": zones, "session": n,
-                    "signals": sig}
+                    "signals": sig, "sleep_extra": extra, "wear": wear}
     kept = {k: v for k, v in base.items() if v is not None}
     db.save_day(d, scores, contributors, kept)
     vals = {"score_sleep": scores[0], "score_readiness": scores[1], "score_activity": scores[2],
@@ -188,6 +217,7 @@ def today() -> dict:
         "resilience": scoring.resilience([r["inputs"].get("stress_load") for r in rows],
                                          [r["readiness_score"] for r in rows]),
         "vitals": _vitals(),
+        "wear": row["c"].get("wear"),
         "signals": {**sig, "status": "learning" if sig["reason"] else "ok", "explain": notify.explain(d)},
     }
 
@@ -201,15 +231,19 @@ def sleep(day: str | None = Query(None, alias="date")) -> dict:
     row = next(iter(db.days(d, d)), {"c": {}})
     n = row["c"].get("session")
     stages: list[dict] = []
+    hr: list[dict] = []
     if n:
         s, e = (datetime.fromtimestamp(n[k], vm.tz()) for k in ("start", "end"))
         stages = [{"t": t, "stage": int(v)} for t, v in vm.series("last_over_time(biometric_sleep_stage[3h])", s, e, "5m").items() if t < n["end"]]
+        hr = [{"t": t, "bpm": v} for t, v in vm.series("biometric_hr_bpm", s, e, "5m").items() if v > 0]  # as _score_day
     return {"date": d.isoformat(), "status": "ok" if n else "learning", "score": row.get("sleep_score"),
-            "contributors": row["c"].get("sleep"), "session": n, "stages": stages}
+            "contributors": row["c"].get("sleep"), "session": n, "stages": stages,
+            "naps": (row["c"].get("sleep_extra") or {}).get("naps", []), "hr": hr,
+            "hr_low": hr[scoring.low_index([p["bpm"] for p in hr])] if hr else None}
 
 
 SCORES = {"sleep": "sleep_score", "readiness": "readiness_score", "activity": "activity_score"}
-INPUTS = ("rhr", "hrv", "steps", "sleep_min", "stress_load")
+INPUTS = ("rhr", "hrv", "steps", "sleep_min", "stress_load", "bed_start")
 
 
 @api.get("/trends")
