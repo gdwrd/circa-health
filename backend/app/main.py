@@ -238,7 +238,7 @@ def sleep(day: str | None = Query(None, alias="date")) -> dict:
         hr = [{"t": t, "bpm": v} for t, v in vm.series("biometric_hr_bpm", s, e, "5m").items() if v > 0]  # as _score_day
     return {"date": d.isoformat(), "status": "ok" if n else "learning", "score": row.get("sleep_score"),
             "contributors": row["c"].get("sleep"), "session": n, "stages": stages,
-            "naps": (row["c"].get("sleep_extra") or {}).get("naps", []), "hr": hr,
+            "naps": (row["c"].get("sleep_extra") or {}).get("naps", []), "hr": hr, "sleep_extra": row["c"].get("sleep_extra"),
             "hr_low": hr[scoring.low_index([p["bpm"] for p in hr])] if hr else None}
 
 

@@ -194,6 +194,7 @@ def test_sleep_depth_naps_regularity_spo2_wear(tmp_path, monkeypatch) -> None:
     with TestClient(app) as cl:
         s = cl.get(f"/sleep?date={d}", headers=H).json()
         assert s["naps"] == x["naps"] and len(s["hr"]) == 7 and s["hr_low"] == {"t": t0 + 600, "bpm": 52.0}
+        assert s["sleep_extra"]["regularity"] == x["regularity"] and s["sleep_extra"]["spo2"] == x["spo2"] is not None
         assert cl.get("/today", headers=H).json()["wear"] == {"worn_hours": 2, "awake_hours": 15}
         assert cl.get("/trends?metric=bed_start&days=2", headers=H).json()["points"][-1]["value"] == 660
 

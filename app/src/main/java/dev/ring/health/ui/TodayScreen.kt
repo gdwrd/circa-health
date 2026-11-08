@@ -82,7 +82,7 @@ import java.util.Locale
 
 private val NAMES = mapOf(
     "total" to "Total sleep", "efficiency" to "Efficiency", "restfulness" to "Restfulness", "rem" to "REM sleep",
-    "deep" to "Deep sleep", "timing" to "Timing", "resting_hr" to "Resting heart rate", "hrv_balance" to "HRV balance",
+    "deep" to "Deep sleep", "timing" to "Timing", "regularity" to "Regularity", "resting_hr" to "Resting heart rate", "hrv_balance" to "HRV balance",
     "sleep" to "Sleep", "sleep_balance" to "Sleep balance", "previous_day_activity" to "Previous day activity",
     "activity_balance" to "Activity balance", "recovery_index" to "Recovery index", "steps" to "Steps",
     "inactive_hours" to "Inactive hours", "calories" to "Calories", "goal_days" to "Goal days",
@@ -92,7 +92,7 @@ private val NAMES = mapOf(
 private val SCORE_INFO = mapOf(
     "sleep" to "How well you slept last night, from 0 to 100. It is the average of the contributors below: " +
         "time asleep against your sleep need, how much of the night you were asleep, minutes awake, REM and deep " +
-        "sleep, and whether the middle of your sleep fell between midnight and 3 AM.",
+        "sleep, whether the middle of your sleep fell between midnight and 3 AM and how regular your sleep times were.",
     "readiness" to "How recovered you are for today, from 0 to 100. It compares last night's resting heart rate " +
         "and HRV with your own 14-day baseline, and adds last night's sleep, your recent sleep and activity, " +
         "yesterday's steps and how quickly your heart rate settled overnight.",
@@ -111,6 +111,7 @@ private val CONTRIBUTOR_INFO = mapOf(
     "rem" to "Minutes of REM (dream) sleep. 100 at 90 minutes or more.",
     "deep" to "Minutes of deep sleep. 100 at 90 minutes or more.",
     "timing" to "When the middle of your sleep fell. 100 between midnight and 3 AM, about 33 less per hour outside.",
+    "regularity" to "How much the middle of your sleep moved over the last 7 nights. 100 within 30 minutes, 0 at 2 hours; needs 4 nights.",
     "resting_hr" to "Your low overnight heart rate against your 14-day baseline. 100 at or below it, 10 less per bpm above.",
     "hrv_balance" to "Your overnight heart rate variability against your 14-day baseline. 100 at or above it, 0 at 60% of it.",
     "sleep" to "Last night's sleep score.",
@@ -252,6 +253,9 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
                         }
                     }
                 }
+                val w = d["wear"].obj()
+                val off = ((w?.get("awake_hours").num() ?: 0.0) - (w?.get("worn_hours").num() ?: 0.0)).roundToInt()
+                if (off >= 2) Text("Ring off for $off h today", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.xs))
             }
         }
         item {
