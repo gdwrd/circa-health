@@ -62,9 +62,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.doubleOrNull
 import java.text.DecimalFormat
-import java.time.Instant
 import java.time.LocalDate
-import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.ceil
@@ -103,7 +101,7 @@ private fun parse(json: JsonElement?, div: Double): Pts? {
     return Pts(first, dates.last(), col("value"), col("baseline"))
 }
 
-private val TAG_AXIS = 49.dp // approx. width of the chart's y-axis labels, so markers align with the plot
+private val MARKER_AXIS = 49.dp // approx. width of the chart's y-axis labels, so markers align with the plot
 
 @Composable
 fun TrendsScreen(backend: Boolean?) {
@@ -113,12 +111,11 @@ fun TrendsScreen(backend: Boolean?) {
     var days by remember { mutableIntStateOf(30) }
     var data by remember { mutableStateOf<Pts?>(null) }
     var loaded by remember { mutableStateOf(false) }
-    var tags by remember { mutableStateOf<List<Pair<LocalDate, String>>>(emptyList()) }
+    var journal by remember { mutableStateOf<List<Pair<LocalDate, String>>>(emptyList()) }
     LaunchedEffect(days) {
-        tags = runCatching {
-            (Api.tags(ctx, days).obj()?.get("tags") as JsonArray).mapNotNull { it.obj() }.map {
-                Instant.ofEpochSecond((it["ts"] as JsonPrimitive).content.toLong()).atZone(ZoneId.systemDefault()).toLocalDate() to
-                    (it["tag"] as JsonPrimitive).content
+        journal = runCatching {
+            (Api.journal(ctx, days).obj()?.get("entries") as JsonArray).mapNotNull { it.obj() }.map {
+                LocalDate.parse((it["date"] as JsonPrimitive).content) to (it["kind"] as JsonPrimitive).content
             }
         }.getOrDefault(emptyList())
     }
@@ -175,18 +172,18 @@ fun TrendsScreen(backend: Boolean?) {
                     modifier = Modifier.padding(start = AppSpace.l),
                 )
                 androidx.compose.runtime.key(m, days) { TrendChart(d, m, m.color(c), days) }
-                val inPeriod = tags.filter { it.first >= d.first && it.first <= d.last }
+                val inPeriod = journal.filter { it.first >= d.first && it.first <= d.last }
                 if (inPeriod.isNotEmpty()) {
                     val span = maxOf(d.last.toEpochDay() - d.first.toEpochDay(), 1L)
                     val dot = c.secondaryLabel
-                    Canvas(Modifier.fillMaxWidth().height(10.dp).padding(start = AppSpace.l + TAG_AXIS, end = AppSpace.l)) {
+                    Canvas(Modifier.fillMaxWidth().height(10.dp).padding(start = AppSpace.l + MARKER_AXIS, end = AppSpace.l)) {
                         inPeriod.forEach {
                             val f = ((it.first.toEpochDay() - d.first.toEpochDay()) + 0.5) / (span + 1.5)
                             drawCircle(dot, 2.5.dp.toPx(), Offset((f * size.width).toFloat(), size.height / 2))
                         }
                     }
                     Text(
-                        "Tags in this period: " + inPeriod.groupingBy { it.second }.eachCount().entries.joinToString(", ") { "${it.key} ×${it.value}" },
+                        "In your journal: " + inPeriod.groupingBy { it.second }.eachCount().entries.joinToString(", ") { "${KIND_LABEL[it.key] ?: it.key} ×${it.value}" },
                         style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(AppSpace.l),
                     )
                 }
@@ -197,7 +194,7 @@ fun TrendsScreen(backend: Boolean?) {
 
 /** iOS segmented control: rounded gray track, raised thumb under the selected option. */
 @Composable
-private fun Segmented(options: List<String>, selected: Int, onSelect: (Int) -> Unit) {
+internal fun Segmented(options: List<String>, selected: Int, onSelect: (Int) -> Unit) {
     val c = AppTheme.colors
     val thumb = if (c.background.luminance() < 0.5f) c.secondaryLabel.copy(alpha = 0.5f) else c.card
     Row(Modifier.fillMaxWidth().clip(AppShape.small).background(c.secondaryLabel.copy(alpha = 0.16f)).padding(2.dp)) {

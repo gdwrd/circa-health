@@ -42,6 +42,32 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlin.math.roundToInt
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchColors
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TimePicker
+import androidx.compose.material3.TimePickerDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.rememberTimePickerState
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.input.KeyboardType
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
+import java.time.LocalDate
+import java.time.LocalTime
+import java.util.Locale
 
 private val NAMES = mapOf(
     "total" to "Total sleep", "efficiency" to "Efficiency", "restfulness" to "Restfulness", "rem" to "REM sleep",
@@ -98,12 +124,16 @@ fun TodayScreen(backend: Boolean?) {
     var data by remember { mutableStateOf<JsonObject?>(null) }
     var open by remember { mutableStateOf<String?>(null) }
     // The tab leaves composition when deselected, so this also reloads on reselect.
-    var tags by remember { mutableStateOf<List<String>>(emptyList()) }
+    var journal by remember { mutableStateOf<List<Entry>>(emptyList()) }
+    var medTime by remember { mutableStateOf("08:00") }
     var sheet by remember { mutableStateOf(false) }
-    suspend fun loadTags() {
-        tags = (Api.tags(ctx, 1).obj()?.get("tags") as? JsonArray)?.mapNotNull { (it.obj()?.get("tag") as? JsonPrimitive)?.contentOrNull } ?: emptyList()
+    val scope = rememberCoroutineScope()
+    suspend fun loadJournal() { journal = parseJournal(Api.journal(ctx, 2)) }
+    LaunchedEffect(Unit) {
+        data = Api.today(ctx).obj()
+        loadJournal()
+        Api.settings(ctx)?.get("medication_time").str()?.let { medTime = it }
     }
-    LaunchedEffect(Unit) { data = Api.today(ctx).obj(); loadTags() }
 
     val c = AppTheme.colors
     val rings = listOf("sleep" to ("Sleep" to c.sleep), "readiness" to ("Readiness" to c.readiness), "activity" to ("Activity" to c.activity))
@@ -178,68 +208,308 @@ fun TodayScreen(backend: Boolean?) {
             }
         }
         item {
-            InsetCard {
-                if (tags.isNotEmpty()) {
-                    FlowRow(
-                        Modifier.padding(start = AppSpace.l, top = AppSpace.l, end = AppSpace.l),
-                        horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s),
-                    ) { tags.forEach { TagChip(it, false) {} } }
-                    Hairline(Modifier.padding(start = AppSpace.l, top = AppSpace.m))
+            val today = LocalDate.now()
+            Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                Text("Journal", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
+                InsetCard {
+                    if (journal.isEmpty()) Text(
+                        "Log what you did and we'll show how it affects your sleep and recovery.",
+                        style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.l, end = AppSpace.l),
+                    )
+                    listOf(today.minusDays(1) to "Yesterday", today to "Today").forEach { (day, label) ->
+                        val es = journal.filter { it.date == day.toString() }.sortedWith(compareBy({ KIND_LABEL.keys.indexOf(it.kind) }, { it.value }))
+                        if (es.isNotEmpty()) {
+                            Text(label, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.l))
+                            FlowRow(
+                                Modifier.padding(start = AppSpace.l, top = AppSpace.s, end = AppSpace.l),
+                                horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s),
+                            ) { es.forEach { JournalChip(it.label()) } }
+                        }
+                    }
+                    TintButton(if (LocalTime.now().hour < 12) "Log yesterday" else "Log today", Modifier.padding(AppSpace.l)) { sheet = true }
                 }
-                Text(
-                    "+ Add tag", style = AppType.body, color = c.tint,
-                    modifier = Modifier.fillMaxWidth().clickable { sheet = true }.padding(AppSpace.l),
-                )
             }
         }
     }
-    if (sheet) AddTagSheet(
-        onDismiss = { sheet = false },
-        onAdd = { tag, note -> if (Api.addTag(ctx, tag, note)) { loadTags(); sheet = false } },
-    )
+    if (sheet) CheckInSheet(journal, medTime, scope, ::loadJournal) { sheet = false }
 }
 
-private val QUICK = listOf("Alcohol", "Caffeine", "Late meal", "Workout", "Sick", "Travel", "Stress")
+/** One journal row from `/journal`. */
+private class Entry(val id: Int, val date: String, val kind: String, val value: String?, val note: String?) {
+    fun label() = (KIND_LABEL[kind] ?: kind) + if (kind == "bp" || kind == "medication") " ${value.orEmpty()}" else ""
+}
+
+private fun JsonElement?.str() = (this as? JsonPrimitive)?.contentOrNull
+
+private fun parseJournal(json: JsonElement?): List<Entry> = (json.obj()?.get("entries") as? JsonArray)?.mapNotNull { it.obj() }?.mapNotNull {
+    Entry(it["id"].str()?.toIntOrNull() ?: return@mapNotNull null, it["date"].str().orEmpty(), it["kind"].str().orEmpty(), it["value"].str(), it["note"].str())
+} ?: emptyList()
+
+/** Short names for chips and the Trends summary line. */
+internal val KIND_LABEL = mapOf(
+    "alcohol" to "Alcohol", "caffeine_late" to "Late caffeine", "late_meal" to "Late meal", "workout" to "Workout",
+    "sick" to "Sick", "travel" to "Travel", "stress" to "Stress", "medication" to "Medication", "bp" to "BP", "note" to "Note",
+)
+
+private val QUESTIONS = listOf(
+    "alcohol" to "Alcohol?", "caffeine_late" to "Caffeine after 2 PM?", "late_meal" to "Late meal?", "workout" to "Workout?",
+    "sick" to "Felt sick?", "travel" to "Travelled?", "stress" to "Stressful day?",
+)
+
+private val WHY = mapOf(
+    "alcohol" to "Alcohol tends to raise your night-time heart rate and cut deep and REM sleep.",
+    "caffeine_late" to "Caffeine stays in the body for 5–6 hours and can delay falling asleep.",
+    "late_meal" to "Eating close to bedtime can keep your heart rate up overnight.",
+    "workout" to "Hard training can show up in the next night's HRV and resting heart rate.",
+    "sick" to "Being unwell can raise your resting heart rate and lower your HRV.",
+    "travel" to "Travel and time-zone changes shift when you sleep.",
+    "stress" to "A stressful day can lower your HRV and make sleep lighter.",
+    "medication" to "Dose times let us mark doses on the Heart screen and compare days with and without a dose.",
+    "bp" to "From a cuff reading; the ring cannot measure blood pressure.",
+    "note" to "Anything else worth remembering about the day.",
+)
 
 @Composable
-private fun TagChip(text: String, selected: Boolean, onClick: () -> Unit) {
+private fun JournalChip(text: String) {
     val c = AppTheme.colors
     Text(
-        text, style = AppType.footnote.copy(fontWeight = FontWeight.Medium), color = if (selected) Color.White else c.label,
-        modifier = Modifier.clip(RoundedCornerShape(50)).background(if (selected) c.tint else c.secondaryLabel.copy(alpha = 0.16f))
-            .clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 6.dp),
+        text, style = AppType.footnote.copy(fontWeight = FontWeight.Medium), color = c.label,
+        modifier = Modifier.clip(RoundedCornerShape(50)).background(c.secondaryLabel.copy(alpha = 0.16f)).padding(horizontal = 12.dp, vertical = 6.dp),
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+/** iOS tinted button: tint text on a faint tint fill. */
 @Composable
-private fun AddTagSheet(onDismiss: () -> Unit, onAdd: suspend (String, String?) -> Unit) {
+private fun TintButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val c = AppTheme.colors
-    val scope = rememberCoroutineScope()
-    var text by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = c.background, shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp)) {
-        Column(Modifier.padding(horizontal = AppSpace.l).padding(bottom = AppSpace.xl), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
-            Text("Add tag", style = AppType.title)
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                QUICK.forEach { q -> TagChip(q, text == q) { text = q } }
+    Text(
+        text, style = AppType.headline, color = c.tint, textAlign = TextAlign.Center,
+        modifier = modifier.fillMaxWidth().clip(AppShape.small).background(c.tint.copy(alpha = 0.12f)).clickable(onClick = onClick).padding(vertical = AppSpace.m),
+    )
+}
+
+/** Writes go to [scope] (outlives the sheet) so a pending note or BP is saved when the sheet closes. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CheckInSheet(entries: List<Entry>, medTime: String, scope: CoroutineScope, reload: suspend () -> Unit, onDismiss: () -> Unit) {
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    var day by remember { mutableIntStateOf(if (LocalTime.now().hour < 12) 0 else 1) }
+    // Full height: a half-open sheet snaps shut when rows appear (dose, second dose).
+    ModalBottomSheet(
+        onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = c.background, shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp),
+    ) {
+        Column(
+            Modifier.verticalScroll(rememberScrollState()).padding(horizontal = AppSpace.l).padding(bottom = AppSpace.xl),
+            verticalArrangement = Arrangement.spacedBy(AppSpace.m),
+        ) {
+            Text("Check-in", style = AppType.title)
+            Segmented(listOf("Yesterday", "Today"), day) { if (it != day) { day = it; haptic.tick() } }
+            val date = LocalDate.now().minusDays(1L - day).toString()
+            key(date) { DayForm(date, entries.filter { it.date == date }, medTime, scope, reload) }
+        }
+    }
+}
+
+private fun bpOk(s: String): Boolean {
+    val n = s.split('/').map { it.toIntOrNull() ?: return false }
+    return n.size == 2 && n[0] in 70..250 && n[1] in 40..150
+}
+
+@Composable
+private fun DayForm(date: String, es: List<Entry>, medTime: String, scope: CoroutineScope, reload: suspend () -> Unit) {
+    val ctx = LocalContext.current
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    fun run(block: suspend () -> Unit) { scope.launch { block(); reload() } }
+
+    InsetCard {
+        QUESTIONS.forEachIndexed { i, (kind, q) ->
+            if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
+            val e = es.firstOrNull { it.kind == kind }
+            ToggleRow(q, WHY[kind], e != null) { on ->
+                haptic.tick()
+                run { if (on) Api.addJournal(ctx, date, kind) else e?.let { Api.deleteJournal(ctx, it.id) } }
             }
-            Box(Modifier.fillMaxWidth().clip(AppShape.small).background(c.card).padding(AppSpace.l)) {
-                if (text.isEmpty()) Text("Or type your own", style = AppType.body, color = c.secondaryLabel)
-                BasicTextField(
-                    text, { text = it.take(40) }, singleLine = true, textStyle = AppType.body.copy(color = c.label),
-                    cursorBrush = SolidColor(c.tint), modifier = Modifier.fillMaxWidth(),
+        }
+    }
+
+    val doses = es.filter { it.kind == "medication" }.sortedBy { it.value }
+    var editing by remember { mutableStateOf<Entry?>(null) }
+    var adding by remember { mutableStateOf(false) }
+    InsetCard {
+        ToggleRow("Medication?", WHY["medication"], doses.isNotEmpty()) { on ->
+            haptic.tick()
+            run { if (on) Api.addJournal(ctx, date, "medication", medTime) else doses.forEach { Api.deleteJournal(ctx, it.id) } }
+        }
+        doses.forEachIndexed { i, d ->
+            Hairline(Modifier.padding(start = AppSpace.l))
+            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
+                Text(if (i == 0) "Dose" else "Second dose", style = AppType.body, modifier = Modifier.weight(1f))
+                if (i > 0) Text(
+                    "Remove", style = AppType.subhead, color = c.activity,
+                    modifier = Modifier.clip(AppShape.small).clickable { run { Api.deleteJournal(ctx, d.id) } }.padding(AppSpace.s),
+                )
+                Text(
+                    d.value.orEmpty(), style = AppType.body, color = c.tint,
+                    modifier = Modifier.clip(AppShape.small).clickable { editing = d }.padding(AppSpace.s),
                 )
             }
-            val ok = text.isNotBlank() && !busy
+        }
+        if (doses.size == 1) {
+            Hairline(Modifier.padding(start = AppSpace.l))
             Text(
-                "Add", style = AppType.headline, color = Color.White, textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth().clip(AppShape.small).background(if (ok) c.tint else c.tint.copy(alpha = 0.4f))
-                    .clickable(enabled = ok) { busy = true; scope.launch { onAdd(text.trim(), null); busy = false } }
-                    .padding(vertical = AppSpace.m),
+                "+ Second dose", style = AppType.body, color = c.tint,
+                modifier = Modifier.fillMaxWidth().clickable { adding = true }.padding(AppSpace.l),
             )
         }
     }
+    editing?.let { d ->
+        TimePickDialog(d.value ?: medTime, { editing = null }) { t ->
+            editing = null
+            // Add before delete so a failed write never loses the dose.
+            if (t != d.value) run { if (Api.addJournal(ctx, date, "medication", t) != null) Api.deleteJournal(ctx, d.id) }
+        }
+    }
+    if (adding) {
+        val second = runCatching { LocalTime.parse(doses.first().value).plusHours(4).toString() }.getOrDefault(medTime)
+        TimePickDialog(second, { adding = false }) { t -> adding = false; run { Api.addJournal(ctx, date, "medication", t) } }
+    }
+
+    val bp = es.firstOrNull { it.kind == "bp" }?.value.orEmpty()
+    var sys by remember { mutableStateOf(bp.substringBefore('/', "")) }
+    var dia by remember { mutableStateOf(bp.substringAfter('/', "")) }
+    var note by remember { mutableStateOf(es.firstOrNull { it.kind == "note" }?.note.orEmpty()) }
+    val saved = remember { mutableMapOf("bp" to bp, "note" to note) }
+    val latest by rememberUpdatedState(es)
+    fun save(kind: String, text: String) {
+        if (saved[kind] == text || (kind == "bp" && text.isNotEmpty() && !bpOk(text))) return
+        saved[kind] = text
+        val old = latest.firstOrNull { it.kind == kind }
+        scope.launch {
+            when {
+                text.isEmpty() -> old?.let { Api.deleteJournal(ctx, it.id) }
+                kind == "bp" -> Api.addJournal(ctx, date, "bp", text)
+                else -> Api.addJournal(ctx, date, "note", note = text)
+            }
+            reload()
+        }
+    }
+    val bpText = if (sys.isEmpty() && dia.isEmpty()) "" else "$sys/$dia"
+    val noteText = note.trim()
+    LaunchedEffect(bpText) { delay(1200); save("bp", bpText) }
+    LaunchedEffect(noteText) { delay(1200); save("note", noteText) }
+    val bpNow by rememberUpdatedState(bpText)
+    val noteNow by rememberUpdatedState(noteText)
+    DisposableEffect(Unit) { onDispose { save("bp", bpNow); save("note", noteNow) } }
+
+    InsetCard {
+        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = AppSpace.l, vertical = AppSpace.s), verticalAlignment = Alignment.CenterVertically) {
+            InfoLabel("Blood pressure", WHY["bp"], Modifier.weight(1f))
+            NumField(sys, "SYS") { sys = it }
+            Text(" / ", style = AppType.body, color = c.secondaryLabel)
+            NumField(dia, "DIA") { dia = it }
+        }
+        if (bpText.isNotEmpty() && !bpOk(bpText)) Text(
+            "Enter both numbers, for example 120 / 80.", style = AppType.footnote, color = c.activity,
+            modifier = Modifier.padding(start = AppSpace.l, end = AppSpace.l, bottom = AppSpace.s),
+        )
+        Hairline(Modifier.padding(start = AppSpace.l))
+        Column(Modifier.fillMaxWidth().padding(horizontal = AppSpace.l, vertical = AppSpace.m)) {
+            InfoLabel("Note", WHY["note"])
+            Box(Modifier.padding(top = AppSpace.xs)) {
+                if (note.isEmpty()) Text("Anything else about the day", style = AppType.body, color = c.secondaryLabel)
+                BasicTextField(
+                    note, { note = it.take(200) }, textStyle = AppType.body.copy(color = c.label),
+                    cursorBrush = SolidColor(c.tint), modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NumField(value: String, placeholder: String, onChange: (String) -> Unit) {
+    val c = AppTheme.colors
+    BasicTextField(
+        value, { onChange(it.filter(Char::isDigit).take(3)) }, singleLine = true,
+        textStyle = AppType.body.copy(color = c.label, textAlign = TextAlign.Center),
+        cursorBrush = SolidColor(c.tint), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        modifier = Modifier.width(52.dp).clip(AppShape.small).background(c.secondaryLabel.copy(alpha = 0.12f)).padding(vertical = AppSpace.s),
+        decorationBox = { inner ->
+            Box(contentAlignment = Alignment.Center) {
+                if (value.isEmpty()) Text(placeholder, style = AppType.body, color = c.secondaryLabel)
+                inner()
+            }
+        },
+    )
+}
+
+/** Label with a tappable ⓘ that reveals one line of why. */
+@Composable
+private fun InfoLabel(text: String, why: String?, modifier: Modifier = Modifier) {
+    val c = AppTheme.colors
+    var show by remember { mutableStateOf(false) }
+    Column(modifier) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(text, style = AppType.body)
+            if (why != null) Text(
+                "ⓘ", style = AppType.body, color = c.tint,
+                modifier = Modifier.clip(RoundedCornerShape(50)).clickable { show = !show }.padding(horizontal = AppSpace.s, vertical = AppSpace.xs),
+            )
+        }
+        AnimatedVisibility(show) { Text(why.orEmpty(), style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(end = AppSpace.s)) }
+    }
+}
+
+@Composable
+private fun ToggleRow(q: String, why: String?, checked: Boolean, onChange: (Boolean) -> Unit) {
+    // Local state flips at once; the server state re-keys it after the reload.
+    var on by remember(checked) { mutableStateOf(checked) }
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = AppSpace.l, vertical = AppSpace.xs), verticalAlignment = Alignment.CenterVertically) {
+        InfoLabel(q, why, Modifier.weight(1f))
+        Switch(on, { on = it; onChange(it) }, colors = iosSwitchColors())
+    }
+}
+
+/** iOS switch: green track when on, white knob in both themes. */
+@Composable
+internal fun iosSwitchColors(): SwitchColors {
+    val c = AppTheme.colors
+    val knob = if (c.background.luminance() < 0.5f) c.label else c.card
+    val off = c.secondaryLabel.copy(alpha = 0.3f)
+    return SwitchDefaults.colors(
+        checkedThumbColor = knob, checkedTrackColor = c.readiness, checkedBorderColor = c.readiness,
+        uncheckedThumbColor = knob, uncheckedTrackColor = off, uncheckedBorderColor = off,
+    )
+}
+
+/** 24 h time picker dialog; [onPick] gets "HH:MM". */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun TimePickDialog(initial: String, onDismiss: () -> Unit, onPick: (String) -> Unit) {
+    val c = AppTheme.colors
+    val t = runCatching { LocalTime.parse(initial) }.getOrDefault(LocalTime.of(8, 0))
+    val state = rememberTimePickerState(t.hour, t.minute, is24Hour = true)
+    val knob = if (c.background.luminance() < 0.5f) c.label else c.card
+    val faint = c.secondaryLabel.copy(alpha = 0.16f)
+    AlertDialog(
+        onDismissRequest = onDismiss, containerColor = c.card,
+        confirmButton = { TextButton({ onPick("%02d:%02d".format(Locale.ROOT, state.hour, state.minute)) }) { Text("Done", color = c.tint) } },
+        dismissButton = { TextButton(onDismiss) { Text("Cancel", color = c.tint) } },
+        text = {
+            TimePicker(
+                state,
+                colors = TimePickerDefaults.colors(
+                    clockDialColor = faint, clockDialSelectedContentColor = knob, clockDialUnselectedContentColor = c.label,
+                    selectorColor = c.tint, containerColor = c.card,
+                    timeSelectorSelectedContainerColor = c.tint.copy(alpha = 0.16f), timeSelectorUnselectedContainerColor = faint,
+                    timeSelectorSelectedContentColor = c.tint, timeSelectorUnselectedContentColor = c.label,
+                ),
+            )
+        },
+    )
 }
 
 @Composable

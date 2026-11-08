@@ -20,6 +20,21 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDefaults
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.SelectableDates
+import androidx.compose.material3.Switch
+import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.graphics.luminance
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -148,6 +163,16 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
     }
 
+    // Backend-only settings; null hides the section (no backend or unreachable).
+    var med by remember { mutableStateOf<JsonObject?>(null) }
+    var pickStart by remember { mutableStateOf(false) }
+    var pickTime by remember { mutableStateOf(false) }
+    var pickWindow by remember { mutableStateOf(false) }
+    LaunchedEffect(url, token) { med = Api.settings(ctx) }
+    fun patchMed(key: String, v: JsonPrimitive) {
+        activity.lifecycleScope.launch { Api.patchSettings(ctx, mapOf(key to v))?.let { med = it } }
+    }
+
     if (showLog) return SyncLogScreen { showLog = false }
 
     LargeTitleScaffold("Settings") {
@@ -177,6 +202,24 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 FieldRow("Sleep need (h)", sleepNeed, "7.5", KeyboardType.Decimal) {
                     sleepNeed = it
                     it.replace(',', '.').toFloatOrNull()?.let { h -> ctx.sleepNeedHours = h }
+                }
+            }
+        }
+        med?.let { s ->
+            val started = (s["medication_started"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+            item {
+                Section("Medication", "Used to mark doses on the Heart screen and to compare your heart rate with the days before you started.") {
+                    SwitchRow("I take medication", started.isNotEmpty()) { on ->
+                        patchMed("medication_started", JsonPrimitive(if (on) LocalDate.now().toString() else ""))
+                    }
+                    if (started.isNotEmpty()) {
+                        Hairline(Modifier.padding(start = AppSpace.l))
+                        ChevronRow("Started on", runCatching { LocalDate.parse(started).format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())) }.getOrDefault(started)) { pickStart = true }
+                        Hairline(Modifier.padding(start = AppSpace.l))
+                        ChevronRow("Usual time", (s["medication_time"] as? JsonPrimitive)?.contentOrNull.orEmpty()) { pickTime = true }
+                        Hairline(Modifier.padding(start = AppSpace.l))
+                        ChevronRow("Active window", "${(s["medication_window_h"] as? JsonPrimitive)?.doubleOrNull?.toInt() ?: "—"} h") { pickWindow = true }
+                    }
                 }
             }
         }
@@ -231,6 +274,43 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             confirmButton = {},
             dismissButton = { TextButton({ pickInterval = false }) { Text("Cancel") } },
         )
+    }
+
+    if (pickWindow) {
+        val cur = (med?.get("medication_window_h") as? JsonPrimitive)?.doubleOrNull?.toInt()
+        AlertDialog(
+            onDismissRequest = { pickWindow = false },
+            containerColor = c.card,
+            title = { Text("Active window") },
+            text = {
+                Column {
+                    listOf(4, 6, 8, 12).forEach { h ->
+                        Text(
+                            "$h hours" + if (h == cur) "  ✓" else "",
+                            style = AppType.body, color = if (h == cur) c.tint else c.label,
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                patchMed("medication_window_h", JsonPrimitive(h))
+                                pickWindow = false
+                            }.padding(vertical = AppSpace.m),
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton({ pickWindow = false }) { Text("Cancel") } },
+        )
+    }
+
+    if (pickTime) {
+        TimePickDialog((med?.get("medication_time") as? JsonPrimitive)?.contentOrNull ?: "08:00", { pickTime = false }) {
+            pickTime = false
+            patchMed("medication_time", JsonPrimitive(it))
+        }
+    }
+
+    if (pickStart) StartDateDialog((med?.get("medication_started") as? JsonPrimitive)?.contentOrNull.orEmpty(), { pickStart = false }) {
+        pickStart = false
+        patchMed("medication_started", JsonPrimitive(it))
     }
 
     scanResults?.let { results ->
@@ -373,6 +453,45 @@ private fun ChevronRow(title: String, value: String, onClick: () -> Unit) {
         Text(value, style = AppType.body, color = c.secondaryLabel)
         Text("  ›", style = AppType.body, color = c.secondaryLabel)
     }
+}
+
+@Composable
+private fun SwitchRow(title: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    var on by remember(checked) { mutableStateOf(checked) }
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
+        Text(title, style = AppType.body, modifier = Modifier.weight(1f))
+        Switch(on, { on = it; onChange(it) }, colors = iosSwitchColors())
+    }
+}
+
+/** Date picker limited to today and earlier; [onPick] gets an ISO date. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun StartDateDialog(initial: String, onDismiss: () -> Unit, onPick: (String) -> Unit) {
+    val c = AppTheme.colors
+    val day = 86_400_000L
+    val init = runCatching { LocalDate.parse(initial).toEpochDay() * day }.getOrNull()
+    val state = rememberDatePickerState(
+        initialSelectedDateMillis = init,
+        selectableDates = object : SelectableDates {
+            override fun isSelectableDate(utcTimeMillis: Long) = utcTimeMillis / day <= LocalDate.now().toEpochDay()
+        },
+    )
+    val knob = if (c.background.luminance() < 0.5f) c.label else c.card
+    val colors = DatePickerDefaults.colors(
+        containerColor = c.card, titleContentColor = c.secondaryLabel, headlineContentColor = c.label,
+        weekdayContentColor = c.secondaryLabel, subheadContentColor = c.secondaryLabel, navigationContentColor = c.label,
+        yearContentColor = c.label, currentYearContentColor = c.tint, selectedYearContentColor = knob, selectedYearContainerColor = c.tint,
+        dayContentColor = c.label, selectedDayContentColor = knob, selectedDayContainerColor = c.tint,
+        todayContentColor = c.tint, todayDateBorderColor = c.tint, dividerColor = c.separator,
+    )
+    DatePickerDialog(
+        onDismissRequest = onDismiss, colors = colors,
+        confirmButton = {
+            TextButton({ state.selectedDateMillis?.let { onPick(LocalDate.ofEpochDay(it / day).toString()) } ?: onDismiss() }) { Text("Done", color = c.tint) }
+        },
+        dismissButton = { TextButton(onDismiss) { Text("Cancel", color = c.tint) } },
+    ) { DatePicker(state, colors = colors, showModeToggle = false) }
 }
 
 @Composable

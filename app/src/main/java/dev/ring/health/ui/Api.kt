@@ -15,27 +15,28 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 
-/** Read-only client for the optional backend at the same base URL the ring pushes to. */
+/** Client for the optional backend at the same base URL the ring pushes to. */
 object Api {
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
         .build()
 
-    private fun request(ctx: Context, path: String, post: Boolean = false, json: String? = null): Request? {
+    private fun request(ctx: Context, path: String, method: String = "GET", json: String? = null): Request? {
         val base = ctx.vmUrl.trim().trimEnd('/')
         if (base.isEmpty()) return null
         val token = ctx.apiToken
         return runCatching {
             Request.Builder().url("$base$path")
                 .apply { if (token.isNotBlank()) header("Authorization", "Bearer $token") }
-                .apply { if (post) post(json?.toRequestBody("application/json".toMediaType()) ?: ByteArray(0).toRequestBody()) }
+                .method(method, if (method == "GET" || method == "DELETE") null else (json ?: "").toRequestBody("application/json".toMediaType()))
                 .build()
         }.getOrNull()
     }
 
-    private suspend fun get(ctx: Context, path: String): JsonElement? = withContext(Dispatchers.IO) {
-        val req = request(ctx, path) ?: return@withContext null
+    /** Parsed JSON body on 2xx, else null. */
+    private suspend fun call(ctx: Context, path: String, method: String = "GET", json: String? = null): JsonElement? = withContext(Dispatchers.IO) {
+        val req = request(ctx, path, method, json) ?: return@withContext null
         runCatching {
             client.newCall(req).execute().use { r ->
                 if (r.isSuccessful) Json.parseToJsonElement(r.body!!.string()) else null
@@ -43,23 +44,28 @@ object Api {
         }.getOrNull()
     }
 
+    private suspend fun get(ctx: Context, path: String) = call(ctx, path)
+
     suspend fun today(ctx: Context) = get(ctx, "/today")
     suspend fun sleep(ctx: Context, date: String) = get(ctx, "/sleep?date=$date")
     suspend fun trends(ctx: Context, metric: String, days: Int) = get(ctx, "/trends?metric=$metric&days=$days")
     suspend fun hr(ctx: Context, hours: Int) = get(ctx, "/hr?hours=$hours")
-    suspend fun tags(ctx: Context, days: Int) = get(ctx, "/tags?days=$days")
+    suspend fun journal(ctx: Context, days: Int) = get(ctx, "/journal?days=$days")
+    suspend fun settings(ctx: Context) = get(ctx, "/settings") as? JsonObject
     suspend fun notifications(ctx: Context) = get(ctx, "/notifications/pending")
 
-    suspend fun ack(ctx: Context, id: Int): Boolean = withContext(Dispatchers.IO) {
-        val req = request(ctx, "/notifications/$id/ack", post = true) ?: return@withContext false
-        runCatching { client.newCall(req).execute().use { it.isSuccessful } }.getOrDefault(false)
+    suspend fun ack(ctx: Context, id: Int): Boolean = call(ctx, "/notifications/$id/ack", "POST") != null
+
+    /** Returns the new entry id, or null on failure. */
+    suspend fun addJournal(ctx: Context, date: String, kind: String, value: String? = null, note: String? = null): Int? {
+        val body = JsonObject(mapOf("date" to JsonPrimitive(date), "kind" to JsonPrimitive(kind), "value" to JsonPrimitive(value), "note" to JsonPrimitive(note)))
+        return ((call(ctx, "/journal", "POST", body.toString()) as? JsonObject)?.get("id") as? JsonPrimitive)?.content?.toIntOrNull()
     }
 
-    suspend fun addTag(ctx: Context, tag: String, note: String?): Boolean = withContext(Dispatchers.IO) {
-        val body = JsonObject(mapOf("tag" to JsonPrimitive(tag), "note" to JsonPrimitive(note))).toString()
-        val req = request(ctx, "/tags", post = true, json = body) ?: return@withContext false
-        runCatching { client.newCall(req).execute().use { it.isSuccessful } }.getOrDefault(false)
-    }
+    suspend fun deleteJournal(ctx: Context, id: Int): Boolean = call(ctx, "/journal/$id", "DELETE") != null
+
+    /** Body is a subset of the backend settings keys; returns the full settings, or null on failure. */
+    suspend fun patchSettings(ctx: Context, body: Map<String, JsonPrimitive>) = call(ctx, "/settings", "PATCH", JsonObject(body).toString()) as? JsonObject
 
     private val probe = client.newBuilder().callTimeout(3, TimeUnit.SECONDS).build()
     // Session cache of the last probe, keyed by URL+token so editing either re-probes.
