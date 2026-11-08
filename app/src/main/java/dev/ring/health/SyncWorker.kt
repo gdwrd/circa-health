@@ -45,6 +45,7 @@ import dev.ring.health.Prefs.vmUrl
 import dev.ring.health.ui.Api
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -404,12 +405,13 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         val pending = Api.notifications(ctx) as? JsonArray ?: return 0
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(NotificationChannel("health", "Health", NotificationManager.IMPORTANCE_DEFAULT))
-        val open = PendingIntent.getActivity(
-            ctx, 0, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
-        )
         for (n in pending) {
             val o = n.jsonObject
             val id = o["id"]!!.jsonPrimitive.int
+            val intent = Intent(ctx, MainActivity::class.java)
+            (o["extra"] as? JsonObject)?.forEach { (k, v) -> intent.putExtra(k, v.jsonPrimitive.content) }
+            // request code = id: each notification keeps its own extras
+            val open = PendingIntent.getActivity(ctx, id, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
             val notif = NotificationCompat.Builder(ctx, "health")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentTitle(o["title"]!!.jsonPrimitive.content)

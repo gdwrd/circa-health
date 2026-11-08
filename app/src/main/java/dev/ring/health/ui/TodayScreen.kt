@@ -118,7 +118,7 @@ private fun JsonElement?.num() = (this as? JsonPrimitive)?.doubleOrNull
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun TodayScreen(backend: Boolean?) {
+fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened: () -> Unit = {}) {
     if (backend != true) return PlaceholderTab("Today", backend)
     val ctx = LocalContext.current
     var data by remember { mutableStateOf<JsonObject?>(null) }
@@ -127,6 +127,13 @@ fun TodayScreen(backend: Boolean?) {
     var journal by remember { mutableStateOf<List<Entry>>(emptyList()) }
     var medTime by remember { mutableStateOf("08:00") }
     var sheet by remember { mutableStateOf(false) }
+    var sheetDay by remember { mutableStateOf<Int?>(null) } // 0 Yesterday, 1 Today; null = by time of day
+    LaunchedEffect(journalDate) {
+        if (journalDate == null) return@LaunchedEffect
+        sheetDay = if (journalDate == LocalDate.now().toString()) 1 else 0
+        sheet = true
+        onJournalOpened()
+    }
     val scope = rememberCoroutineScope()
     suspend fun loadJournal() { journal = parseJournal(Api.journal(ctx, 2)) }
     LaunchedEffect(Unit) {
@@ -231,7 +238,7 @@ fun TodayScreen(backend: Boolean?) {
             }
         }
     }
-    if (sheet) CheckInSheet(journal, medTime, scope, ::loadJournal) { sheet = false }
+    if (sheet) CheckInSheet(journal, medTime, scope, sheetDay, ::loadJournal) { sheet = false; sheetDay = null }
 }
 
 /** One journal row from `/journal`. */
@@ -291,10 +298,10 @@ private fun TintButton(text: String, modifier: Modifier = Modifier, onClick: () 
 /** Writes go to [scope] (outlives the sheet) so a pending note or BP is saved when the sheet closes. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CheckInSheet(entries: List<Entry>, medTime: String, scope: CoroutineScope, reload: suspend () -> Unit, onDismiss: () -> Unit) {
+private fun CheckInSheet(entries: List<Entry>, medTime: String, scope: CoroutineScope, startDay: Int?, reload: suspend () -> Unit, onDismiss: () -> Unit) {
     val c = AppTheme.colors
     val haptic = LocalHapticFeedback.current
-    var day by remember { mutableIntStateOf(if (LocalTime.now().hour < 12) 0 else 1) }
+    var day by remember { mutableIntStateOf(startDay ?: if (LocalTime.now().hour < 12) 0 else 1) }
     // Full height: a half-open sheet snaps shut when rows appear (dose, second dose).
     ModalBottomSheet(
         onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),

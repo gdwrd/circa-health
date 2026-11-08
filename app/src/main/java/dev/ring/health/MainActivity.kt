@@ -13,6 +13,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import dev.ring.health.Prefs.askedBattery
 import dev.ring.health.ui.App
@@ -30,10 +33,24 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Notification deep link: extras `open` (journal | trends) and `date` (yyyy-MM-dd). Cleared once handled. */
+    private var link by mutableStateOf<Pair<String, String?>?>(null)
+
+    private fun readLink(i: Intent) {
+        i.getStringExtra("open")?.let { link = it to i.getStringExtra("date") }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        readLink(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContent { App(::hasPermissions, ::requestPermissions) }
+        if (savedInstanceState == null) readLink(intent) // not again after rotation
+        setContent { App(::hasPermissions, ::requestPermissions, link) { link = null } }
 
         if (hasPermissions()) SyncWorker.schedule(this)
         if (!hasPermissions() || !hasNotifications()) requestPermissions() else askBatteryOnce()

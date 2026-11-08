@@ -1,3 +1,4 @@
+import json
 import logging
 from contextlib import closing
 from datetime import date, datetime, timedelta
@@ -22,10 +23,10 @@ def _now() -> datetime:
     return datetime.now(vm.tz())
 
 
-def _add(kind: str, title: str, body: str, now: datetime) -> None:
+def _add(kind: str, title: str, body: str, now: datetime, extra: dict[str, str] | None = None) -> None:
     with closing(db.connect()) as con, con:
-        con.execute("INSERT INTO notifications(kind, title, body, created_at) VALUES(?,?,?,?)",
-                    (kind, title, body, now.isoformat()))
+        con.execute("INSERT INTO notifications(kind, title, body, created_at, extra) VALUES(?,?,?,?,?)",
+                    (kind, title, body, now.isoformat(), json.dumps(extra) if extra else None))
 
 
 def _fired(kind: str, now: datetime) -> bool:
@@ -115,6 +116,15 @@ def _weekly(now: datetime, dates: set[date]) -> None:
     _add("weekly", "Your week", body, now)
 
 
+def _checkin(now: datetime, dates: set[date]) -> None:
+    """08-11 local, once per day, only while yesterday has no journal row; opens the check-in sheet on yesterday."""
+    y = (now.date() - timedelta(1)).isoformat()
+    if not 8 <= now.hour < 11 or _fired("checkin", now) or db.query("SELECT 1 FROM journal WHERE date=?", (y,)):
+        return
+    _add("checkin", "How was yesterday?", "Takes ten seconds: alcohol, caffeine, workout, medication.", now,
+         {"open": "journal", "date": y})
+
+
 def explain(d: date) -> list[str]:
     """Journal kinds logged the day before d that commonly raise the strain inputs."""
     y = (d - timedelta(1)).isoformat()
@@ -153,7 +163,7 @@ def _strain(now: datetime, dates: set[date]) -> None:
 
 def evaluate(dates: set[date]) -> None:
     now = _now()
-    for rule in (_readiness, _bedtime, _inactivity, _battery, _weekly, _strain):
+    for rule in (_readiness, _bedtime, _inactivity, _battery, _weekly, _strain, _checkin):
         try:
             rule(now, dates)
         except Exception:
@@ -161,8 +171,9 @@ def evaluate(dates: set[date]) -> None:
 
 
 def pending() -> list[dict]:
-    rows = db.query("SELECT id, kind, title, body, created_at FROM notifications WHERE acked_at IS NULL ORDER BY id")
-    return [dict(r) for r in rows]
+    rows = db.query("SELECT id, kind, title, body, created_at, extra FROM notifications WHERE acked_at IS NULL "
+                    "ORDER BY id")
+    return [dict(r) | {"extra": json.loads(r["extra"]) if r["extra"] else None} for r in rows]
 
 
 def ack(id: int) -> None:

@@ -51,7 +51,7 @@ private enum class TabItem(val route: String, val label: String, val icon: Image
 }
 
 @Composable
-fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit) {
+fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pair<String, String?>?, onLinkHandled: () -> Unit) {
     AppTheme {
         val ctx = LocalContext.current
         val nav = rememberNavController()
@@ -59,22 +59,31 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit) {
         var backend by remember { mutableStateOf(Api.cached(ctx)) }
         // Re-detect on every tab change so a URL/token edited in Settings takes effect.
         LaunchedEffect(route) { backend = Api.cached(ctx) ?: Api.hasBackend(ctx) }
+        fun go(t: TabItem) = nav.navigate(t.route) {
+            popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+            launchSingleTop = true
+            restoreState = true
+        }
+        // Today consumes a journal link once its sheet opens (it may still be waiting for the backend check).
+        LaunchedEffect(link) {
+            when (link?.first) {
+                "trends" -> { go(TabItem.Trends); onLinkHandled() }
+                "journal" -> { go(TabItem.Today); if (link.second == null) onLinkHandled() }
+                null -> {}
+                else -> onLinkHandled()
+            }
+        }
+        val journalDate = link?.takeIf { it.first == "journal" }?.second
 
         Scaffold(
             containerColor = AppTheme.colors.background,
             contentWindowInsets = WindowInsets(0),
             bottomBar = {
-                TabBar(route) { t ->
-                    nav.navigate(t.route) {
-                        popUpTo(nav.graph.findStartDestination().id) { saveState = true }
-                        launchSingleTop = true
-                        restoreState = true
-                    }
-                }
+                TabBar(route) { go(it) }
             },
         ) { inner ->
             NavHost(nav, startDestination = TabItem.Today.route, modifier = Modifier.padding(inner)) {
-                composable(TabItem.Today.route) { TodayScreen(backend) }
+                composable(TabItem.Today.route) { TodayScreen(backend, journalDate, onLinkHandled) }
                 composable(TabItem.Sleep.route) { SleepScreen(backend) }
                 composable(TabItem.Heart.route) { HeartScreen(backend) }
                 composable(TabItem.Stress.route) { StressScreen(backend) }

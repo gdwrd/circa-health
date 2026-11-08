@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS journal(id INTEGER PRIMARY KEY AUTOINCREMENT, date TE
   note TEXT, ts INTEGER);
 CREATE UNIQUE INDEX IF NOT EXISTS journal_day_kind ON journal(date, kind) WHERE kind != 'medication';
 CREATE TABLE IF NOT EXISTS notifications(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, title TEXT,
-  body TEXT, created_at TEXT, acked_at TEXT);
+  body TEXT, created_at TEXT, acked_at TEXT, extra TEXT);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 INSERT OR IGNORE INTO settings VALUES('step_goal','8000'),('sleep_need_min','450'),('medication_started',''),
   ('medication_time','08:00'),('medication_window_h','8');
@@ -34,6 +34,8 @@ TAG_ALIASES = {"caffeine": "caffeine_late"}
 def init() -> None:
     with closing(connect()) as con, con:
         con.executescript(SCHEMA)
+        if "extra" not in {r[1] for r in con.execute("PRAGMA table_info(notifications)")}:
+            con.execute("ALTER TABLE notifications ADD COLUMN extra TEXT")
         _migrate_tags(con)
 
 

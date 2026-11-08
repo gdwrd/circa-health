@@ -9,6 +9,7 @@ from app.main import app
 
 H = {"Authorization": "Bearer secret"}
 D = date(2026, 11, 9)
+CHECKIN = notify._checkin
 
 
 @pytest.fixture(autouse=True)
@@ -19,6 +20,7 @@ def env(tmp_path, monkeypatch) -> dict:
     db.init()
     series: dict = {}
     monkeypatch.setattr(vm, "series", lambda e, s, en, st: series.get(e, {}))
+    monkeypatch.setattr(notify, "_checkin", lambda now, dates: None)  # 08-11 rule; on only in its own tests
     return series
 
 
@@ -122,7 +124,8 @@ def test_pending_and_ack_routes(monkeypatch, env) -> None:
     notify.evaluate(set())
     with TestClient(app) as c:
         (n,) = c.get("/notifications/pending", headers=H).json()
-        assert set(n) == {"id", "kind", "title", "body", "created_at"} and n["kind"] == "battery"
+        assert set(n) == {"id", "kind", "title", "body", "created_at", "extra"} and n["kind"] == "battery"
+        assert n["extra"] is None
         assert c.post(f"/notifications/{n['id']}/ack", headers=H).status_code == 200
         assert c.get("/notifications/pending", headers=H).json() == []
 
@@ -205,3 +208,32 @@ def test_strain_once_per_three_days_and_explain(monkeypatch) -> None:
     at(monkeypatch, 9, day=D + timedelta(3))
     notify.evaluate(set())
     assert kinds() == ["strain", "strain"]
+
+
+def test_checkin_window_once_and_extra(monkeypatch, env) -> None:
+    monkeypatch.setattr(notify, "_checkin", CHECKIN)
+    env["biometric_steps"] = {1.0: 100.0}
+    for h in (7, 11):
+        at(monkeypatch, h, 30 if h == 7 else 0)
+        notify.evaluate(set())
+    assert kinds() == []  # outside 08:00-11:00
+    at(monkeypatch, 8)
+    notify.evaluate(set())
+    at(monkeypatch, 10, 59)
+    notify.evaluate(set())
+    assert kinds() == ["checkin"]
+    with TestClient(app) as c:
+        (n,) = c.get("/notifications/pending", headers=H).json()
+    assert n["title"] == "How was yesterday?"
+    assert n["body"] == "Takes ten seconds: alcohol, caffeine, workout, medication."
+    assert n["extra"] == {"open": "journal", "date": "2026-11-08"}
+
+
+def test_checkin_skipped_when_yesterday_logged(monkeypatch, env) -> None:
+    monkeypatch.setattr(notify, "_checkin", CHECKIN)
+    env["biometric_steps"] = {1.0: 100.0}
+    db.add_journal(D.isoformat(), "workout", None, None, 1)  # today's entry does not count
+    db.add_journal((D - timedelta(1)).isoformat(), "note", None, "fine", 2)
+    at(monkeypatch, 9)
+    notify.evaluate(set())
+    assert kinds() == []
