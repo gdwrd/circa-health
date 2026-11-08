@@ -9,6 +9,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 
 /** Read-only client for the optional backend at the same base URL the ring pushes to. */
@@ -18,13 +19,14 @@ object Api {
         .readTimeout(10, TimeUnit.SECONDS)
         .build()
 
-    private fun request(ctx: Context, path: String): Request? {
+    private fun request(ctx: Context, path: String, post: Boolean = false): Request? {
         val base = ctx.vmUrl.trim().trimEnd('/')
         if (base.isEmpty()) return null
         val token = ctx.apiToken
         return runCatching {
             Request.Builder().url("$base$path")
                 .apply { if (token.isNotBlank()) header("Authorization", "Bearer $token") }
+                .apply { if (post) post(ByteArray(0).toRequestBody()) }
                 .build()
         }.getOrNull()
     }
@@ -43,6 +45,11 @@ object Api {
     suspend fun trends(ctx: Context, metric: String, days: Int) = get(ctx, "/trends?metric=$metric&days=$days")
     suspend fun hr(ctx: Context, hours: Int) = get(ctx, "/hr?hours=$hours")
     suspend fun notifications(ctx: Context) = get(ctx, "/notifications/pending")
+
+    suspend fun ack(ctx: Context, id: Int): Boolean = withContext(Dispatchers.IO) {
+        val req = request(ctx, "/notifications/$id/ack", post = true) ?: return@withContext false
+        runCatching { client.newCall(req).execute().use { it.isSuccessful } }.getOrDefault(false)
+    }
 
     private val probe = client.newBuilder().callTimeout(3, TimeUnit.SECONDS).build()
     // Session cache of the last probe, keyed by URL+token so editing either re-probes.

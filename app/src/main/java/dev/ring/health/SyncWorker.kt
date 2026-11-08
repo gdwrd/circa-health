@@ -3,11 +3,16 @@ package dev.ring.health
 import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.Manifest
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.OneTimeWorkRequestBuilder
@@ -35,7 +40,12 @@ import dev.ring.health.Prefs.lastStressMs
 import dev.ring.health.Prefs.lastSyncMs
 import dev.ring.health.Prefs.ringAddress
 import dev.ring.health.Prefs.vmUrl
+import dev.ring.health.ui.Api
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
 
@@ -149,6 +159,8 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                     ?.let { applicationContext.lastSpo2Ms = it }
                 sleepSessions.maxOfOrNull { it.startMs }
                     ?.let { applicationContext.lastSleepMs = it }
+
+                runCatching { postPending() }
             }
 
             applicationContext.lastSyncMs = System.currentTimeMillis()
@@ -357,6 +369,34 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         }
 
         return metrics
+    }
+
+    // ── Backend notifications ──────────────────────────────────────────────
+
+    /** Silent no-op without a backend (404 -> null). Unposted (no permission) stay pending. */
+    @SuppressLint("MissingPermission")
+    private suspend fun postPending() {
+        val ctx = applicationContext
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
+        val pending = Api.notifications(ctx) as? JsonArray ?: return
+        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.createNotificationChannel(NotificationChannel("health", "Health", NotificationManager.IMPORTANCE_DEFAULT))
+        val open = PendingIntent.getActivity(
+            ctx, 0, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
+        )
+        for (n in pending) {
+            val o = n.jsonObject
+            val id = o["id"]!!.jsonPrimitive.int
+            val notif = NotificationCompat.Builder(ctx, "health")
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle(o["title"]!!.jsonPrimitive.content)
+                .setContentText(o["body"]!!.jsonPrimitive.content)
+                .setContentIntent(open)
+                .setAutoCancel(true)
+                .build()
+            nm.notify(1000 + id, notif) // offset keeps clear of the sync notification id
+            Api.ack(ctx, id)
+        }
     }
 
     // ── Foreground notification ────────────────────────────────────────────

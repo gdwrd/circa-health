@@ -2,6 +2,7 @@ package dev.ring.health
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -15,8 +16,8 @@ class MainActivity : ComponentActivity() {
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { granted ->
-        if (granted.values.all { it }) {
+    ) { _ ->
+        if (hasPermissions()) {
             SyncWorker.schedule(this)
         } else {
             Toast.makeText(this, "Bluetooth permissions required", Toast.LENGTH_LONG).show()
@@ -28,16 +29,21 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent { App(::hasPermissions, ::requestPermissions) }
 
-        if (hasPermissions()) SyncWorker.schedule(this) else requestPermissions()
+        if (hasPermissions()) SyncWorker.schedule(this)
+        if (!hasPermissions() || !hasNotifications()) requestPermissions()
     }
 
+    private val blePermissions = listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+
     private fun hasPermissions(): Boolean =
-        listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
-            .all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
+        blePermissions.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
+
+    private fun hasNotifications(): Boolean = Build.VERSION.SDK_INT < 33 ||
+        ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
 
     private fun requestPermissions() {
         permissionLauncher.launch(
-            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+            (blePermissions + if (Build.VERSION.SDK_INT >= 33) listOf(Manifest.permission.POST_NOTIFICATIONS) else emptyList()).toTypedArray()
         )
     }
 }
