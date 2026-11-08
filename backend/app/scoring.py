@@ -1,0 +1,98 @@
+"""Pure scoring functions (no I/O). Scores are approximations against personal 14-day baselines."""
+from statistics import mean
+
+Contribs = dict[str, float | None]
+
+
+def _lin(x: float, at0: float, at100: float) -> float:
+    """Linear map: at0 -> 0, at100 -> 100, clamped (works in either direction)."""
+    return max(0.0, min(100.0, 100.0 * (x - at0) / (at100 - at0)))
+
+
+def _result(c: Contribs) -> dict:
+    vals = [v for v in c.values() if v is not None]
+    return {"score": round(mean(vals)) if vals else None, "contributors": c}
+
+
+def _band(ratio: float) -> float:
+    """100 at 80-120 % of target, linear to 0 at 0 % and 200 %."""
+    return _lin(ratio, 0.0, 0.8) if ratio < 0.8 else _lin(ratio, 2.0, 1.2)
+
+
+def baseline(values_14d: list[float | None]) -> float | None:
+    """Trailing 14-day mean; None until at least 5 values exist."""
+    vals = [v for v in values_14d[-14:] if v is not None]
+    return mean(vals) if len(vals) >= 5 else None
+
+
+def sleep_score(session: dict, need_min: float) -> dict:
+    """session: total_min (asleep), awake_min, rem_min, deep_min, midpoint_h (local hour 0-24)."""
+    asleep, awake = session["total_min"], session["awake_min"]
+    h = session["midpoint_h"]
+    outside = 0.0 if h <= 3 else min(h - 3, 24 - h)  # hours outside 00:00-03:00, wrapping at midnight
+    eff = asleep / (asleep + awake) if asleep + awake else 0.0
+    return _result({
+        "total": _lin(asleep, 240, need_min),
+        "efficiency": _lin(eff, 0.75, 0.95),
+        "restfulness": _lin(awake, 60, 10),
+        "rem": _lin(session["rem_min"], 0, 90),
+        "deep": _lin(session["deep_min"], 0, 90),
+        "timing": max(0.0, 100 - 33 * outside),
+    })
+
+
+def readiness_score(night: dict, baselines: dict, yesterday_steps: float | None, goal: float) -> dict:
+    """night: hr_p10, hrv_mean, sleep_score, recovery_frac (0-1 of night until HR near its minimum),
+    need_min (default 450). baselines: rhr, hrv, sleep_min, steps (14-day means, None while learning)."""
+    def rel(key: str, bkey: str, fn) -> float | None:
+        v, b = night.get(key), baselines.get(bkey)
+        return None if v is None or not b else fn(v, b)
+
+    need = night.get("need_min", 450)
+    rec = night.get("recovery_frac")
+    sleep_min, steps = baselines.get("sleep_min"), baselines.get("steps")
+    return _result({
+        "resting_hr": rel("hr_p10", "rhr", lambda v, b: max(0.0, 100 - 10 * max(0.0, v - b))),
+        "hrv_balance": rel("hrv_mean", "hrv", lambda v, b: _lin(v / b, 0.6, 1.0)),
+        "sleep": night.get("sleep_score"),
+        # shortcut: sleep balance reuses the sleep-total curve (240 min -> 0, need -> 100); PLAN gives no curve
+        "sleep_balance": None if sleep_min is None else _lin(sleep_min, 240, need),
+        "previous_day_activity": None if yesterday_steps is None else _band(yesterday_steps / goal),
+        "activity_balance": None if steps is None else _band(steps / goal),
+        "recovery_index": None if rec is None else _lin(rec, 1.0, 0.5),
+    })
+
+
+def activity_score(day: dict, goal: float, cal_7d_mean: float | None, goal_days_7d: int | None) -> dict:
+    """day: steps, calories, awake_hourly_steps (list of step counts per awake hour)."""
+    hours = day.get("awake_hourly_steps")
+    inactive = None if hours is None else sum(1 for s in hours if s < 50)
+    cal = day.get("calories")
+    return _result({
+        "steps": _lin(day["steps"], 0, goal),
+        "inactive_hours": None if inactive is None else _lin(inactive, 12, 5),
+        # shortcut: calories curve (0 at 50 % of the 7-day mean) is my choice; PLAN only says "vs 7-day mean"
+        "calories": None if cal is None or not cal_7d_mean else _lin(cal / cal_7d_mean, 0.5, 1.0),
+        "goal_days": None if goal_days_7d is None else _lin(goal_days_7d, 0, 5),
+    })
+
+
+def stress_zones(samples: list[float]) -> dict:
+    """samples: awake-hours ring stress values (0-100), 30 min apart. Returns zone counts and stressed hours."""
+    zones = {"restored": 0, "relaxed": 0, "engaged": 0, "stressed": 0}
+    for s in samples:
+        zones["restored" if s <= 25 else "relaxed" if s <= 50 else "engaged" if s <= 75 else "stressed"] += 1
+    return {**zones, "stressed_hours": zones["stressed"] * 0.5}
+
+
+_LEVELS = ["limited", "adequate", "solid", "strong", "exceptional"]
+
+
+def resilience(stress_loads_14d: list[float | None], readiness_14d: list[float | None]) -> str | None:
+    """Level from mean daily stress load (h) vs mean readiness; None until 5 days of each."""
+    load, ready = baseline(stress_loads_14d), baseline(readiness_14d)
+    if load is None or ready is None:
+        return None
+    r = sum(ready >= t for t in (60, 70, 80, 88))  # 0-4, higher readiness is better
+    s = sum(load <= t for t in (6, 4, 2, 1))       # 0-4, lower stress load is better
+    return _LEVELS[(r + s) // 2]
