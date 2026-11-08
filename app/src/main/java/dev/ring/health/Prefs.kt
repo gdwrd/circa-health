@@ -70,7 +70,7 @@ object Prefs {
         get() = prefs(this).getBoolean(KEY_ASKED_BATTERY, false)
         set(v) = prefs(this).edit().putBoolean(KEY_ASKED_BATTERY, v).apply()
 
-    // 2 = sleep sessions are pushed with awake/end/stage series (v1.1+).
+    // 2 = sleep sessions pushed with awake/end/stage series (v1.1+); 3 = with complete multi-packet stages (v2.0.3).
     var Context.sleepSchema: Int
         get() = prefs(this).getInt(KEY_SLEEP_SCHEMA, 0)
         set(v) = prefs(this).edit().putInt(KEY_SLEEP_SCHEMA, v).apply()

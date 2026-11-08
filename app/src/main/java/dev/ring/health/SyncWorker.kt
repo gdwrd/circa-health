@@ -175,7 +175,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                     ?.let { applicationContext.lastSpo2Ms = it }
                 sleepSessions.maxOfOrNull { it.startMs }
                     ?.let { applicationContext.lastSleepMs = it }
-                applicationContext.sleepSchema = 2
+                applicationContext.sleepSchema = 3
 
                 runCatching { postPending() }.onSuccess { n -> if (n > 0) log("Server: showed $n notifications") }
             }
@@ -279,35 +279,37 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         return samples
     }
 
-    private suspend fun collectSpo2(conn: ColmiConnection): List<Spo2Sample> {
-        return withTimeoutOrNull(20_000) {
-            while (true) {
+    private suspend fun collectSpo2(conn: ColmiConnection): List<Spo2Sample> =
+        collectBigData(conn, ColmiProtocol.BIG_DATA_TYPE_SPO2, "SpO2")?.let(ColmiProtocol::parseSpo2Packet) ?: emptyList()
+
+    /**
+     * Big-data V2 replies (sleep, SpO2) are longer than one BLE notification (20 bytes at the default MTU):
+     * a 6-byte header carrying the payload length at bytes 2..3, then the payload split over several
+     * notifications. Reassemble them; parsing only the first notification truncated the night after 3 stages.
+     */
+    private suspend fun collectBigData(conn: ColmiConnection, type: Byte, what: String): ByteArray? {
+        var buf: ByteArray? = null
+        var need = Int.MAX_VALUE
+        withTimeoutOrNull(20_000) {
+            while ((buf?.size ?: 0) < need) {
                 val pkt = conn.notifyV2.receive()
-                if (pkt.size >= 2 &&
-                    pkt[0] == ColmiProtocol.CMD_BIG_DATA_V2 &&
-                    pkt[1] == ColmiProtocol.BIG_DATA_TYPE_SPO2
-                ) {
-                    return@withTimeoutOrNull ColmiProtocol.parseSpo2Packet(pkt)
+                val b = buf
+                if (b == null) {
+                    if (pkt.size < 6 || pkt[0] != ColmiProtocol.CMD_BIG_DATA_V2 || pkt[1] != type) continue
+                    need = 6 + ((pkt[2].toInt() and 0xff) or ((pkt[3].toInt() and 0xff) shl 8))
+                    buf = pkt
+                } else {
+                    buf = b + pkt
                 }
             }
-            @Suppress("UNREACHABLE_CODE") emptyList()
-        } ?: emptyList()
+        }
+        val b = buf ?: return null
+        if (b.size < need) SyncLog.add(applicationContext, "Ring: $what reply incomplete (${b.size}/$need bytes), parsing what arrived")
+        return b.copyOf(minOf(b.size, need))
     }
 
-    private suspend fun collectSleep(conn: ColmiConnection): List<SleepSession> {
-        return withTimeoutOrNull(20_000) {
-            while (true) {
-                val pkt = conn.notifyV2.receive()
-                if (pkt.size >= 2 &&
-                    pkt[0] == ColmiProtocol.CMD_BIG_DATA_V2 &&
-                    pkt[1] == ColmiProtocol.BIG_DATA_TYPE_SLEEP
-                ) {
-                    return@withTimeoutOrNull ColmiProtocol.parseSleepPacket(pkt)
-                }
-            }
-            @Suppress("UNREACHABLE_CODE") emptyList()
-        } ?: emptyList()
-    }
+    private suspend fun collectSleep(conn: ColmiConnection): List<SleepSession> =
+        collectBigData(conn, ColmiProtocol.BIG_DATA_TYPE_SLEEP, "sleep")?.let(ColmiProtocol::parseSleepPacket) ?: emptyList()
 
     // ── Metric computation ─────────────────────────────────────────────────
 
@@ -330,8 +332,8 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         val lastActivityMs = ctx.lastActivityMs
         val lastStressMs   = ctx.lastStressMs
         val lastSpo2Ms     = ctx.lastSpo2Ms
-        // Once after upgrading from v1.0: re-send the sessions the ring still holds with the v1.1 series.
-        val lastSleepMs    = if (ctx.sleepSchema < 2) 0L else ctx.lastSleepMs
+        // Once after an upgrade that changed sleep parsing: re-send the sessions the ring still holds.
+        val lastSleepMs    = if (ctx.sleepSchema < 3) 0L else ctx.lastSleepMs
 
         // ── Battery (always push — instantaneous reading) ─────────────────
         if (battery != null) {
