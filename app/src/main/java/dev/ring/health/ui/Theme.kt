@@ -81,6 +81,10 @@ data class AppColors(
     val stageDeep: Color,
     val heart: Color,
     val hrv: Color,
+    val zoneRestored: Color,
+    val zoneRelaxed: Color,
+    val zoneEngaged: Color,
+    val zoneStressed: Color,
 )
 
 private val SleepIndigo = Color(0xFF5E5CE6)
@@ -91,6 +95,7 @@ private val StageRem = Color(0xFF64D2FF)
 private val StageCore = Color(0xFF0A84FF)
 private val HeartRed = Color(0xFFFF2D55)
 private val HrvCyan = Color(0xFF64D2FF)
+private val ZoneEngaged = Color(0xFFFFD60A)
 
 private val LightColors = AppColors(
     background = Color(0xFFF2F2F7),
@@ -103,6 +108,7 @@ private val LightColors = AppColors(
     sleep = SleepIndigo, readiness = ReadinessGreen, activity = ActivityPink,
     stageAwake = StageAwake, stageRem = StageRem, stageCore = StageCore, stageDeep = SleepIndigo,
     heart = HeartRed, hrv = HrvCyan,
+    zoneRestored = ReadinessGreen, zoneRelaxed = StageRem, zoneEngaged = ZoneEngaged, zoneStressed = StageAwake,
 )
 
 private val DarkColors = AppColors(
@@ -116,6 +122,7 @@ private val DarkColors = AppColors(
     sleep = SleepIndigo, readiness = ReadinessGreen, activity = ActivityPink,
     stageAwake = StageAwake, stageRem = StageRem, stageCore = StageCore, stageDeep = SleepIndigo,
     heart = HeartRed, hrv = HrvCyan,
+    zoneRestored = ReadinessGreen, zoneRelaxed = StageRem, zoneEngaged = ZoneEngaged, zoneStressed = StageAwake,
 )
 
 object AppType {
