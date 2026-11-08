@@ -178,7 +178,7 @@ def sleep(day: str | None = Query(None, alias="date")) -> dict:
     stages: list[dict] = []
     if n:
         s, e = (datetime.fromtimestamp(n[k], vm.tz()) for k in ("start", "end"))
-        stages = [{"t": t, "stage": int(v)} for t, v in vm.series("biometric_sleep_stage", s, e, "5m").items()]
+        stages = [{"t": t, "stage": int(v)} for t, v in vm.series("last_over_time(biometric_sleep_stage[3h])", s, e, "5m").items() if t < n["end"]]
     return {"date": d.isoformat(), "status": "ok" if n else "learning", "score": row.get("sleep_score"),
             "contributors": row["c"].get("sleep"), "session": n, "stages": stages}
 

@@ -27,7 +27,7 @@ def test_ingest_rescores_and_today_has_sleep_score(monkeypatch) -> None:
                 "biometric_sleep_awake_min": 30 if first else None,
                 "biometric_sleep_rem_min": 90 if first else None,
                 "biometric_sleep_deep_min": 80 if first else None,
-                "biometric_sleep_stage": 2 if first else None,
+                "last_over_time(biometric_sleep_stage[3h])": 2 if first else None,
                 "biometric_hr_bpm": 54 if ss <= t <= es else 70,
                 "biometric_hrv_rmssd": 45,
                 "biometric_stress": 80 if hour < 10 else 30,
