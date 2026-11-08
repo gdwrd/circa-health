@@ -87,7 +87,7 @@ design) stay the references for what already exists; nothing in them is re-deriv
 - `scheduleNext(ctx)`: `user = syncIntervalMin`; `user <= 0` → off (unchanged); else
   `minutes = when { lastCharging -> max(user, 30); lastBatteryPct in 0..20 -> max(user, 15); else -> user }`
   (extra (2): nothing new to read while charging). Log "Next sync in 15 min (battery 18 %)" / "(charging)" when stretched.
-- Settings "Every" value: `intervalLabel(interval)` + " · 15 min while battery is low" when `lastBatteryPct in 0..20`
+- Settings "Every" value: `intervalLabel(interval)` + " · 15 min on low battery" when `lastBatteryPct in 0..20`
   and not charging, " · 30 min while charging" when charging. Check it at 360 dp (suffix may wrap; one line preferred).
 - Backend: delete `notify._battery` and remove it from `evaluate`; delete
   `test_battery_refires_only_after_ack_and_recharge`; `test_pending_and_ack_routes` must seed a notification another way

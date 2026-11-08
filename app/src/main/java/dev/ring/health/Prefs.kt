@@ -21,6 +21,10 @@ object Prefs {
     private const val KEY_LAST_ACTIVITY_MS = "last_activity_ms"
     private const val KEY_LAST_STRESS_MS  = "last_stress_ms"
     private const val KEY_LAST_SPO2_MS    = "last_spo2_ms"
+    private const val KEY_BATTERY_PCT     = "battery_pct"
+    private const val KEY_CHARGING        = "charging"
+    private const val KEY_BATTERY_WARNED  = "battery_warned"
+    private const val KEY_CHARGED_TOLD    = "charged_told"
     private const val KEY_TODAY_JSON      = "today_json"
     private const val KEY_TODAY_JSON_MS   = "today_json_ms"
 
@@ -88,6 +92,23 @@ object Prefs {
     var Context.lastSpo2Ms: Long
         get() = prefs(this).getLong(KEY_LAST_SPO2_MS, 0L)
         set(v) = prefs(this).edit().putLong(KEY_LAST_SPO2_MS, v).apply()
+
+    /** Last ring battery level (-1 unknown) and charging state; the two flags make each alert fire once. */
+    var Context.lastBatteryPct: Int
+        get() = prefs(this).getInt(KEY_BATTERY_PCT, -1)
+        set(v) = prefs(this).edit().putInt(KEY_BATTERY_PCT, v).apply()
+
+    var Context.lastCharging: Boolean
+        get() = prefs(this).getBoolean(KEY_CHARGING, false)
+        set(v) = prefs(this).edit().putBoolean(KEY_CHARGING, v).apply()
+
+    var Context.batteryWarned: Boolean
+        get() = prefs(this).getBoolean(KEY_BATTERY_WARNED, false)
+        set(v) = prefs(this).edit().putBoolean(KEY_BATTERY_WARNED, v).apply()
+
+    var Context.chargedTold: Boolean
+        get() = prefs(this).getBoolean(KEY_CHARGED_TOLD, false)
+        set(v) = prefs(this).edit().putBoolean(KEY_CHARGED_TOLD, v).apply()
 
     /** Last /today body for the home-screen widget, and when it was fetched. */
     var Context.todayJson: String

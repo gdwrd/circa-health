@@ -95,36 +95,11 @@ def test_inactivity_skips_night_and_late_hours(monkeypatch) -> None:
     assert kinds() == []
 
 
-def test_battery_refires_only_after_ack_and_recharge(monkeypatch, env) -> None:
-    env["biometric_steps"] = {1.0: 100.0}
-    now = at(monkeypatch, 12)
-    t = now.timestamp()
-    env["ring_battery_pct"] = {t: 12.0}
-    env["ring_charging"] = {t: 1.0}
-    notify.evaluate(set())
-    assert kinds() == []  # charging
-    env["ring_charging"] = {t: 0.0}
-    notify.evaluate(set())
-    notify.evaluate(set())
-    assert kinds() == ["battery"]
-    notify.ack(notify.pending()[0]["id"])
-    at(monkeypatch, 13)
-    env["ring_battery_pct"] = {t + 60: 10.0}
-    notify.evaluate(set())
-    assert kinds() == []  # acked but never rose above 15
-    env["ring_battery_pct"] = {t + 60: 90.0, t + 600: 14.0}
-    notify.evaluate(set())
-    assert kinds() == ["battery"]
-
-
 def test_pending_and_ack_routes(monkeypatch, env) -> None:
-    env["biometric_steps"] = {1.0: 100.0}
-    env["ring_battery_pct"] = {1.0: 5.0}
-    at(monkeypatch, 12)
-    notify.evaluate(set())
+    notify._add("checkin", "How was yesterday?", "Takes ten seconds.", at(monkeypatch, 12))
     with TestClient(app) as c:
         (n,) = c.get("/notifications/pending", headers=H).json()
-        assert set(n) == {"id", "kind", "title", "body", "created_at", "extra"} and n["kind"] == "battery"
+        assert set(n) == {"id", "kind", "title", "body", "created_at", "extra"} and n["kind"] == "checkin"
         assert n["extra"] is None
         assert c.post(f"/notifications/{n['id']}/ack", headers=H).status_code == 200
         assert c.get("/notifications/pending", headers=H).json() == []

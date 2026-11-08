@@ -72,6 +72,8 @@ import dev.ring.health.MetricsPusher
 import dev.ring.health.MainActivity
 import dev.ring.health.R
 import dev.ring.health.Prefs.apiToken
+import dev.ring.health.Prefs.lastBatteryPct
+import dev.ring.health.Prefs.lastCharging
 import dev.ring.health.Prefs.lastSyncMs
 import dev.ring.health.Prefs.ringAddress
 import dev.ring.health.Prefs.sleepNeedHours
@@ -238,7 +240,14 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 "Each sync reads new data from the ring and pushes it to the server. " +
                     "Android delays background work while battery optimisation is on.",
             ) {
-                ChevronRow("Every", intervalLabel(interval)) { pickInterval = true }
+                val battery = ctx.lastBatteryPct
+                val stretch = when {
+                    interval <= 0 -> ""
+                    ctx.lastCharging && interval < 30 -> " · 30 min while charging"
+                    battery in 0..20 && interval < 15 -> " · 15 min on low battery"
+                    else -> ""
+                }
+                ChevronRow("Every", intervalLabel(interval) + stretch) { pickInterval = true }
                 Hairline(Modifier.padding(start = AppSpace.l))
                 ChevronRow("Battery", if (batteryOk) "Unrestricted" else "Optimised") {
                     if (!batteryOk) MainActivity.requestBatteryExemption(ctx)

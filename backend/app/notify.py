@@ -77,21 +77,6 @@ def _inactivity(now: datetime, dates: set[date]) -> None:
         _add("inactivity", "Time to move", "No steps in the last 2 hours.", now)
 
 
-def _battery(now: datetime, dates: set[date]) -> None:
-    """Re-fires only if the last battery notification was acked and the level rose above 15 since."""
-    last = db.query("SELECT created_at, acked_at FROM notifications WHERE kind='battery' ORDER BY id DESC LIMIT 1")
-    since = datetime.fromisoformat(last[0]["created_at"]) if last else now - timedelta(hours=24)
-    s = vm.series("ring_battery_pct", since, now, "5m")
-    if not s or s[max(s)] > 15:
-        return
-    if last and not (last[0]["acked_at"] and max(s.values()) > 15):
-        return
-    chg = vm.series("ring_charging", now - timedelta(hours=1), now, "5m")
-    if chg and chg[max(chg)] == 1:
-        return
-    _add("battery", f"Ring battery {round(s[max(s)])}%", "Charge the ring soon.", now)
-
-
 def _weekly(now: datetime, dates: set[date]) -> None:
     """Monday 08-12 local: averages of the previous 7 days, once (no weekly row in the last 6 days)."""
     if now.weekday() or not 8 <= now.hour < 12:
@@ -163,7 +148,7 @@ def _strain(now: datetime, dates: set[date]) -> None:
 
 def evaluate(dates: set[date]) -> None:
     now = _now()
-    for rule in (_readiness, _bedtime, _inactivity, _battery, _weekly, _strain, _checkin):
+    for rule in (_readiness, _bedtime, _inactivity, _weekly, _strain, _checkin):
         try:
             rule(now, dates)
         except Exception:

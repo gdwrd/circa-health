@@ -31,7 +31,11 @@ import dev.ring.health.ColmiProtocol.SleepSession
 import dev.ring.health.ColmiProtocol.Spo2Sample
 import dev.ring.health.ColmiProtocol.StressSample
 import dev.ring.health.Prefs.apiToken
+import dev.ring.health.Prefs.batteryWarned
+import dev.ring.health.Prefs.chargedTold
 import dev.ring.health.Prefs.lastActivityMs
+import dev.ring.health.Prefs.lastBatteryPct
+import dev.ring.health.Prefs.lastCharging
 import dev.ring.health.Prefs.lastHrMs
 import dev.ring.health.Prefs.lastHrvMs
 import dev.ring.health.Prefs.lastSleepMs
@@ -94,6 +98,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             // ── Battery ───────────────────────────────────────────────────
             conn.writePacket(ColmiProtocol.batteryRequest())
             val battery = collectBattery(conn)
+            if (battery != null) onBattery(battery)
 
             // ── Heart rate — today + yesterday ────────────────────────────
             val hrSamples = mutableListOf<HrSample>()
@@ -438,6 +443,28 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         return pending.size
     }
 
+    /** Stores the level and posts "battery low" / "charged" once per discharge / charge. Skipped without permission. */
+    @SuppressLint("MissingPermission")
+    private fun onBattery(b: BatteryStatus) {
+        val ctx = applicationContext
+        ctx.lastBatteryPct = b.level
+        ctx.lastCharging = b.charging
+        val low = b.level <= 20 && !b.charging
+        val full = b.charging && b.level == 100
+        if (!low && ctx.batteryWarned) ctx.batteryWarned = false
+        if (!b.charging) ctx.chargedTold = false
+        val granted = ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        if (!granted) return
+        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.createNotificationChannel(NotificationChannel("health", "Health", NotificationManager.IMPORTANCE_DEFAULT))
+        val open = PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        fun post(id: Int, title: String, text: String) = nm.notify(id, NotificationCompat.Builder(ctx, "health")
+            .setSmallIcon(R.drawable.ic_stat_circa).setContentTitle(title).setContentText(text)
+            .setContentIntent(open).setAutoCancel(true).build())
+        if (low && !ctx.batteryWarned) { post(2, "Ring battery ${b.level} %", "Charge the ring soon."); ctx.batteryWarned = true }
+        if (full && !ctx.chargedTold) { post(3, "Ring charged", "Put it back on to keep tracking."); ctx.chargedTold = true }
+    }
+
     // ── Foreground notification ────────────────────────────────────────────
 
     private fun buildForegroundInfo(text: String): ForegroundInfo {
@@ -478,12 +505,18 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         }
 
         internal fun scheduleNext(ctx: Context) {
-            val minutes = ctx.syncIntervalMin
-            if (minutes <= 0) {
+            val user = ctx.syncIntervalMin
+            if (user <= 0) {
                 SyncLog.add(ctx, "Background sync is off; nothing scheduled")
                 return
             }
-            SyncLog.add(ctx, "Next sync in $minutes min")
+            val minutes = when {
+                ctx.lastCharging -> maxOf(user, 30)
+                ctx.lastBatteryPct in 0..20 -> maxOf(user, 15)
+                else -> user
+            }
+            val why = if (minutes == user) "" else if (ctx.lastCharging) " (charging)" else " (battery ${ctx.lastBatteryPct} %)"
+            SyncLog.add(ctx, "Next sync in $minutes min$why")
             val request = OneTimeWorkRequestBuilder<SyncWorker>()
                 .setInitialDelay(minutes.toLong(), TimeUnit.MINUTES)
                 .build()
