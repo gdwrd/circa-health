@@ -416,18 +416,38 @@ Files: `app/.../widget/RingWidget.kt`, `widget/RingWidgetReceiver.kt` (new), `re
 
 ---
 
-## Phase F — App name and icon (decided with the user)
+## Phase F — App name and icon: **Circa** (decided, user 2026-11-08)
 
-The name and icon concept are chosen in conversation first (candidates in the 2026-11-08 discussion); then one ledger
-item implements them:
-- `applicationId` stays `dev.ring.health` so installs upgrade in place; only `app_name` and the launcher label change.
-  The GitHub repo and release titles use the new name; the package rename is not worth the reinstall.
+**Name: Circa.** "Around" (a ring), the root of *circadian*, and "approximately" — honest about scores that are
+estimates against your own baseline. Tagline: **"Know your normal."** Written `Circa` in UI, `circa` in identifiers.
+Trademark not searched (personal app, not on the Play Store); check the Play Store and USPTO before any public release.
+
+**Icon concept.** A thin ring that is not quite closed: the arc starts thin at the bottom-left and thickens towards its
+head at the top-right, where a small gap and a dot sit — the same gesture as the app's score rings, and a lowercase
+"c" at a glance. Details:
+- Canvas 108 × 108 dp adaptive layers; the mark lives inside the 66 dp safe circle. Ring outer radius 30 dp, stroke
+  tapering 4 → 9 dp, round caps; the gap spans ~40° centred at 45° (top-right); the dot (Ø 6 dp) sits in the gap, 2 dp
+  off the arc's head. Mark centred at (54, 54).
+- Colour: background near-black `#0B0B10`; arc gradient along its length from Sleep indigo `#5E5CE6` (tail) to a mint
+  `#7CF2A2` (head); dot in the head colour. Light launcher variant uses the same layers (the background is part of the icon).
+- Monochrome layer: the arc + dot as a single white path (Android 13 themed icons tint it).
+- Notification small icon `ic_stat_circa`: the arc + dot, white on transparent, 24 dp, 2 dp stroke equivalent.
+- Source: `docs/brand/circa.svg` (mark), `docs/brand/circa-icon.svg` (full icon with background). Three variants are
+  mocked first (gap size / taper / dot) on one HTML page rendered at 48, 108 and themed on light + dark launcher
+  backgrounds; the user picks one before the ledger item runs.
+
+Implementation (ledger F1):
+- `applicationId` stays `dev.ring.health` so installs upgrade in place; `app_name` → "Circa", launcher label, `README`
+  title ("Circa — self-hosted health for the Colmi ring"), GitHub release titles from the next release on, the
+  notification channel name, `Theme.RingHealthTracker` style name unchanged (not user-visible). The GitHub repo may be
+  renamed later by the user (GitHub redirects the old URL).
 - **Adaptive icon**: `res/mipmap-anydpi-v26/ic_launcher.xml` with a vector foreground (`res/drawable/ic_launcher_fg.xml`),
   a flat background colour, and a `monochrome` layer so Android 13+ themed icons work; legacy `mipmap-*/ic_launcher.png`
   rasters generated from the same vector (Android Studio Image Asset, or `vd-tool`). Foreground keeps a 66 dp safe zone.
 - **Notification small icon**: a white-on-transparent version of the mark (today the framework info icon is used).
 - Splash: Android 12+ system splash picks the launcher icon up automatically (`Theme.SplashScreen` not required).
-- Source files (SVG) live in `docs/brand/` so the icon can be regenerated.
+- In-app: the Settings screen footer shows the mark + "Circa 3.x.y"; the Today large title stays "Today".
+- Order: F0 (icon mock-ups, user picks) runs any time; F1 lands before R3 so v3.0.0 ships under the new name and icon.
 
 ## Ledger order and parallelism
 
