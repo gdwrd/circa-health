@@ -16,7 +16,7 @@ data class Metric(
     val timestampMs: Long
 )
 
-class MetricsPusher(private val baseUrl: String) {
+class MetricsPusher(private val baseUrl: String, private val token: String = "") {
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -48,6 +48,7 @@ class MetricsPusher(private val baseUrl: String) {
 
         val request = Request.Builder()
             .url("$baseUrl/api/v1/import/prometheus")
+            .apply { if (token.isNotBlank()) header("Authorization", "Bearer $token") }
             .post(body.toRequestBody("text/plain; charset=utf-8".toMediaType()))
             .build()
 

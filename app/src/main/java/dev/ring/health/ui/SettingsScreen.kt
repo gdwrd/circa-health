@@ -1,0 +1,343 @@
+package dev.ring.health.ui
+
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothManager
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanResult
+import android.content.Context
+import android.util.Log
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.lifecycleScope
+import dev.ring.health.ColmiConnection
+import dev.ring.health.ColmiProtocol
+import dev.ring.health.Metric
+import dev.ring.health.MetricsPusher
+import dev.ring.health.Prefs.apiToken
+import dev.ring.health.Prefs.lastSyncMs
+import dev.ring.health.Prefs.ringAddress
+import dev.ring.health.Prefs.sleepNeedHours
+import dev.ring.health.Prefs.stepGoal
+import dev.ring.health.Prefs.vmUrl
+import dev.ring.health.SyncWorker
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+@SuppressLint("MissingPermission")
+@Composable
+fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit) {
+    val ctx = LocalContext.current
+    val activity = ctx as ComponentActivity
+    val c = AppTheme.colors
+
+    var ring by remember { mutableStateOf(ctx.ringAddress ?: "") }
+    var url by remember { mutableStateOf(ctx.vmUrl) }
+    var token by remember { mutableStateOf(ctx.apiToken) }
+    var steps by remember { mutableStateOf(ctx.stepGoal.toString()) }
+    var sleepNeed by remember { mutableStateOf(ctx.sleepNeedHours.toString().removeSuffix(".0")) }
+
+    var lastSync by remember { mutableStateOf(ctx.lastSyncMs) }
+    DisposableEffect(activity) {
+        val obs = LifecycleEventObserver { _, e -> if (e == Lifecycle.Event.ON_RESUME) lastSync = ctx.lastSyncMs }
+        activity.lifecycle.addObserver(obs)
+        onDispose { activity.lifecycle.removeObserver(obs) }
+    }
+
+    var scanning by remember { mutableStateOf(false) }
+    var scanResults by remember { mutableStateOf<List<ScanResult>?>(null) }
+    var measuring by remember { mutableStateOf(false) }
+    var liveText by remember { mutableStateOf("") }
+    var liveJob by remember { mutableStateOf<Job?>(null) }
+
+    fun startScan() {
+        if (!hasPermissions()) { requestPermissions(); return }
+        val scanner = (ctx.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager)
+            .adapter?.bluetoothLeScanner
+        if (scanner == null) {
+            Toast.makeText(ctx, "Bluetooth not available", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val found = mutableListOf<ScanResult>()
+        val callback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult) {
+                if (found.none { it.device.address == result.device.address }) found += result
+            }
+        }
+        scanning = true
+        scanner.startScan(callback)
+        activity.lifecycleScope.launch {
+            delay(5_000)
+            scanner.stopScan(callback)
+            scanning = false
+            if (found.isEmpty()) {
+                Toast.makeText(ctx, "No BLE devices found", Toast.LENGTH_SHORT).show()
+            } else {
+                scanResults = found.toList()
+            }
+        }
+    }
+
+    fun measureHeartRate() {
+        if (liveJob?.isActive == true) return
+        if (!hasPermissions()) { requestPermissions(); return }
+        val address = ctx.ringAddress
+        if (address.isNullOrBlank()) {
+            Toast.makeText(ctx, "Set ring address first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        measuring = true
+        liveText = "Connecting to ring…"
+        liveJob = activity.lifecycleScope.launch {
+            val result = runLiveHr(ctx.applicationContext, address) { liveText = it }
+            measuring = false
+            liveText = result
+        }
+    }
+
+    LargeTitleScaffold("Settings") {
+        item {
+            Section("Ring") {
+                FieldRow("Address", ring, "Not configured") { ring = it.trim(); ctx.ringAddress = ring.takeIf { a -> a.isNotEmpty() } }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ButtonRow(if (scanning) "Scanning…" else "Scan for ring", enabled = !scanning, onClick = ::startScan)
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ValueRow("Last sync", if (lastSync == 0L) "Never" else SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date(lastSync)))
+            }
+        }
+        item {
+            Section("Server", "Point at the backend (:8429) or straight at VictoriaMetrics (:8428).") {
+                FieldRow("URL", url, "http://host:8429", KeyboardType.Uri) { url = it.trim(); ctx.vmUrl = url }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                FieldRow("Token", token, "Optional", KeyboardType.Password, password = true) { token = it.trim(); ctx.apiToken = token }
+            }
+        }
+        item {
+            Section("Goals") {
+                FieldRow("Step goal", steps, "8000", KeyboardType.Number) {
+                    steps = it.filter(Char::isDigit)
+                    steps.toIntOrNull()?.let { n -> ctx.stepGoal = n }
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                FieldRow("Sleep need (h)", sleepNeed, "7.5", KeyboardType.Decimal) {
+                    sleepNeed = it
+                    it.replace(',', '.').toFloatOrNull()?.let { h -> ctx.sleepNeedHours = h }
+                }
+            }
+        }
+        item {
+            Section("Actions", liveText.ifEmpty { null }) {
+                ButtonRow("Sync now") {
+                    SyncWorker.runNow(ctx)
+                    Toast.makeText(ctx, "Sync started", Toast.LENGTH_SHORT).show()
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ButtonRow(if (measuring) "Measuring…" else "Measure heart rate now", enabled = !measuring, onClick = ::measureHeartRate)
+            }
+        }
+    }
+
+    scanResults?.let { results ->
+        AlertDialog(
+            onDismissRequest = { scanResults = null },
+            title = { Text("Select your ring") },
+            text = {
+                Column {
+                    results.forEach { r ->
+                        val name = r.device.name?.takeIf { it.isNotBlank() } ?: "Unknown"
+                        Text(
+                            "$name — ${r.device.address}",
+                            Modifier.fillMaxWidth().clickable {
+                                ring = r.device.address
+                                ctx.ringAddress = ring
+                                scanResults = null
+                                Toast.makeText(ctx, "Ring address saved", Toast.LENGTH_SHORT).show()
+                            }.padding(vertical = AppSpace.m),
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton({ scanResults = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+// ── iOS grouped-list pieces ────────────────────────────────────────────────
+
+@Composable
+private fun Section(header: String, footer: String? = null, rows: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
+    Column {
+        Text(
+            header.uppercase(), style = AppType.footnote, color = AppTheme.colors.secondaryLabel,
+            modifier = Modifier.padding(start = AppSpace.l, bottom = AppSpace.s - AppSpace.xs),
+        )
+        InsetCard(content = rows)
+        if (footer != null) {
+            Text(
+                footer, style = AppType.footnote, color = AppTheme.colors.secondaryLabel,
+                modifier = Modifier.padding(start = AppSpace.l, end = AppSpace.l, top = AppSpace.s - AppSpace.xs),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ValueRow(title: String, value: String) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
+        Text(title, style = AppType.body, modifier = Modifier.width(120.dp))
+        Text(value, style = AppType.body, color = AppTheme.colors.secondaryLabel, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun FieldRow(
+    title: String,
+    value: String,
+    placeholder: String,
+    keyboard: KeyboardType = KeyboardType.Text,
+    password: Boolean = false,
+    onChange: (String) -> Unit,
+) {
+    val c = AppTheme.colors
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
+        Text(title, style = AppType.body, modifier = Modifier.width(120.dp))
+        BasicTextField(
+            value, onChange,
+            modifier = Modifier.weight(1f),
+            singleLine = true,
+            textStyle = AppType.body.copy(color = c.label, textAlign = TextAlign.End),
+            cursorBrush = SolidColor(c.tint),
+            keyboardOptions = KeyboardOptions(keyboardType = keyboard),
+            visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
+            decorationBox = { inner ->
+                Box(contentAlignment = Alignment.CenterEnd) {
+                    if (value.isEmpty()) Text(placeholder, style = AppType.body, color = c.secondaryLabel)
+                    inner()
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun ButtonRow(title: String, enabled: Boolean = true, onClick: () -> Unit) {
+    val c = AppTheme.colors
+    Box(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(enabled = enabled, onClick = onClick).padding(horizontal = AppSpace.l), contentAlignment = Alignment.CenterStart) {
+        Text(title, style = AppType.body, color = if (enabled) c.tint else c.secondaryLabel)
+    }
+}
+
+// ── Live heart rate (moved from MainActivity; behaviour unchanged) ──────────
+
+@SuppressLint("MissingPermission")
+private suspend fun runLiveHr(ctx: Context, address: String, onProgress: (String) -> Unit): String {
+    val conn = ColmiConnection(ctx, address)
+    var measurementStarted = false
+    return try {
+        val connected = conn.connect()
+        if (!connected) return "Could not connect (ring may be busy syncing — try again in a few seconds)"
+
+        onProgress("Measuring (keep ring still)…")
+        conn.writePacket(ColmiProtocol.liveHrStartRequest())
+        measurementStarted = true
+
+        // Read for ~30s, accepting whatever bpm > 0 we see; the ring usually
+        // streams a few invalid (bpm=0) packets first while it acquires.
+        var lastBpm = 0
+        var notWorn = false
+        val deadline = System.currentTimeMillis() + 30_000
+        loop@ while (currentCoroutineContext().isActive && System.currentTimeMillis() < deadline) {
+            val pkt = withTimeoutOrNull(deadline - System.currentTimeMillis()) {
+                conn.notifyV1.receive()
+            } ?: break
+            val parsed = ColmiProtocol.parseLiveHrPacket(pkt) ?: continue
+            when (parsed.error) {
+                1 -> { notWorn = true; break@loop }
+                0 -> if (parsed.bpm > 0) {
+                    lastBpm = parsed.bpm
+                    onProgress("♥ ${parsed.bpm} bpm  (measuring…)")
+                    // Stable enough after ~6 valid readings (≈12s of streaming)
+                    if (System.currentTimeMillis() > deadline - 18_000) break@loop
+                }
+            }
+        }
+
+        when {
+            notWorn      -> "Ring not worn correctly — adjust and retry"
+            lastBpm == 0 -> "No reading — ensure ring is on a finger and try again"
+            else         -> { pushLiveHr(ctx, lastBpm); "♥ $lastBpm bpm" }
+        }
+    } catch (t: Throwable) {
+        Log.w("Settings", "Live HR failed", t)
+        "Error: ${t.message ?: t::class.simpleName}"
+    } finally {
+        // ALWAYS tell the ring to stop measuring before we disconnect, even
+        // on early returns / exceptions. Otherwise the ring keeps its HR
+        // sensor running on its own internal timeout (~minutes).
+        if (measurementStarted) {
+            runCatching {
+                withTimeoutOrNull(2_000) { conn.writePacket(ColmiProtocol.liveHrStopRequest()) }
+            }.onFailure { Log.w("Settings", "Live HR stop failed", it) }
+        }
+        conn.disconnect()
+    }
+}
+
+private suspend fun pushLiveHr(ctx: Context, bpm: Int) {
+    val url = ctx.vmUrl
+    if (url.isBlank()) return
+    withContext(Dispatchers.IO) {
+        runCatching {
+            MetricsPusher(url, ctx.apiToken).push(
+                listOf(
+                    Metric(
+                        name = "biometric_hr_bpm",
+                        labels = mapOf("device" to "colmi_r02", "source" to "live"),
+                        value = bpm.toDouble(),
+                        timestampMs = System.currentTimeMillis(),
+                    )
+                )
+            )
+        }.onFailure { Log.w("Settings", "Live HR push failed", it) }
+    }
+}

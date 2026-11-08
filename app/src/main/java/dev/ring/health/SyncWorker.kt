@@ -25,6 +25,7 @@ import dev.ring.health.ColmiProtocol.SLEEP_REM
 import dev.ring.health.ColmiProtocol.SleepSession
 import dev.ring.health.ColmiProtocol.Spo2Sample
 import dev.ring.health.ColmiProtocol.StressSample
+import dev.ring.health.Prefs.apiToken
 import dev.ring.health.Prefs.lastActivityMs
 import dev.ring.health.Prefs.lastHrMs
 import dev.ring.health.Prefs.lastHrvMs
@@ -129,7 +130,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             if (metrics.isEmpty()) {
                 Log.i(TAG, "No new metrics to push")
             } else {
-                val pushed = MetricsPusher(vmUrl).push(metrics)
+                val pushed = MetricsPusher(vmUrl, applicationContext.apiToken).push(metrics)
                 if (!pushed) {
                     scheduleNext(applicationContext)
                     return Result.success()

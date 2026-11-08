@@ -8,6 +8,9 @@ object Prefs {
 
     private const val KEY_RING_ADDRESS    = "ring_address"
     private const val KEY_VM_URL          = "vm_url"
+    private const val KEY_API_TOKEN       = "api_token"
+    private const val KEY_STEP_GOAL       = "step_goal"
+    private const val KEY_SLEEP_NEED_H    = "sleep_need_h"
     private const val KEY_LAST_SYNC_MS    = "last_sync_ms"
     private const val KEY_LAST_HR_MS      = "last_hr_ms"
     private const val KEY_LAST_HRV_MS     = "last_hrv_ms"
@@ -26,6 +29,18 @@ object Prefs {
     var Context.vmUrl: String
         get() = prefs(this).getString(KEY_VM_URL, "") ?: ""
         set(v) = prefs(this).edit().putString(KEY_VM_URL, v).apply()
+
+    var Context.apiToken: String
+        get() = prefs(this).getString(KEY_API_TOKEN, "") ?: ""
+        set(v) = prefs(this).edit().putString(KEY_API_TOKEN, v).apply()
+
+    var Context.stepGoal: Int
+        get() = prefs(this).getInt(KEY_STEP_GOAL, 8_000)
+        set(v) = prefs(this).edit().putInt(KEY_STEP_GOAL, v).apply()
+
+    var Context.sleepNeedHours: Float
+        get() = prefs(this).getFloat(KEY_SLEEP_NEED_H, 7.5f)
+        set(v) = prefs(this).edit().putFloat(KEY_SLEEP_NEED_H, v).apply()
 
     var Context.lastSyncMs: Long
         get() = prefs(this).getLong(KEY_LAST_SYNC_MS, 0L)
