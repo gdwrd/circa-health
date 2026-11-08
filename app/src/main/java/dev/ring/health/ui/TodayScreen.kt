@@ -67,6 +67,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import java.time.LocalDate
 import java.time.LocalTime
+import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 import java.util.Locale
 
 private val NAMES = mapOf(
@@ -126,6 +128,7 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
     // The tab leaves composition when deselected, so this also reloads on reselect.
     var journal by remember { mutableStateOf<List<Entry>>(emptyList()) }
     var medTime by remember { mutableStateOf("08:00") }
+    var medStarted by remember { mutableStateOf<String?>(null) }
     var sheet by remember { mutableStateOf(false) }
     var sheetDay by remember { mutableStateOf<Int?>(null) } // 0 Yesterday, 1 Today; null = by time of day
     LaunchedEffect(journalDate) {
@@ -139,7 +142,7 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
     LaunchedEffect(Unit) {
         data = Api.today(ctx).obj()
         loadJournal()
-        Api.settings(ctx)?.get("medication_time").str()?.let { medTime = it }
+        Api.settings(ctx)?.let { s -> s["medication_time"].str()?.let { medTime = it }; medStarted = s["medication_started"].str() }
     }
 
     val c = AppTheme.colors
@@ -191,11 +194,20 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
                                 Hairline(Modifier.padding(start = AppSpace.l))
                                 Contributor(NAMES[name] ?: name, v.num(), meta.second, CONTRIBUTOR_INFO[name])
                             }
+                            val since = medStarted?.let { runCatching { ChronoUnit.DAYS.between(LocalDate.parse(it), LocalDate.now()) }.getOrNull() }
+                            if (key == "readiness" && since != null && since in 0..60) {
+                                Hairline(Modifier.padding(start = AppSpace.l))
+                                Text(
+                                    "Resting HR is compared with your 14-day baseline, which now includes days on medication; it settles after about two weeks.",
+                                    style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l, vertical = AppSpace.m),
+                                )
+                            }
                         }
                     }
                 }
             }
         }
+        d["signals"].obj()?.let { item { BodySignals(it, medStarted) } }
         item {
             val v = d["vitals"].obj()
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
@@ -517,6 +529,76 @@ internal fun TimePickDialog(initial: String, onDismiss: () -> Unit, onPick: (Str
             )
         },
     )
+}
+
+// Wording mirrors backend/app/notify.py (_strain, LOGGED): says "may", never names an illness.
+private val LOGGED = mapOf(
+    "alcohol" to "alcohol", "workout" to "a workout", "sick" to "feeling unwell", "travel" to "travel",
+    "stress" to "stress", "late_meal" to "a late meal",
+)
+
+private fun join(parts: List<String>) = if (parts.size == 1) parts[0] else parts.dropLast(1).joinToString(", ") + " and " + parts.last()
+
+private fun flagLine(k: String, delta: Double?, usual: Double?): String? = when (k) {
+    "rhr" -> "Resting heart rate +${(delta ?: 0.0).roundToInt()} bpm above your usual"
+    "hrv" -> if (delta != null && usual != null && usual > 0) "HRV ${(-100 * delta / usual).roundToInt()} % below your usual" else "HRV lower than usual"
+    "awake" -> "Woke ${(delta ?: 0.0).roundToInt()} min more than usual"
+    "recovery" -> "Heart rate settled late in the night"
+    "spo2" -> "Blood oxygen dipped lower than usual"
+    else -> null
+}
+
+@Composable
+private fun BodySignals(s: JsonObject, medStarted: String?) {
+    val c = AppTheme.colors
+    var how by remember { mutableStateOf(false) }
+    val nights = s["nights"].num()?.roundToInt() ?: 0
+    val level = listOf("calm", "elevated", "high").indexOf(s["level"].str())
+    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+        Text("Body signals", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
+        InsetCard {
+            Column(Modifier.fillMaxWidth().clickable { how = !how }.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                if (s["status"].str() == "learning" || level < 0) {
+                    val med = s["reason"].str() == "medication" && medStarted != null
+                    val on = if (med) runCatching { " since your medication started on " + LocalDate.parse(medStarted).format(DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())) }.getOrDefault("") else ""
+                    Text("Learning your usual values" + (if (nights < 7) " · $nights/7 nights" else "") + on, style = AppType.subhead, color = c.secondaryLabel)
+                } else {
+                    val steps = listOf(c.signalCalm, c.signalElevated, c.signalHigh)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
+                        steps.forEachIndexed { i, col ->
+                            Box(Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(50)).background(if (i <= level) col else c.secondaryLabel.copy(alpha = 0.16f)))
+                        }
+                        Text(
+                            listOf("Calm", "Elevated", "High")[level], style = AppType.footnote, fontWeight = FontWeight.SemiBold,
+                            color = c.label, modifier = Modifier.padding(start = AppSpace.s),
+                        )
+                    }
+                    Text(listOf("Your body looks like itself.", "Some signs of strain.", "Clear signs of strain.")[level], style = AppType.headline)
+                    val deltas = s["deltas"].obj()
+                    val usual = s["usual"].obj()
+                    s["flags"].obj()?.keys?.mapNotNull { flagLine(it, deltas?.get(it).num(), usual?.get(it).num()) }?.forEach {
+                        Text(it, style = AppType.subhead)
+                    }
+                    val logged = (s["explain"] as? JsonArray)?.mapNotNull { LOGGED[it.str()] }.orEmpty()
+                    if (level > 0 && logged.isNotEmpty()) Text("You logged ${join(logged)} yesterday, which can cause this.", style = AppType.subhead, color = c.secondaryLabel)
+                    Text("Based on $nights nights. Not medical advice.", style = AppType.footnote, color = c.secondaryLabel)
+                }
+            }
+            AnimatedVisibility(how) {
+                Column {
+                    Hairline(Modifier.padding(start = AppSpace.l))
+                    Column(Modifier.padding(horizontal = AppSpace.l, vertical = AppSpace.m)) {
+                        Text("How this works", style = AppType.headline)
+                        Text(
+                            "Last night's resting heart rate, HRV, time awake and overnight recovery are compared with your own last 14 nights. " +
+                                "The ring has no temperature sensor, so this is a hint that your body may be under strain, not a prediction.",
+                            style = AppType.subhead, modifier = Modifier.padding(top = AppSpace.xs),
+                        )
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
