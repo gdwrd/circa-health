@@ -46,7 +46,9 @@ import com.patrykandpatrick.vico.compose.common.fill
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianChartModelProducer
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianLayerRangeProvider
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianValueFormatter
+import com.patrykandpatrick.vico.core.cartesian.data.ColumnCartesianLayerModel
 import com.patrykandpatrick.vico.core.cartesian.data.columnSeries
+import com.patrykandpatrick.vico.core.common.data.ExtraStore
 import com.patrykandpatrick.vico.core.cartesian.data.lineSeries
 import com.patrykandpatrick.vico.core.cartesian.layer.ColumnCartesianLayer
 import com.patrykandpatrick.vico.core.cartesian.layer.LineCartesianLayer
@@ -59,6 +61,8 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.ceil
@@ -83,14 +87,25 @@ fun StressScreen(backend: Boolean?) {
     var detail by remember { mutableStateOf(false) }
     if (detail) return ResilienceDetail { detail = false }
     var data by remember { mutableStateOf<JsonObject?>(null) }
+    var today by remember { mutableStateOf<JsonObject?>(null) } // resilience is 14-day: never follows the picker
+    var date by remember { mutableStateOf(LocalDate.now()) }
+    var samples by remember { mutableStateOf<List<Pair<Int, Double>>>(emptyList()) }
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
-    suspend fun load() { data = Api.today(ctx).obj() }
-    LaunchedEffect(Unit) { load() }
+    suspend fun load() {
+        data = Api.today(ctx, date).obj()
+        val midnight = date.atStartOfDay(ZoneId.systemDefault()).toEpochSecond()
+        // 30-min slot since midnight (0..47) and the stress value.
+        samples = (Api.stress(ctx, date).obj()?.get("points") as? JsonArray)?.mapNotNull { o ->
+            o.obj()?.let { p -> p["t"].num()?.let { t -> p["v"].num()?.let { ((t - midnight) / 1800).roundToInt() to it } } }
+        }.orEmpty()
+    }
+    LaunchedEffect(date) { load() }
+    LaunchedEffect(Unit) { today = Api.today(ctx).obj() }
 
     val c = AppTheme.colors
     LargeTitleScaffold("Stress", refreshing = refreshing, onRefresh = {
-        scope.launch { refreshing = true; try { load() } finally { refreshing = false } }
+        scope.launch { refreshing = true; try { load(); today = Api.today(ctx).obj() } finally { refreshing = false } }
     }) {
         val d = data ?: return@LargeTitleScaffold
         val st = d["stress"].obj()
@@ -100,10 +115,10 @@ fun StressScreen(backend: Boolean?) {
         ).map { (key, name, col) -> Triple(name, (st?.get(key).num() ?: 0.0).roundToInt() * 30, col) }
         item {
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                Text("Today", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
+                DayPicker(date) { date = it }
                 InsetCard {
                     if (zones.all { it.second == 0 }) {
-                        EmptyState(Icons.Rounded.Spa, "No stress data yet today", "Stress is read every 30 minutes while you wear the ring.")
+                        EmptyState(Icons.Rounded.Spa, if (date == LocalDate.now()) "No stress data yet today" else "No stress data for this day", "Stress is read every 30 minutes while you wear the ring.")
                     } else {
                         Row(Modifier.fillMaxWidth().padding(AppSpace.l), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                             zones.filter { it.second > 0 }.forEach { (_, min, col) ->
@@ -122,6 +137,7 @@ fun StressScreen(backend: Boolean?) {
                 }
             }
         }
+        if (samples.isNotEmpty()) item { ThroughTheDay(samples) }
         if (st != null) item {
             val min = ((st["stressed_hours"].num() ?: 0.0) * 60).roundToInt()
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
@@ -141,8 +157,8 @@ fun StressScreen(backend: Boolean?) {
                 }
             }
         }
-        item {
-            val level = (d["resilience"] as? JsonPrimitive)?.contentOrNull
+        today?.let { t -> item {
+            val level = (t["resilience"] as? JsonPrimitive)?.contentOrNull
             val idx = LEVELS.indexOfFirst { it.first == level }
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
                 Text("Resilience", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
@@ -151,7 +167,7 @@ fun StressScreen(backend: Boolean?) {
                     Column(Modifier.weight(1f).padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
                         if (idx < 0) {
                             Text(
-                                "Learning · ${(d["baseline_days"] as? JsonPrimitive)?.contentOrNull ?: "?"} days",
+                                "Learning · ${(t["baseline_days"] as? JsonPrimitive)?.contentOrNull ?: "?"} days",
                                 style = AppType.headline,
                             )
                             Text("Resilience appears once 5 of the last 14 days have data.", style = AppType.subhead, color = c.secondaryLabel)
@@ -168,6 +184,47 @@ fun StressScreen(backend: Boolean?) {
                     }
                 }
             }
+        } }
+    }
+}
+
+private fun zoneOf(v: Double) = if (v <= 25) 0 else if (v <= 50) 1 else if (v <= 75) 2 else 3
+
+/** 30-min stress columns across the day, each in its zone colour. */
+@Composable
+private fun ThroughTheDay(samples: List<Pair<Int, Double>>) {
+    val c = AppTheme.colors
+    val zones = listOf("Restored" to c.zoneRestored, "Relaxed" to c.zoneRelaxed, "Engaged" to c.zoneEngaged, "Stressed" to c.zoneStressed)
+    val byX = samples.associate { it.first.toDouble() to it.second }
+    val producer = remember { CartesianChartModelProducer() }
+    LaunchedEffect(samples) {
+        producer.runTransaction {
+            columnSeries { series(samples.map { it.first }, samples.map { it.second }) }
+        }
+    }
+    val cols = zones.map { (_, col) -> rememberLineComponent(fill = fill(col), thickness = 4.dp, shape = CorneredShape.rounded(topLeftPercent = 30, topRightPercent = 30)) }
+    val layer = rememberColumnCartesianLayer(
+        object : ColumnCartesianLayer.ColumnProvider {
+            override fun getColumn(entry: ColumnCartesianLayerModel.Entry, seriesIndex: Int, extraStore: ExtraStore) = cols[zoneOf(entry.y)]
+            override fun getWidestSeriesColumn(seriesIndex: Int, extraStore: ExtraStore) = cols[0]
+        },
+        columnCollectionSpacing = 1.dp,
+        rangeProvider = CartesianLayerRangeProvider.fixed(minX = 0.0, maxX = 47.0, minY = 0.0, maxY = 100.0),
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+        Text("Through the day", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
+        InsetCard {
+            ScrubChartHost(
+                rememberCartesianChart(
+                    layer,
+                    startAxis = startAxis(25.0),
+                    bottomAxis = bottomAxis(CartesianValueFormatter { _, x, _ -> clock(LocalTime.of(x.toInt() / 2, x.toInt() % 2 * 30)).replace(":00 ", " ") }, 12),
+                    marker = rememberScrubMarker(c.tint) { x ->
+                        byX[x]?.let { "${zones[zoneOf(it)].first} ${it.roundToInt()} · ${clock(LocalTime.of(x.toInt() / 2, x.toInt() % 2 * 30))}" } ?: "—"
+                    },
+                ),
+                producer, 160.dp,
+            )
         }
     }
 }

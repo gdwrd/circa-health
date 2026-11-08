@@ -25,6 +25,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
@@ -106,13 +108,18 @@ fun HeartScreen(backend: Boolean?) {
     var medStarted by remember { mutableStateOf<String?>(null) }
     var med by remember { mutableStateOf<JsonObject?>(null) }
     var rhr90 by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
+    var date by remember { mutableStateOf(LocalDate.now()) }
+    var inputs by remember { mutableStateOf<JsonObject?>(null) }
     var bp by remember { mutableStateOf<List<Triple<LocalDate, Int, Int>>>(emptyList()) }
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
-    suspend fun load() {
-        hr = (Api.hr(ctx, 24).obj()?.get("points") as? JsonArray)
+    suspend fun loadDay() {
+        hr = (Api.hr(ctx, date).obj()?.get("points") as? JsonArray)
             ?.mapNotNull { o -> o.obj()?.let { p -> p["t"].num()?.let { t -> p["bpm"].num()?.let { t to it } } } }
             ?.sortedBy { it.first }
+        inputs = Api.today(ctx, date).obj()?.get("inputs").obj()
+    }
+    suspend fun load() {
         rhr = trend(Api.trends(ctx, "rhr", 30))
         hrv = trend(Api.trends(ctx, "hrv", 30))
         Api.settings(ctx)?.let { s ->
@@ -135,41 +142,39 @@ fun HeartScreen(backend: Boolean?) {
         loaded = true
     }
     LaunchedEffect(Unit) { load() }
+    LaunchedEffect(date) { loadDay() }
 
     val c = AppTheme.colors
     LargeTitleScaffold("Heart", refreshing = refreshing, onRefresh = {
-        scope.launch { refreshing = true; try { load() } finally { refreshing = false } }
+        scope.launch { refreshing = true; try { load(); loadDay() } finally { refreshing = false } }
     }) {
         item { Section("Now") { MeasureNow() } }
         if (!loaded) return@LargeTitleScaffold
+        item { DayPicker(date) { date = it } }
         item {
             Section("Heart rate") {
                 val pts = hr.orEmpty()
                 if (pts.isEmpty()) Empty() else {
-                    val t0 = pts.first().first
+                    val t0 = date.atStartOfDay(ZoneId.systemDefault()).toEpochSecond().toDouble()
                     Text(
-                        "Latest", style = AppType.footnote, color = c.secondaryLabel,
+                        if (date == LocalDate.now()) "Latest" else "Last", style = AppType.footnote, color = c.secondaryLabel,
                         modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.l),
                     )
                     Value(pts.last().second, "bpm", c.heart)
                     Text(
-                        "Last 24 h · ${pts.minOf { it.second }.roundToInt()}–${pts.maxOf { it.second }.roundToInt()} bpm",
+                        "${dayLabel(date)} · ${pts.minOf { it.second }.roundToInt()}–${pts.maxOf { it.second }.roundToInt()} bpm",
                         style = AppType.subhead, color = c.secondaryLabel,
                         modifier = Modifier.padding(start = AppSpace.l),
                     )
-                    // x = 5 min slots since the first point; labels land on 12 AM / 6 AM / 12 PM / 6 PM.
-                    val zone = ZoneId.systemDefault()
-                    val boundary = Instant.ofEpochSecond(t0.toLong()).atZone(zone).truncatedTo(java.time.temporal.ChronoUnit.HOURS)
-                        .let { z -> generateSequence(z.plusHours(1)) { it.plusHours(1) }.first { it.hour % 6 == 0 } }
-                    val offset = ceil((boundary.toEpochSecond() - t0) / SLOT_S).toInt()
-                    // Doses whose active window reaches into the chart, in chart x (5 min slots).
+                    // x = 5 min slots since midnight (0..287); labels land on 12 AM / 6 AM / 12 PM / 6 PM.
+                    // Doses whose active window reaches into the day, in chart x.
                     val now = System.currentTimeMillis() / 1000
-                    val shown = doses.filter { it <= now && it + windowH * 3600 > t0 }
+                    val shown = doses.filter { it <= now && it < t0 + 86400 && it + windowH * 3600 > t0 }
                     val windows = shown.map { (it - t0) / SLOT_S to (it + windowH * 3600 - t0) / SLOT_S }
                     val xy = pts.map { (it.first - t0) / SLOT_S to it.second }
                     val byX = xy.toMap()
                     Chart(
-                        listOf(xy), c.heart, true, 72, offset,
+                        listOf(xy), c.heart, true, 72, 0, x = 0.0..287.0,
                         decorations = if (windows.isEmpty()) emptyList() else listOf(DoseWindows(windows, c.heart.toArgb())),
                         marker = { x -> "${byX[x]?.roundToInt()} bpm · ${clock(t0 + x * SLOT_S)}" },
                     ) { x -> clock(t0 + x * SLOT_S).replace(":00 ", " ") }
@@ -178,6 +183,22 @@ fun HeartScreen(backend: Boolean?) {
                             "Dose ${clock(t.toDouble())} · active until ~${clock(t + windowH * 3600.0)}", style = AppType.footnote, color = c.secondaryLabel,
                             modifier = Modifier.padding(start = AppSpace.l, bottom = AppSpace.s),
                         )
+                    }
+                }
+            }
+        }
+        item {
+            Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                listOf("Resting HR" to ("rhr" to "bpm"), "HRV" to ("hrv" to "ms")).forEach { (label, m) ->
+                    val v = inputs?.get(m.first).num()
+                    InsetCard(Modifier.weight(1f).fillMaxHeight()) {
+                        Column(Modifier.padding(AppSpace.l)) {
+                            Text(label, style = AppType.footnote, color = c.secondaryLabel)
+                            Row(verticalAlignment = Alignment.Bottom) {
+                                Text(v?.roundToInt()?.toString() ?: "—", style = AppType.title)
+                                if (v != null) Text(" ${m.second}", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(bottom = 3.dp))
+                            }
+                        }
                     }
                 }
             }
@@ -305,7 +326,7 @@ private fun Value(v: Double, unit: String, color: Color) {
 @Composable
 private fun Chart(
     series: List<List<Pair<Double, Double>>>, color: Color, area: Boolean, spacing: Int, offset: Int,
-    second: Color? = null, decorations: List<Decoration> = emptyList(), marker: (Double) -> CharSequence, label: (Double) -> String,
+    second: Color? = null, x: ClosedFloatingPointRange<Double>? = null, decorations: List<Decoration> = emptyList(), marker: (Double) -> CharSequence, label: (Double) -> String,
 ) {
     val producer = remember { CartesianChartModelProducer() }
     LaunchedEffect(series) {
@@ -327,7 +348,7 @@ private fun Chart(
         rememberCartesianChart(
             rememberLineCartesianLayer(
                 LineCartesianLayer.LineProvider.series(main, band),
-                rangeProvider = CartesianLayerRangeProvider.fixed(minY = lo, maxY = maxOf(hi, lo + step)),
+                rangeProvider = CartesianLayerRangeProvider.fixed(minX = x?.start, maxX = x?.endInclusive, minY = lo, maxY = maxOf(hi, lo + step)),
             ),
             startAxis = startAxis(step),
             bottomAxis = bottomAxis(CartesianValueFormatter { _, x, _ -> label(x) }, spacing, offset),

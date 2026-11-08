@@ -12,6 +12,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -33,6 +35,8 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -77,6 +81,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.TextStyle
@@ -92,6 +97,7 @@ import dev.chrisbanes.haze.hazeChild
 import dev.chrisbanes.haze.haze
 import dev.ring.health.R
 import java.time.Instant
+import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -451,4 +457,31 @@ fun EmptyState(icon: ImageVector, title: String, line: String) {
 @Composable
 fun NoBackendTab(title: String, backend: Boolean?) = LargeTitleScaffold(title) {
     if (backend == false) item { InsetCard { EmptyState(Icons.Rounded.CloudOff, "Scores need the backend", "Set the server URL and token in Settings.") } }
+}
+
+fun dayLabel(date: LocalDate): String = LocalDate.now().let { today ->
+    when (date) {
+        today -> "Today"
+        today.minusDays(1) -> "Yesterday"
+        else -> date.format(DateTimeFormatter.ofPattern("EEE d MMM", Locale.getDefault()))
+    }
+}
+
+/** ‹ label ›: "Today", "Yesterday" or "Tue 5 Nov"; › is dead at today, ‹ at the 90-day floor. */
+@Composable
+fun DayPicker(date: LocalDate, onChange: (LocalDate) -> Unit) {
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    val today = LocalDate.now()
+    @Composable
+    fun Chevron(icon: ImageVector, name: String, to: LocalDate, enabled: Boolean) =
+        Box(
+            Modifier.size(44.dp).clip(AppShape.small).clickable(enabled = enabled) { haptic.tick(); onChange(to) },
+            contentAlignment = Alignment.Center,
+        ) { Icon(icon, name, tint = if (enabled) c.tint else c.secondaryLabel) }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Chevron(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "Previous day", date.minusDays(1), date.isAfter(today.minusDays(90)))
+        Text(dayLabel(date), style = AppType.headline, textAlign = TextAlign.Center, modifier = Modifier.weight(1f))
+        Chevron(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Next day", date.plusDays(1), date.isBefore(today))
+    }
 }

@@ -13,6 +13,7 @@ import okhttp3.OkHttpClient
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.time.LocalDate
 import java.util.concurrent.TimeUnit
 
 /** Client for the optional backend at the same base URL the ring pushes to. */
@@ -47,10 +48,13 @@ object Api {
     private suspend fun get(ctx: Context, path: String) = call(ctx, path)
 
     suspend fun today(ctx: Context) = get(ctx, "/today")
+    suspend fun today(ctx: Context, date: LocalDate) = get(ctx, "/today?date=$date")
     suspend fun sleep(ctx: Context, date: String) = get(ctx, "/sleep?date=$date")
     suspend fun trends(ctx: Context, metric: String, days: Int) = get(ctx, "/trends?metric=$metric&days=$days")
     suspend fun week(ctx: Context) = get(ctx, "/week")
     suspend fun hr(ctx: Context, hours: Int) = get(ctx, "/hr?hours=$hours")
+    suspend fun hr(ctx: Context, date: LocalDate) = get(ctx, "/hr?date=$date")
+    suspend fun stress(ctx: Context, date: LocalDate) = get(ctx, "/stress?date=$date")
     suspend fun journal(ctx: Context, days: Int) = get(ctx, "/journal?days=$days")
     suspend fun insights(ctx: Context) = get(ctx, "/journal/insights")
     suspend fun settings(ctx: Context) = get(ctx, "/settings") as? JsonObject
