@@ -200,6 +200,13 @@ def trends(metric: str, days: int = 30) -> dict:
     return {"metric": metric, "days": days, "points": pts}
 
 
+@api.get("/hr")
+def hr(hours: int = 24) -> dict:
+    now = datetime.now(vm.tz())
+    s = vm.series("biometric_hr_bpm", now - timedelta(hours=min(max(hours, 1), 48)), now, "5m")
+    return {"points": [{"t": t, "bpm": v} for t, v in s.items() if v > 0]}
+
+
 @api.get("/notifications/pending")
 def pending() -> list[dict]:
     return notify.pending()

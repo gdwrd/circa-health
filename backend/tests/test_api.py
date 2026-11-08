@@ -58,3 +58,20 @@ def test_ingest_rescores_and_today_has_sleep_score(monkeypatch) -> None:
         assert t["points"][-1]["value"] == j["sleep"]["score"]
         assert c.get("/trends?metric=bogus", headers=H).status_code == 422
         assert db.days(d, d)
+
+
+def test_hr_drops_nonpositive_and_clamps_hours(monkeypatch) -> None:
+    seen: list[float] = []
+
+    def fake(expr: str, start: datetime, end: datetime, step: str) -> list[dict]:
+        seen.append((end - start).total_seconds() / 3600)
+        t = start.timestamp()
+        return [{"metric": {}, "values": [[t, "0"], [t + 300, "61"]]}]
+
+    monkeypatch.setattr(vm, "query_range", fake)
+    with TestClient(app) as c:
+        p = c.get("/hr?hours=24", headers=H).json()["points"]
+        assert [x["bpm"] for x in p] == [61.0]
+        c.get("/hr?hours=999", headers=H)
+        assert seen[-1] == 48
+        assert c.get("/hr").status_code == 401

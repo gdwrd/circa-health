@@ -41,6 +41,7 @@ object Api {
     suspend fun today(ctx: Context) = get(ctx, "/today")
     suspend fun sleep(ctx: Context, date: String) = get(ctx, "/sleep?date=$date")
     suspend fun trends(ctx: Context, metric: String, days: Int) = get(ctx, "/trends?metric=$metric&days=$days")
+    suspend fun hr(ctx: Context, hours: Int) = get(ctx, "/hr?hours=$hours")
     suspend fun notifications(ctx: Context) = get(ctx, "/notifications/pending")
 
     private val probe = client.newBuilder().callTimeout(3, TimeUnit.SECONDS).build()
