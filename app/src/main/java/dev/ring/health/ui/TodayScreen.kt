@@ -1,6 +1,18 @@
 package dev.ring.health.ui
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -151,16 +163,20 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
     }
     val scope = rememberCoroutineScope()
     suspend fun loadJournal() { journal = parseJournal(Api.journal(ctx, 2)) }
-    LaunchedEffect(Unit) {
+    var refreshing by remember { mutableStateOf(false) }
+    suspend fun load() {
         data = Api.today(ctx).obj()
         loadJournal()
         Api.settings(ctx)?.let { s -> s["medication_time"].str()?.let { medTime = it }; medStarted = s["medication_started"].str() }
         insights = Api.insights(ctx).obj()?.get("kinds").obj()
         hr = (Api.hr(ctx, 24).obj()?.get("points") as? JsonArray)?.mapNotNull { it.obj()?.get("bpm").num() }.orEmpty()
     }
+    LaunchedEffect(Unit) { load() }
 
     val c = AppTheme.colors
-    LargeTitleScaffold("Today") {
+    LargeTitleScaffold("Today", refreshing = refreshing, onRefresh = {
+        scope.launch { refreshing = true; try { load() } finally { refreshing = false } }
+    }) {
         val d = data ?: return@LargeTitleScaffold
         item {
             val h = LocalTime.now().hour
@@ -207,28 +223,7 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
             }
         }
         item {
-            val small = listOf("sleep" to ("Sleep" to c.sleep), "activity" to ("Activity" to c.activity))
-            InsetCard {
-                Row(Modifier.padding(horizontal = AppSpace.m, vertical = AppSpace.l)) {
-                    small.forEach { (key, meta) ->
-                        val score = d[key].obj()?.get("score").num()?.roundToInt()
-                        Column(
-                            Modifier.weight(1f).clip(AppShape.small).clickable { open = if (open == key) null else key }.padding(AppSpace.s),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
-                            ScoreRing((score ?: 0) / 100f, meta.second, Modifier.size(96.dp), stroke = 10.dp) {
-                                if (score != null) CountUp(score, AppType.title) else Text("—", style = AppType.title)
-                            }
-                            Text(
-                                meta.first, style = AppType.footnote, modifier = Modifier.padding(top = AppSpace.s),
-                                color = if (open == key) c.label else c.secondaryLabel,
-                                fontWeight = if (open == key) FontWeight.SemiBold else null,
-                            )
-                        }
-                    }
-                }
-                small.forEach { (key, meta) -> ScoreDetails(key, meta.first, meta.second, d, open == key, medStarted) }
-            }
+            InsetCard { SmallRings(d, open?.takeIf { it == "sleep" || it == "activity" }, { open = it }, medStarted) }
         }
         d["signals"].obj()?.let { item { BodySignals(it, medStarted) } }
         item {
@@ -286,6 +281,59 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
         if (!kinds.isNullOrEmpty()) item { WhatAffectsYou(kinds) }
     }
     if (sheet) CheckInSheet(journal, medTime, scope, sheetDay, ::loadJournal) { sheet = false; sheetDay = null }
+}
+
+/** Sleep + Activity rings; tapping one grows it into the card with its details (shared element), a plain switch under reduce-motion. */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+private fun SmallRings(d: JsonObject, open: String?, onOpen: (String?) -> Unit, medStarted: String?) {
+    // Only the first rings count up; the copies made by expand/collapse start at the score.
+    var shown by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { shown = true }
+    if (LocalReduceMotion.current) return SmallRingsContent(d, open, onOpen, medStarted, !shown, null, null)
+    SharedTransitionLayout {
+        AnimatedContent(
+            open, label = "rings",
+            transitionSpec = { fadeIn(tween(220, delayMillis = 90)) togetherWith fadeOut(tween(90)) using SizeTransform(clip = false) },
+        ) { k -> SmallRingsContent(d, k, onOpen, medStarted, !shown, this@SharedTransitionLayout, this) }
+    }
+}
+
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+private fun SmallRingsContent(d: JsonObject, open: String?, onOpen: (String?) -> Unit, medStarted: String?, animate: Boolean, s: SharedTransitionScope?, a: AnimatedVisibilityScope?) {
+    val c = AppTheme.colors
+    val meta = mapOf("sleep" to ("Sleep" to c.sleep), "activity" to ("Activity" to c.activity))
+    @Composable fun ring(key: String, size: Int, stroke: Int, number: TextStyle) {
+        val score = d[key].obj()?.get("score").num()?.roundToInt()
+        val m = if (s == null || a == null) Modifier else with(s) { Modifier.sharedElement(rememberSharedContentState("ring-$key"), a) }
+        ScoreRing((score ?: 0) / 100f, meta.getValue(key).second, m.size(size.dp), stroke = stroke.dp, animate = animate) {
+            if (score != null) CountUp(score, number, animate = animate) else Text("—", style = number)
+        }
+    }
+    if (open == null) Row(Modifier.padding(horizontal = AppSpace.m, vertical = AppSpace.l)) {
+        meta.forEach { (key, mt) ->
+            Column(
+                Modifier.weight(1f).clip(AppShape.small).clickable { onOpen(key) }.padding(AppSpace.s),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                ring(key, 96, 10, AppType.title)
+                Text(mt.first, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s))
+            }
+        }
+    } else Column {
+        Column(
+            Modifier.fillMaxWidth().clickable { onOpen(null) }.padding(AppSpace.xl),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            ring(open, 168, 16, AppType.display)
+            Text(meta.getValue(open).first, style = AppType.headline, modifier = Modifier.padding(top = AppSpace.m))
+        }
+        val slide = if (a == null) Modifier else with(a) {
+            Modifier.animateEnterExit(slideInVertically(tween(320, delayMillis = 120)) { it / 4 } + fadeIn(tween(320, delayMillis = 120)), fadeOut(tween(90)))
+        }
+        Box(slide) { ScoreDetails(open, meta.getValue(open).first, meta.getValue(open).second, d, true, medStarted) }
+    }
 }
 
 /** Explanation + contributor rows under a score; the readiness one adds the medication-baseline note. */

@@ -32,6 +32,9 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalRippleConfiguration
 import androidx.compose.material3.MaterialTheme
@@ -49,6 +52,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -76,6 +80,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.HazeStyle
+import dev.chrisbanes.haze.HazeTint
+import dev.chrisbanes.haze.hazeChild
+import dev.chrisbanes.haze.haze
 import dev.ring.health.R
 import kotlin.math.roundToInt
 
@@ -206,8 +215,13 @@ val LocalReduceMotion = staticCompositionLocalOf { false }
 /** Light selection tick for selection changes and measurement lock. */
 fun HapticFeedback.tick() = performHapticFeedback(HapticFeedbackType.TextHandleMove)
 
+/** Height of the tab bar the content scrolls under (App provides it). */
+val LocalBottomBar = compositionLocalOf { 0.dp }
+
 object AppTheme {
     val colors: AppColors @Composable get() = LocalColors.current
+    /** Blurred bar material: background blur under a lighter tabBar tint (haze falls back to the tint alone). */
+    val bar: HazeStyle @Composable get() = colors.let { HazeStyle(it.background, HazeTint(it.tabBar.copy(alpha = 0.7f)), blurRadius = 24.dp, noiseFactor = 0f) }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -256,16 +270,17 @@ fun InsetCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.()
     )
 }
 
-/** Activity-style ring: faint track, sweep-gradient arc (light end at the head) that springs to [progress] (0..1); blurred glow when >= 120 dp. */
+/** Activity-style ring: faint track, sweep-gradient arc (light end at the head) that springs to [progress] (0..1), or starts there when ![animate]; blurred glow when >= 120 dp. */
 @Composable
 fun ScoreRing(
     progress: Float,
     color: Color,
     modifier: Modifier = Modifier.size(96.dp),
     stroke: Dp = 12.dp,
+    animate: Boolean = true,
     content: @Composable BoxScope.() -> Unit = {},
 ) {
-    val p = remember { Animatable(0f) }
+    val p = remember { Animatable(if (animate) 0f else progress.coerceIn(0f, 1f)) }
     LaunchedEffect(progress) {
         p.animateTo(progress.coerceIn(0f, 1f), spring(Spring.DampingRatioLowBouncy, Spring.StiffnessVeryLow))
     }
@@ -300,11 +315,19 @@ fun ScoreRing(
     }
 }
 
-/** iOS large-title screen: 34 sp bold title that collapses into a translucent 44 dp bar on scroll. */
+/** iOS large-title screen: 34 sp bold title that collapses into a blurred 44 dp bar on scroll; pull to refresh when [onRefresh] is set. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LargeTitleScaffold(title: String, back: (@Composable () -> Unit)? = null, content: LazyListScope.() -> Unit) {
+fun LargeTitleScaffold(
+    title: String,
+    back: (@Composable () -> Unit)? = null,
+    refreshing: Boolean = false,
+    onRefresh: (() -> Unit)? = null,
+    content: LazyListScope.() -> Unit,
+) {
     val c = AppTheme.colors
     val state = rememberLazyListState()
+    val haze = remember { HazeState() }
     val collapsed by remember {
         derivedStateOf { state.firstVisibleItemIndex > 0 || state.firstVisibleItemScrollOffset > 60 }
     }
@@ -312,11 +335,11 @@ fun LargeTitleScaffold(title: String, back: (@Composable () -> Unit)? = null, co
         if (collapsed) 1f else 0f, spring(stiffness = Spring.StiffnessMediumLow), label = "bar",
     )
     val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-    Box(Modifier.fillMaxSize().background(c.background)) {
+    val list = @Composable {
         LazyColumn(
-            Modifier.fillMaxSize(),
+            Modifier.fillMaxSize().haze(haze),
             state = state,
-            contentPadding = PaddingValues(start = AppSpace.l, end = AppSpace.l, top = statusTop + AppSpace.s, bottom = AppSpace.xl),
+            contentPadding = PaddingValues(start = AppSpace.l, end = AppSpace.l, top = statusTop + AppSpace.s, bottom = AppSpace.xl + LocalBottomBar.current),
             verticalArrangement = Arrangement.spacedBy(AppSpace.xl),
         ) {
             item {
@@ -327,9 +350,22 @@ fun LargeTitleScaffold(title: String, back: (@Composable () -> Unit)? = null, co
             }
             content()
         }
+    }
+    Box(Modifier.fillMaxSize().background(c.background)) {
+        if (onRefresh == null) list() else {
+            val pull = rememberPullToRefreshState()
+            PullToRefreshBox(
+                refreshing, onRefresh, Modifier.fillMaxSize(), state = pull,
+                indicator = {
+                    PullToRefreshDefaults.Indicator(
+                        pull, refreshing, Modifier.align(Alignment.TopCenter).padding(top = statusTop), containerColor = c.card, color = c.tint,
+                    )
+                },
+            ) { list() }
+        }
         Box(
             Modifier.align(Alignment.TopCenter).fillMaxWidth()
-                .graphicsLayer { alpha = barAlpha }.background(c.tabBar).statusBarsPadding().height(44.dp),
+                .graphicsLayer { alpha = barAlpha }.hazeChild(haze, AppTheme.bar).statusBarsPadding().height(44.dp),
         ) {
             Text(title, style = AppType.headline, modifier = Modifier.align(Alignment.Center), textAlign = TextAlign.Center)
             back?.let { Box(Modifier.align(Alignment.CenterStart).padding(start = AppSpace.l)) { it() } }
@@ -338,11 +374,11 @@ fun LargeTitleScaffold(title: String, back: (@Composable () -> Unit)? = null, co
     }
 }
 
-/** Integer that counts up from 0 to [value] in 600 ms (ease-out); jumps straight there under reduce-motion. */
+/** Integer that counts up from 0 to [value] in 600 ms (ease-out); starts there under reduce-motion or when ![animate]. */
 @Composable
-fun CountUp(value: Int, style: TextStyle, modifier: Modifier = Modifier, color: Color = Color.Unspecified) {
+fun CountUp(value: Int, style: TextStyle, modifier: Modifier = Modifier, color: Color = Color.Unspecified, animate: Boolean = true) {
     val reduce = LocalReduceMotion.current
-    val n = remember { Animatable(if (reduce) value.toFloat() else 0f) }
+    val n = remember { Animatable(if (reduce || !animate) value.toFloat() else 0f) }
     LaunchedEffect(value) {
         if (reduce) n.snapTo(value.toFloat()) else n.animateTo(value.toFloat(), tween(600, easing = EaseOut))
     }

@@ -1,6 +1,5 @@
 package dev.ring.health.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -20,6 +19,21 @@ import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.automirrored.rounded.ShowChart
 import androidx.compose.material.icons.rounded.Spa
 import androidx.compose.material.icons.rounded.Today
+import androidx.compose.material.icons.automirrored.outlined.ShowChart
+import androidx.compose.material.icons.outlined.Bedtime
+import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Spa
+import androidx.compose.material.icons.outlined.Today
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalHapticFeedback
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeChild
+import dev.chrisbanes.haze.haze
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -41,13 +55,13 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 
-private enum class TabItem(val route: String, val label: String, val icon: ImageVector) {
-    Today("today", "Today", Icons.Rounded.Today),
-    Sleep("sleep", "Sleep", Icons.Rounded.Bedtime),
-    Heart("heart", "Heart", Icons.Rounded.Favorite),
-    Stress("stress", "Stress", Icons.Rounded.Spa),
-    Trends("trends", "Trends", Icons.AutoMirrored.Rounded.ShowChart),
-    Settings("settings", "Settings", Icons.Rounded.Settings),
+private enum class TabItem(val route: String, val label: String, val icon: ImageVector, val outline: ImageVector) {
+    Today("today", "Today", Icons.Rounded.Today, Icons.Outlined.Today),
+    Sleep("sleep", "Sleep", Icons.Rounded.Bedtime, Icons.Outlined.Bedtime),
+    Heart("heart", "Heart", Icons.Rounded.Favorite, Icons.Outlined.FavoriteBorder),
+    Stress("stress", "Stress", Icons.Rounded.Spa, Icons.Outlined.Spa),
+    Trends("trends", "Trends", Icons.AutoMirrored.Rounded.ShowChart, Icons.AutoMirrored.Outlined.ShowChart),
+    Settings("settings", "Settings", Icons.Rounded.Settings, Icons.Outlined.Settings),
 }
 
 @Composable
@@ -74,15 +88,18 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
             }
         }
         val journalDate = link?.takeIf { it.first == "journal" }?.second
+        val haze = remember { HazeState() }
 
         Scaffold(
             containerColor = AppTheme.colors.background,
             contentWindowInsets = WindowInsets(0),
             bottomBar = {
-                TabBar(route) { go(it) }
+                TabBar(route, Modifier.hazeChild(haze, AppTheme.bar)) { go(it) }
             },
         ) { inner ->
-            NavHost(nav, startDestination = TabItem.Today.route, modifier = Modifier.padding(inner)) {
+            // Content runs under the tab bar so the bar can blur it; LargeTitleScaffold pads its list end by this.
+            CompositionLocalProvider(LocalBottomBar provides inner.calculateBottomPadding()) {
+            NavHost(nav, startDestination = TabItem.Today.route, modifier = Modifier.haze(haze)) {
                 composable(TabItem.Today.route) { TodayScreen(backend, journalDate, onLinkHandled) }
                 composable(TabItem.Sleep.route) { SleepScreen(backend) }
                 composable(TabItem.Heart.route) { HeartScreen(backend) }
@@ -90,14 +107,17 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
                 composable(TabItem.Trends.route) { TrendsScreen(backend) }
                 composable(TabItem.Settings.route) { SettingsScreen(hasPermissions, requestPermissions) }
             }
+            }
         }
     }
 }
 
 @Composable
-private fun TabBar(current: String?, onSelect: (TabItem) -> Unit) {
+private fun TabBar(current: String?, modifier: Modifier, onSelect: (TabItem) -> Unit) {
     val c = AppTheme.colors
-    Column(Modifier.fillMaxWidth().background(c.tabBar)) {
+    val haptic = LocalHapticFeedback.current
+    val reduce = LocalReduceMotion.current
+    Column(modifier.fillMaxWidth()) {
         Hairline()
         Row(Modifier.navigationBarsPadding().height(56.dp).selectableGroup()) {
             TabItem.entries.forEach { t ->
@@ -105,11 +125,17 @@ private fun TabBar(current: String?, onSelect: (TabItem) -> Unit) {
                 val color = if (selected) c.tint else c.secondaryLabel
                 Column(
                     Modifier.weight(1f).fillMaxHeight()
-                        .selectable(selected, role = Role.Tab, onClick = { onSelect(t) }),
+                        .selectable(selected, role = Role.Tab, onClick = { if (!selected) haptic.tick(); onSelect(t) }),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center,
                 ) {
-                    Icon(t.icon, contentDescription = null, tint = color, modifier = Modifier.size(26.dp))
+                    val scale by animateFloatAsState(
+                        if (selected && !reduce) 1.1f else 1f, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMedium), label = "tab",
+                    )
+                    Icon(
+                        if (selected) t.icon else t.outline, contentDescription = null, tint = color,
+                        modifier = Modifier.size(26.dp).graphicsLayer { scaleX = scale; scaleY = scale },
+                    )
                     Text(t.label, style = AppType.tab, color = color)
                 }
             }

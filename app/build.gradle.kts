@@ -67,4 +67,5 @@ dependencies {
     implementation(libs.androidx.navigation.compose)
     implementation(libs.vico.compose.m3)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.haze)
 }
