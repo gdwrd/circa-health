@@ -104,6 +104,10 @@ def rescore(dates: set[date]) -> None:
             _score_day(d)
         except Exception:
             log.exception("rescore %s failed", d)
+    try:
+        notify.evaluate(dates)
+    except Exception:
+        log.exception("notify failed")
 
 
 @asynccontextmanager

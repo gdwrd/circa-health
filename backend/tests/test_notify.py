@@ -1,0 +1,126 @@
+from datetime import date, datetime, timedelta
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app import db, notify, vm
+from app.main import app
+
+H = {"Authorization": "Bearer secret"}
+D = date(2026, 11, 9)
+
+
+@pytest.fixture(autouse=True)
+def env(tmp_path, monkeypatch) -> dict:
+    """Fresh DB per test; returns the {expr: {ts: value}} map served by the fake vm.series."""
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "ring.db"))
+    monkeypatch.delenv("TZ", raising=False)
+    db.init()
+    series: dict = {}
+    monkeypatch.setattr(vm, "series", lambda e, s, en, st: series.get(e, {}))
+    return series
+
+
+def at(mp: pytest.MonkeyPatch, h: int, m: int = 0, day: date = D) -> datetime:
+    now = datetime(day.year, day.month, day.day, h, m)
+    mp.setattr(notify, "_now", lambda: now)
+    return now
+
+
+def seed(d: date, ready: int | None = None, contrib: dict | None = None) -> None:
+    """Night 23:00 (d-1) to 07:00 (d)."""
+    s, e = vm.midnight(d - timedelta(1)) + timedelta(hours=23), vm.midnight(d) + timedelta(hours=7)
+    db.save_day(d, (None, ready, None), {"readiness": contrib, "session": {"start": s.timestamp(), "end": e.timestamp()}}, {})
+
+
+def kinds() -> list[str]:
+    return [n["kind"] for n in notify.pending()]
+
+
+def test_readiness_once(monkeypatch) -> None:
+    seed(D, 82, {"resting_hr": 90.0, "hrv_balance": 40.0, "sleep": None})
+    at(monkeypatch, 8)
+    notify.evaluate({D})
+    notify.evaluate({D})
+    (n,) = notify.pending()
+    assert n["title"] == "Readiness 82" and "heart rate variability" in n["body"] and "Oura" not in n["body"]
+    at(monkeypatch, 8, day=D + timedelta(1))
+    notify.evaluate({D})  # no new night scored today
+    assert kinds() == ["readiness"]
+
+
+def test_bedtime_window_and_dedup(monkeypatch, env) -> None:
+    env["biometric_steps"] = {1.0: 100.0}
+    for i in range(14):
+        seed(D - timedelta(i))
+    at(monkeypatch, 22, 20)
+    notify.evaluate(set())
+    assert kinds() == []  # before 22:30
+    at(monkeypatch, 22, 40)
+    notify.evaluate(set())
+    notify.evaluate(set())
+    assert kinds() == ["bedtime"] and "23:00" in notify.pending()[0]["body"]
+
+
+def test_bedtime_needs_five_nights(monkeypatch, env) -> None:
+    env["biometric_steps"] = {1.0: 100.0}
+    for i in range(4):
+        seed(D - timedelta(i))
+    at(monkeypatch, 22, 40)
+    notify.evaluate(set())
+    assert kinds() == []
+
+
+def test_inactivity(monkeypatch, env) -> None:
+    seed(D)
+    env["biometric_steps"] = {1.0: 50.0}
+    at(monkeypatch, 12, 30)
+    notify.evaluate(set())
+    assert kinds() == []
+    env["biometric_steps"] = {}
+    notify.evaluate(set())
+    notify.evaluate(set())
+    assert kinds() == ["inactivity"]
+
+
+def test_inactivity_skips_night_and_late_hours(monkeypatch) -> None:
+    seed(D)
+    at(monkeypatch, 8, 30)  # hours 06-08 sit inside the night session / before 08:00
+    notify.evaluate(set())
+    at(monkeypatch, 23, 30)  # hours 21-23 end after 22:00
+    notify.evaluate(set())
+    assert kinds() == []
+
+
+def test_battery_refires_only_after_ack_and_recharge(monkeypatch, env) -> None:
+    env["biometric_steps"] = {1.0: 100.0}
+    now = at(monkeypatch, 12)
+    t = now.timestamp()
+    env["ring_battery_pct"] = {t: 12.0}
+    env["ring_charging"] = {t: 1.0}
+    notify.evaluate(set())
+    assert kinds() == []  # charging
+    env["ring_charging"] = {t: 0.0}
+    notify.evaluate(set())
+    notify.evaluate(set())
+    assert kinds() == ["battery"]
+    notify.ack(notify.pending()[0]["id"])
+    at(monkeypatch, 13)
+    env["ring_battery_pct"] = {t + 60: 10.0}
+    notify.evaluate(set())
+    assert kinds() == []  # acked but never rose above 15
+    env["ring_battery_pct"] = {t + 60: 90.0, t + 600: 14.0}
+    notify.evaluate(set())
+    assert kinds() == ["battery"]
+
+
+def test_pending_and_ack_routes(monkeypatch, env) -> None:
+    env["biometric_steps"] = {1.0: 100.0}
+    env["ring_battery_pct"] = {1.0: 5.0}
+    at(monkeypatch, 12)
+    notify.evaluate(set())
+    with TestClient(app) as c:
+        (n,) = c.get("/notifications/pending", headers=H).json()
+        assert set(n) == {"id", "kind", "title", "body", "created_at"} and n["kind"] == "battery"
+        assert c.post(f"/notifications/{n['id']}/ack", headers=H).status_code == 200
+        assert c.get("/notifications/pending", headers=H).json() == []
