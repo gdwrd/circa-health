@@ -31,7 +31,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
@@ -69,6 +72,7 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
@@ -125,6 +129,9 @@ data class AppColors(
     val signalCalm: Color = ReadinessGreen,
     val signalElevated: Color = ZoneEngaged,
     val signalHigh: Color = StageAwake,
+    /** Sleep "Time asleep" band: deep indigo fading to black (dark) / to nothing (light), both at 12 %. */
+    val nightTop: Color = SleepIndigo.copy(alpha = 0.12f),
+    val nightBottom: Color = Color.Transparent,
 ) {
     /** Lighter gradient partner of a score colour (the arc head); other colours pair with themselves. */
     fun light(c: Color): Color = when (c) {
@@ -178,6 +185,7 @@ private val DarkColors = AppColors(
     heart = HeartRed, hrv = HrvCyan,
     zoneRestored = ReadinessGreen, zoneRelaxed = StageRem, zoneEngaged = ZoneEngaged, zoneStressed = StageAwake,
     cardStroke = Color(0x0FFFFFFF),
+    nightBottom = Color(0x1F000000),
 )
 
 /** Bundled OFL Nunito: rounded numerals and titles; body text stays on the platform sans. */
@@ -383,4 +391,26 @@ fun CountUp(value: Int, style: TextStyle, modifier: Modifier = Modifier, color: 
         if (reduce) n.snapTo(value.toFloat()) else n.animateTo(value.toFloat(), tween(600, easing = EaseOut))
     }
     Text(n.value.roundToInt().toString(), modifier, color = color, style = style)
+}
+
+/** No-data content for a card: 56 dp rounded icon tile on secondaryLabel 12 %, a title and one line, centred. */
+@Composable
+fun EmptyState(icon: ImageVector, title: String, line: String) {
+    val c = AppTheme.colors
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = AppSpace.xl, vertical = 28.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(Modifier.size(56.dp).background(c.secondaryLabel.copy(alpha = 0.12f), RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
+            Icon(icon, null, tint = c.secondaryLabel, modifier = Modifier.size(28.dp))
+        }
+        Text(title, style = AppType.headline, textAlign = TextAlign.Center, modifier = Modifier.padding(top = AppSpace.m))
+        Text(line, style = AppType.subhead, color = c.secondaryLabel, textAlign = TextAlign.Center, modifier = Modifier.padding(top = AppSpace.xs))
+    }
+}
+
+/** Tab without a backend: large title and the "Scores need the backend" empty state (blank while the probe runs). */
+@Composable
+fun NoBackendTab(title: String, backend: Boolean?) = LargeTitleScaffold(title) {
+    if (backend == false) item { InsetCard { EmptyState(Icons.Rounded.CloudOff, "Scores need the backend", "Set the server URL and token in Settings.") } }
 }

@@ -391,8 +391,8 @@ private fun SyncLogScreen(onBack: () -> Unit) {
 private fun Section(header: String, footer: String? = null, rows: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
     Column {
         Text(
-            header.uppercase(), style = AppType.footnote, color = AppTheme.colors.secondaryLabel,
-            modifier = Modifier.padding(start = AppSpace.l, bottom = AppSpace.s - AppSpace.xs),
+            header, style = AppType.title,
+            modifier = Modifier.padding(start = AppSpace.xs, bottom = AppSpace.s),
         )
         InsetCard(content = rows)
         if (footer != null) {
@@ -406,7 +406,7 @@ private fun Section(header: String, footer: String? = null, rows: @Composable an
 
 @Composable
 private fun ValueRow(title: String, value: String) {
-    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
         Text(title, style = AppType.body, modifier = Modifier.width(120.dp))
         Text(value, style = AppType.body, color = AppTheme.colors.secondaryLabel, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
     }
@@ -422,7 +422,7 @@ private fun FieldRow(
     onChange: (String) -> Unit,
 ) {
     val c = AppTheme.colors
-    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
         Text(title, style = AppType.body, modifier = Modifier.width(120.dp))
         BasicTextField(
             value, onChange,
@@ -446,7 +446,7 @@ private fun FieldRow(
 private fun ChevronRow(title: String, value: String, onClick: () -> Unit) {
     val c = AppTheme.colors
     Row(
-        Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(onClick = onClick).padding(horizontal = AppSpace.l),
+        Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable(onClick = onClick).padding(horizontal = AppSpace.l),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(title, style = AppType.body, modifier = Modifier.weight(1f))
@@ -458,7 +458,7 @@ private fun ChevronRow(title: String, value: String, onClick: () -> Unit) {
 @Composable
 private fun SwitchRow(title: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     var on by remember(checked) { mutableStateOf(checked) }
-    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
         Text(title, style = AppType.body, modifier = Modifier.weight(1f))
         Switch(on, { on = it; onChange(it) }, colors = iosSwitchColors())
     }
@@ -497,7 +497,7 @@ private fun StartDateDialog(initial: String, onDismiss: () -> Unit, onPick: (Str
 @Composable
 private fun ButtonRow(title: String, enabled: Boolean = true, onClick: () -> Unit) {
     val c = AppTheme.colors
-    Box(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(enabled = enabled, onClick = onClick).padding(horizontal = AppSpace.l), contentAlignment = Alignment.CenterStart) {
+    Box(Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable(enabled = enabled, onClick = onClick).padding(horizontal = AppSpace.l), contentAlignment = Alignment.CenterStart) {
         Text(title, style = AppType.body, color = if (enabled) c.tint else c.secondaryLabel)
     }
 }

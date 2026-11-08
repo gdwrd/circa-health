@@ -8,20 +8,26 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Bedtime
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -56,6 +62,7 @@ import kotlinx.serialization.json.doubleOrNull
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.time.Instant
 import java.time.LocalTime
@@ -109,14 +116,16 @@ private fun segments(stages: JsonArray?, endS: Double): List<Seg> {
 
 @Composable
 fun SleepScreen(backend: Boolean?) {
-    if (backend != true) return PlaceholderTab("Sleep", backend)
+    if (backend != true) return NoBackendTab("Sleep", backend)
     val ctx = LocalContext.current
     var data by remember { mutableStateOf<JsonObject?>(null) }
     var trend by remember { mutableStateOf<List<Pair<String, Double?>>?>(null) }
     var week by remember { mutableStateOf<List<Pair<LocalDate, JsonObject?>>>(emptyList()) }
     val producer = remember { CartesianChartModelProducer() }
     val need = remember { ctx.sleepNeedHours }
-    LaunchedEffect(Unit) {
+    val scope = rememberCoroutineScope()
+    var refreshing by remember { mutableStateOf(false) }
+    suspend fun load() {
         val days = (6 downTo 0).map { LocalDate.now().minusDays(it.toLong()) }
         val all = coroutineScope { days.map { day -> async { Api.sleep(ctx, day.toString()).obj() } }.awaitAll() }
         week = days.zip(all.map { it?.get("session").obj() })
@@ -125,15 +134,16 @@ fun SleepScreen(backend: Boolean?) {
         trend = pts?.map { (it["date"] as? JsonPrimitive)?.contentOrNull.orEmpty() to it["value"].num() }
         trend?.let { t -> producer.runTransaction { columnSeries { series(t.map { (it.second ?: 0.0) / 60 }) } } }
     }
+    LaunchedEffect(Unit) { load() }
 
     val c = AppTheme.colors
-    LargeTitleScaffold("Sleep") {
+    LargeTitleScaffold("Sleep", refreshing = refreshing, onRefresh = {
+        scope.launch { refreshing = true; try { load() } finally { refreshing = false } }
+    }) {
         val d = data ?: return@LargeTitleScaffold
         val ses = d["session"].obj()
         if (ses == null) item {
-            InsetCard {
-                Text("No sleep recorded for last night", style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(AppSpace.l))
-            }
+            InsetCard { EmptyState(Icons.Rounded.Bedtime, "No sleep recorded", "Wear the ring to bed; last night appears after the morning sync.") }
         } else {
             val startS = ses["start"].num() ?: 0.0
             val endS = ses["end"].num() ?: startS
@@ -147,7 +157,10 @@ fun SleepScreen(backend: Boolean?) {
             val hr = (d["hr"] as? JsonArray)?.mapNotNull { it.obj()?.hrPt() }.orEmpty()
             item {
                 InsetCard {
-                    Row(Modifier.padding(AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(c.nightTop, c.nightBottom))).padding(AppSpace.l),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         Column(Modifier.weight(1f)) {
                             Text("Time asleep", style = AppType.subhead, color = c.secondaryLabel)
                             Text(
@@ -182,12 +195,17 @@ fun SleepScreen(backend: Boolean?) {
             }
             item {
                 val light = (total - rem - deep).coerceAtLeast(0.0)
+                val stages = listOf(
+                    "Awake" to (awake to c.stageAwake), "REM" to (rem to c.stageRem),
+                    "Light" to (light to c.stageCore), "Deep" to (deep to c.stageDeep),
+                )
                 InsetCard {
-                    listOf(
-                        "Awake" to (awake to c.stageAwake), "REM" to (rem to c.stageRem),
-                        "Light" to (light to c.stageCore), "Deep" to (deep to c.stageDeep),
-                    ).forEachIndexed { i, (name, v) ->
-                        if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
+                    // One stacked bar of the night, then the list.
+                    Row(Modifier.fillMaxWidth().padding(AppSpace.l).height(12.dp).clip(CircleShape), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                        stages.filter { it.second.first > 0 }.forEach { (_, v) -> Box(Modifier.weight(v.first.toFloat()).fillMaxHeight().background(v.second)) }
+                    }
+                    stages.forEach { (name, v) ->
+                        Hairline(Modifier.padding(start = AppSpace.l))
                         Row(Modifier.fillMaxWidth().padding(AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
                             Box(Modifier.size(10.dp).background(v.second, CircleShape))
                             Text(name, style = AppType.body, modifier = Modifier.weight(1f).padding(start = AppSpace.m))

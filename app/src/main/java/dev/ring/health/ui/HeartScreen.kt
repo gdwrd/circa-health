@@ -4,6 +4,11 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.MonitorHeart
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -92,7 +97,7 @@ private fun trend(json: JsonElement?): Trend? {
 
 @Composable
 fun HeartScreen(backend: Boolean?) {
-    if (backend != true) return PlaceholderTab("Heart", backend)
+    if (backend != true) return NoBackendTab("Heart", backend)
     val ctx = LocalContext.current
     var hr by remember { mutableStateOf<List<Pair<Double, Double>>?>(null) }
     var rhr by remember { mutableStateOf<Trend?>(null) }
@@ -104,7 +109,9 @@ fun HeartScreen(backend: Boolean?) {
     var med by remember { mutableStateOf<JsonObject?>(null) }
     var rhr90 by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
     var bp by remember { mutableStateOf<List<Triple<LocalDate, Int, Int>>>(emptyList()) }
-    LaunchedEffect(Unit) {
+    val scope = rememberCoroutineScope()
+    var refreshing by remember { mutableStateOf(false) }
+    suspend fun load() {
         hr = (Api.hr(ctx, 24).obj()?.get("points") as? JsonArray)
             ?.mapNotNull { o -> o.obj()?.let { p -> p["t"].num()?.let { t -> p["bpm"].num()?.let { t to it } } } }
             ?.sortedBy { it.first }
@@ -129,9 +136,12 @@ fun HeartScreen(backend: Boolean?) {
         }
         loaded = true
     }
+    LaunchedEffect(Unit) { load() }
 
     val c = AppTheme.colors
-    LargeTitleScaffold("Heart") {
+    LargeTitleScaffold("Heart", refreshing = refreshing, onRefresh = {
+        scope.launch { refreshing = true; try { load() } finally { refreshing = false } }
+    }) {
         item { Section("Now") { MeasureNow() } }
         if (!loaded) return@LargeTitleScaffold
         item {
@@ -229,6 +239,14 @@ private fun MeasureNow() {
     var status by remember { mutableStateOf("Tap to read your heart rate from the ring.") }
     val sweep = remember { Animatable(0f) }
     val measuring = job?.isActive == true
+    // Ring breathes 1 -> 1.03 while measuring; still under reduce-motion.
+    val pulse = remember { Animatable(1f) }
+    val reduce = LocalReduceMotion.current
+    LaunchedEffect(measuring) {
+        if (!measuring || reduce) { pulse.animateTo(1f); return@LaunchedEffect }
+        val soft = spring<Float>(Spring.DampingRatioNoBouncy, Spring.StiffnessVeryLow)
+        while (true) { pulse.animateTo(1.03f, soft); pulse.animateTo(1f, soft) }
+    }
 
     fun start() {
         if (measuring) return
@@ -256,9 +274,9 @@ private fun MeasureNow() {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(AppSpace.m),
     ) {
-        ScoreRing(sweep.value, c.heart, Modifier.size(160.dp), stroke = 12.dp) {
+        ScoreRing(sweep.value, c.heart, Modifier.size(160.dp).graphicsLayer { scaleX = pulse.value; scaleY = pulse.value }, stroke = 12.dp) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(bpm?.toString() ?: "—", style = AppType.largeTitle, color = if (bpm == null) c.secondaryLabel else c.label)
+                bpm?.let { CountUp(it, AppType.largeTitle) } ?: Text("—", style = AppType.largeTitle, color = c.secondaryLabel)
                 Text("bpm", style = AppType.footnote, color = c.secondaryLabel)
             }
         }
@@ -276,9 +294,7 @@ private fun MeasureNow() {
 }
 
 @Composable
-private fun Empty() {
-    Text("Not enough data yet", style = AppType.subhead, color = AppTheme.colors.secondaryLabel, modifier = Modifier.padding(AppSpace.l))
-}
+private fun Empty() = EmptyState(Icons.Rounded.MonitorHeart, "Not enough data yet", "Keep the ring on; this fills in after a few syncs.")
 
 @Composable
 private fun Value(v: Double, unit: String, color: Color) {

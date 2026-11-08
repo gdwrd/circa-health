@@ -1,6 +1,9 @@
 package dev.ring.health.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.EaseOut
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -14,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.Spa
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -21,10 +25,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
@@ -45,6 +51,7 @@ import com.patrykandpatrick.vico.core.cartesian.data.lineSeries
 import com.patrykandpatrick.vico.core.cartesian.layer.ColumnCartesianLayer
 import com.patrykandpatrick.vico.core.cartesian.layer.LineCartesianLayer
 import com.patrykandpatrick.vico.core.common.shape.CorneredShape
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -72,15 +79,20 @@ private val LEVELS = listOf(
 
 @Composable
 fun StressScreen(backend: Boolean?) {
-    if (backend != true) return PlaceholderTab("Stress", backend)
+    if (backend != true) return NoBackendTab("Stress", backend)
     val ctx = LocalContext.current
     var detail by remember { mutableStateOf(false) }
     if (detail) return ResilienceDetail { detail = false }
     var data by remember { mutableStateOf<JsonObject?>(null) }
-    LaunchedEffect(Unit) { data = Api.today(ctx).obj() }
+    val scope = rememberCoroutineScope()
+    var refreshing by remember { mutableStateOf(false) }
+    suspend fun load() { data = Api.today(ctx).obj() }
+    LaunchedEffect(Unit) { load() }
 
     val c = AppTheme.colors
-    LargeTitleScaffold("Stress") {
+    LargeTitleScaffold("Stress", refreshing = refreshing, onRefresh = {
+        scope.launch { refreshing = true; try { load() } finally { refreshing = false } }
+    }) {
         val d = data ?: return@LargeTitleScaffold
         val st = d["stress"].obj()
         val zones = listOf(
@@ -92,11 +104,11 @@ fun StressScreen(backend: Boolean?) {
                 Text("Today", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
                 InsetCard {
                     if (zones.all { it.second == 0 }) {
-                        Text("No stress data yet today", style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(AppSpace.l))
+                        EmptyState(Icons.Rounded.Spa, "No stress data yet today", "Stress is read every 30 minutes while you wear the ring.")
                     } else {
                         Row(Modifier.fillMaxWidth().padding(AppSpace.l), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                             zones.filter { it.second > 0 }.forEach { (_, min, col) ->
-                                Box(Modifier.weight(min.toFloat()).height(16.dp).clip(CircleShape).background(col))
+                                Box(Modifier.weight(min.toFloat()).height(16.dp).clip(CircleShape).background(Brush.verticalGradient(listOf(col.copy(alpha = 0.75f), col))))
                             }
                         }
                         zones.forEach { (name, min, col) ->
@@ -146,14 +158,7 @@ fun StressScreen(backend: Boolean?) {
                             Text("Resilience appears once 5 of the last 14 days have data.", style = AppType.subhead, color = c.secondaryLabel)
                         } else {
                             Text(LEVELS[idx].first.replaceFirstChar { it.uppercase() }, style = AppType.largeTitle)
-                            Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
-                                repeat(5) { i ->
-                                    Box(
-                                        Modifier.weight(1f).height(6.dp).clip(CircleShape)
-                                            .background(if (i <= idx) c.readiness else c.readiness.copy(alpha = 0.2f)),
-                                    )
-                                }
-                            }
+                            Capsules(idx)
                             Text(LEVELS[idx].second, style = AppType.subhead, color = c.secondaryLabel)
                         }
                     }
@@ -163,6 +168,22 @@ fun StressScreen(backend: Boolean?) {
                     )
                     }
                 }
+            }
+        }
+    }
+}
+
+/** Five capsules; the first idx+1 fill one after another (600 ms total), at once under reduce-motion. */
+@Composable
+private fun Capsules(idx: Int) {
+    val c = AppTheme.colors
+    val reduce = LocalReduceMotion.current
+    val fill = remember { Animatable(if (reduce) idx + 1f else 0f) }
+    LaunchedEffect(idx) { if (reduce) fill.snapTo(idx + 1f) else fill.animateTo(idx + 1f, tween(600, easing = EaseOut)) }
+    Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
+        repeat(5) { i ->
+            Box(Modifier.weight(1f).height(6.dp).clip(CircleShape).background(c.readiness.copy(alpha = 0.2f))) {
+                Box(Modifier.fillMaxWidth((fill.value - i).coerceIn(0f, 1f)).height(6.dp).background(c.readiness))
             }
         }
     }
