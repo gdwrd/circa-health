@@ -8,6 +8,7 @@ import android.content.Context
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -32,6 +33,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -44,12 +46,15 @@ import dev.ring.health.ColmiConnection
 import dev.ring.health.ColmiProtocol
 import dev.ring.health.Metric
 import dev.ring.health.MetricsPusher
+import dev.ring.health.MainActivity
 import dev.ring.health.Prefs.apiToken
 import dev.ring.health.Prefs.lastSyncMs
 import dev.ring.health.Prefs.ringAddress
 import dev.ring.health.Prefs.sleepNeedHours
 import dev.ring.health.Prefs.stepGoal
+import dev.ring.health.Prefs.syncIntervalMin
 import dev.ring.health.Prefs.vmUrl
+import dev.ring.health.SyncLog
 import dev.ring.health.SyncWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -77,8 +82,17 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var sleepNeed by remember { mutableStateOf(ctx.sleepNeedHours.toString().removeSuffix(".0")) }
 
     var lastSync by remember { mutableStateOf(ctx.lastSyncMs) }
+    var interval by remember { mutableIntStateOf(ctx.syncIntervalMin) }
+    var batteryOk by remember { mutableStateOf(MainActivity.isIgnoringBatteryOptimizations(ctx)) }
+    var pickInterval by remember { mutableStateOf(false) }
+    var showLog by remember { mutableStateOf(false) }
     DisposableEffect(activity) {
-        val obs = LifecycleEventObserver { _, e -> if (e == Lifecycle.Event.ON_RESUME) lastSync = ctx.lastSyncMs }
+        val obs = LifecycleEventObserver { _, e ->
+            if (e == Lifecycle.Event.ON_RESUME) {
+                lastSync = ctx.lastSyncMs
+                batteryOk = MainActivity.isIgnoringBatteryOptimizations(ctx)
+            }
+        }
         activity.lifecycle.addObserver(obs)
         onDispose { activity.lifecycle.removeObserver(obs) }
     }
@@ -134,6 +148,8 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
     }
 
+    if (showLog) return SyncLogScreen { showLog = false }
+
     LargeTitleScaffold("Settings") {
         item {
             Section("Ring") {
@@ -165,6 +181,22 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             }
         }
         item {
+            Section(
+                "Background sync",
+                "Each sync reads new data from the ring and pushes it to the server. " +
+                    "Android delays background work while battery optimisation is on.",
+            ) {
+                ChevronRow("Every", intervalLabel(interval)) { pickInterval = true }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ChevronRow("Battery", if (batteryOk) "Unrestricted" else "Optimised") {
+                    if (!batteryOk) MainActivity.requestBatteryExemption(ctx)
+                    else Toast.makeText(ctx, "Already unrestricted", Toast.LENGTH_SHORT).show()
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ChevronRow("Sync log", "") { showLog = true }
+            }
+        }
+        item {
             Section("Actions", liveText.ifEmpty { null }) {
                 ButtonRow("Sync now") {
                     SyncWorker.runNow(ctx)
@@ -174,6 +206,31 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 ButtonRow(if (measuring) "Measuring…" else "Measure heart rate now", enabled = !measuring, onClick = ::measureHeartRate)
             }
         }
+    }
+
+    if (pickInterval) {
+        AlertDialog(
+            onDismissRequest = { pickInterval = false },
+            title = { Text("Sync every") },
+            text = {
+                Column {
+                    INTERVALS.forEach { m ->
+                        Text(
+                            intervalLabel(m) + if (m == interval) "  ✓" else "",
+                            style = AppType.body, color = if (m == interval) c.tint else c.label,
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                interval = m
+                                ctx.syncIntervalMin = m
+                                SyncWorker.reschedule(ctx)
+                                pickInterval = false
+                            }.padding(vertical = AppSpace.m),
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton({ pickInterval = false }) { Text("Cancel") } },
+        )
     }
 
     scanResults?.let { results ->
@@ -199,6 +256,52 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             confirmButton = {},
             dismissButton = { TextButton({ scanResults = null }) { Text("Cancel") } },
         )
+    }
+}
+
+private val INTERVALS = listOf(5, 15, 30, 60, 0)
+
+private fun intervalLabel(m: Int) = if (m <= 0) "Off" else "$m min"
+
+/** Temporary debug view of [SyncLog]: ring reads and server pushes, newest first. */
+@Composable
+private fun SyncLogScreen(onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    val ctx = LocalContext.current
+    val c = AppTheme.colors
+    var lines by remember { mutableStateOf(SyncLog.read(ctx)) }
+    LargeTitleScaffold(
+        "Sync log",
+        back = { Text("‹ Settings", style = AppType.headline, color = c.tint, modifier = Modifier.clickable(onClick = onBack).padding(start = AppSpace.xs, bottom = AppSpace.xs)) },
+    ) {
+        item {
+            InsetCard {
+                ButtonRow("Refresh") { lines = SyncLog.read(ctx) }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ButtonRow("Sync now") {
+                    SyncWorker.runNow(ctx)
+                    Toast.makeText(ctx, "Sync started — tap Refresh in a minute", Toast.LENGTH_SHORT).show()
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ButtonRow("Clear log") { SyncLog.clear(ctx); lines = emptyList() }
+            }
+        }
+        item {
+            InsetCard {
+                if (lines.isEmpty()) {
+                    Text("No sync activity yet.", style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(AppSpace.l))
+                }
+                lines.forEachIndexed { i, line ->
+                    if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
+                    val failed = "FAILED" in line || "error" in line || "could not" in line
+                    Text(
+                        line, style = AppType.footnote.copy(fontFamily = FontFamily.Monospace),
+                        color = if (failed) c.activity else c.label,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = AppSpace.l, vertical = AppSpace.s),
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -256,6 +359,19 @@ private fun FieldRow(
                 }
             },
         )
+    }
+}
+
+@Composable
+private fun ChevronRow(title: String, value: String, onClick: () -> Unit) {
+    val c = AppTheme.colors
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(onClick = onClick).padding(horizontal = AppSpace.l),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, style = AppType.body, modifier = Modifier.weight(1f))
+        Text(value, style = AppType.body, color = c.secondaryLabel)
+        Text("  ›", style = AppType.body, color = c.secondaryLabel)
     }
 }
 
@@ -328,7 +444,8 @@ private suspend fun pushLiveHr(ctx: Context, bpm: Int) {
     if (url.isBlank()) return
     withContext(Dispatchers.IO) {
         runCatching {
-            MetricsPusher(url, ctx.apiToken).push(
+            val pusher = MetricsPusher(url, ctx.apiToken)
+            val ok = pusher.push(
                 listOf(
                     Metric(
                         name = "biometric_hr_bpm",
@@ -338,6 +455,7 @@ private suspend fun pushLiveHr(ctx: Context, bpm: Int) {
                     )
                 )
             )
+            SyncLog.add(ctx, "Server: live HR $bpm bpm ${if (ok) "pushed" else "push FAILED"} (${pusher.lastResult})")
         }.onFailure { Log.w("Settings", "Live HR push failed", it) }
     }
 }

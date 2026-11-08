@@ -18,6 +18,9 @@ data class Metric(
 
 class MetricsPusher(private val baseUrl: String, private val token: String = "") {
 
+    /** Outcome of the last push for the sync log: "HTTP 204", "HTTP 401 ...", or the exception. */
+    var lastResult = ""
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
@@ -54,12 +57,16 @@ class MetricsPusher(private val baseUrl: String, private val token: String = "")
 
         return try {
             client.newCall(request).execute().use { response ->
+                lastResult = "HTTP ${response.code}"
                 if (!response.isSuccessful) {
-                    Log.e(TAG, "Push failed: HTTP ${response.code} — ${response.body?.string()}")
+                    val body = response.body?.string()
+                    lastResult += " " + body.orEmpty().take(120)
+                    Log.e(TAG, "Push failed: HTTP ${response.code} — $body")
                 }
                 response.isSuccessful
             }
         } catch (e: Exception) {
+            lastResult = e.javaClass.simpleName + ": " + e.message
             Log.e(TAG, "Push exception: ${e.message}")
             false
         }

@@ -16,6 +16,8 @@ object Prefs {
     private const val KEY_LAST_HRV_MS     = "last_hrv_ms"
     private const val KEY_LAST_SLEEP_MS   = "last_sleep_ms"
     private const val KEY_SLEEP_SCHEMA    = "sleep_schema"
+    private const val KEY_SYNC_INTERVAL   = "sync_interval_min"
+    private const val KEY_ASKED_BATTERY   = "asked_battery"
     private const val KEY_LAST_ACTIVITY_MS = "last_activity_ms"
     private const val KEY_LAST_STRESS_MS  = "last_stress_ms"
     private const val KEY_LAST_SPO2_MS    = "last_spo2_ms"
@@ -58,6 +60,15 @@ object Prefs {
     var Context.lastSleepMs: Long
         get() = prefs(this).getLong(KEY_LAST_SLEEP_MS, 0L)
         set(v) = prefs(this).edit().putLong(KEY_LAST_SLEEP_MS, v).apply()
+
+    /** Minutes between background syncs (ring read + push); 0 = background sync off. */
+    var Context.syncIntervalMin: Int
+        get() = prefs(this).getInt(KEY_SYNC_INTERVAL, 5)
+        set(v) = prefs(this).edit().putInt(KEY_SYNC_INTERVAL, v).apply()
+
+    var Context.askedBattery: Boolean
+        get() = prefs(this).getBoolean(KEY_ASKED_BATTERY, false)
+        set(v) = prefs(this).edit().putBoolean(KEY_ASKED_BATTERY, v).apply()
 
     // 2 = sleep sessions are pushed with awake/end/stage series (v1.1+).
     var Context.sleepSchema: Int

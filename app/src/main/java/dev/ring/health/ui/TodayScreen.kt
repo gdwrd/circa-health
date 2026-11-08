@@ -51,6 +51,42 @@ private val NAMES = mapOf(
     "inactive_hours" to "Inactive hours", "calories" to "Calories", "goal_days" to "Goal days",
 )
 
+// Plain-language explanations shown when a score or contributor is tapped. Keep in sync with backend/app/scoring.py.
+private val SCORE_INFO = mapOf(
+    "sleep" to "How well you slept last night, from 0 to 100. It is the average of the contributors below: " +
+        "time asleep against your sleep need, how much of the night you were asleep, minutes awake, REM and deep " +
+        "sleep, and whether the middle of your sleep fell between midnight and 3 AM.",
+    "readiness" to "How recovered you are for today, from 0 to 100. It compares last night's resting heart rate " +
+        "and HRV with your own 14-day baseline, and adds last night's sleep, your recent sleep and activity, " +
+        "yesterday's steps and how quickly your heart rate settled overnight.",
+    "activity" to "How active you have been today, from 0 to 100. It averages your steps against your step goal, " +
+        "the awake hours you barely moved, your calories against your 7-day average and how many of the last " +
+        "7 days reached your goal.",
+)
+private const val SCORE_SCALE = "80 or more is good, 60–79 fair, below 60 low. A contributor shows “—” until " +
+    "there is enough data; the score uses the ones available. Scores are estimates from your ring, compared " +
+    "with your own history, not medical advice. Tap a row for details."
+
+private val CONTRIBUTOR_INFO = mapOf(
+    "total" to "Time asleep against your sleep need (Settings). 100 at or above it, 0 at 4 hours.",
+    "efficiency" to "Share of the night spent asleep rather than awake. 100 at 95% or more, 0 at 75%.",
+    "restfulness" to "Minutes awake during the night. 100 at 10 minutes or less, 0 at an hour.",
+    "rem" to "Minutes of REM (dream) sleep. 100 at 90 minutes or more.",
+    "deep" to "Minutes of deep sleep. 100 at 90 minutes or more.",
+    "timing" to "When the middle of your sleep fell. 100 between midnight and 3 AM, about 33 less per hour outside.",
+    "resting_hr" to "Your low overnight heart rate against your 14-day baseline. 100 at or below it, 10 less per bpm above.",
+    "hrv_balance" to "Your overnight heart rate variability against your 14-day baseline. 100 at or above it, 0 at 60% of it.",
+    "sleep" to "Last night's sleep score.",
+    "sleep_balance" to "Your average sleep over the last 14 days against your sleep need.",
+    "previous_day_activity" to "Yesterday's steps against your goal. 100 between 80% and 120%, lower when far below or above.",
+    "activity_balance" to "Your average daily steps over the last 14 days against your goal.",
+    "recovery_index" to "How soon your heart rate settled overnight. 100 if it reached its low in the first half of the night.",
+    "steps" to "Today's steps against your step goal (Settings).",
+    "inactive_hours" to "Awake hours with fewer than 50 steps. 100 at 5 hours or fewer, 0 at 12.",
+    "calories" to "Today's calories against your 7-day average. 100 at or above it.",
+    "goal_days" to "Days in the last 7 that reached your step goal. 100 at 5 days or more.",
+)
+
 private fun JsonElement?.obj() = this as? JsonObject
 private fun JsonElement?.num() = (this as? JsonPrimitive)?.doubleOrNull
 
@@ -108,9 +144,15 @@ fun TodayScreen(backend: Boolean?) {
                 rings.forEach { (key, meta) ->
                     AnimatedVisibility(open == key) {
                         Column {
+                            Hairline(Modifier.padding(start = AppSpace.l))
+                            Column(Modifier.padding(horizontal = AppSpace.l, vertical = AppSpace.m)) {
+                                Text("What is ${meta.first}?", style = AppType.headline)
+                                Text(SCORE_INFO[key].orEmpty(), style = AppType.subhead, modifier = Modifier.padding(top = AppSpace.xs))
+                                Text(SCORE_SCALE, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s))
+                            }
                             (d[key].obj()?.get("contributors").obj() ?: JsonObject(emptyMap())).forEach { (name, v) ->
                                 Hairline(Modifier.padding(start = AppSpace.l))
-                                Contributor(NAMES[name] ?: name, v.num(), meta.second)
+                                Contributor(NAMES[name] ?: name, v.num(), meta.second, CONTRIBUTOR_INFO[name])
                             }
                         }
                     }
@@ -201,12 +243,19 @@ private fun AddTagSheet(onDismiss: () -> Unit, onAdd: suspend (String, String?) 
 }
 
 @Composable
-private fun Contributor(name: String, value: Double?, color: Color) {
+private fun Contributor(name: String, value: Double?, color: Color, info: String?) {
     val c = AppTheme.colors
-    Column(Modifier.fillMaxWidth().padding(horizontal = AppSpace.l, vertical = AppSpace.m)) {
+    var expanded by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = AppSpace.l, vertical = AppSpace.m)) {
         Row {
             Text(name, style = AppType.body, modifier = Modifier.weight(1f))
             Text(value?.roundToInt()?.toString() ?: "—", style = AppType.body, color = if (value == null) c.secondaryLabel else c.label)
+        }
+        AnimatedVisibility(expanded && info != null) {
+            Text(
+                info.orEmpty() + if (value == null) " Not available yet: needs more days of data." else "",
+                style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.xs),
+            )
         }
         val bar = RoundedCornerShape(2.dp)
         Box(Modifier.padding(top = AppSpace.s).fillMaxWidth().height(4.dp).clip(bar).background(color.copy(alpha = 0.2f))) {

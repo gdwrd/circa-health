@@ -36,6 +36,7 @@ import dev.ring.health.Prefs.lastHrMs
 import dev.ring.health.Prefs.lastHrvMs
 import dev.ring.health.Prefs.lastSleepMs
 import dev.ring.health.Prefs.sleepSchema
+import dev.ring.health.Prefs.syncIntervalMin
 import dev.ring.health.Prefs.lastSpo2Ms
 import dev.ring.health.Prefs.lastStressMs
 import dev.ring.health.Prefs.lastSyncMs
@@ -59,15 +60,19 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
     @SuppressLint("MissingPermission")
     override suspend fun doWork(): Result {
         setForeground(buildForegroundInfo("Syncing ring…"))
+        val log = { msg: String -> SyncLog.add(applicationContext, msg) }
+        log("Sync started")
 
         val address = applicationContext.ringAddress
         if (address.isNullOrBlank()) {
             Log.w(TAG, "No ring address configured")
+            log("Skipped: no ring address in Settings")
             return Result.failure()
         }
         val vmUrl = applicationContext.vmUrl
         if (vmUrl.isBlank()) {
             Log.w(TAG, "No VictoriaMetrics URL configured")
+            log("Skipped: no server URL in Settings")
             return Result.failure()
         }
 
@@ -76,6 +81,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             val connected = conn.connect()
             if (!connected) {
                 Log.w(TAG, "Could not connect to ring")
+                log("Ring: could not connect")
                 scheduleNext(applicationContext)
                 return Result.success()
             }
@@ -131,6 +137,12 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             conn.writeCommand(ColmiProtocol.sleepRequest())
             val sleepSessions = collectSleep(conn)
 
+            log(
+                "Ring: read ${hrSamples.size} HR, ${hrvSamples.size} HRV, ${activitySamples.size} activity, " +
+                    "${stressSamples.size} stress, ${spo2Samples.size} SpO2, ${sleepSessions.size} sleep sessions" +
+                    (battery?.let { ", battery ${it.level}%" } ?: "")
+            )
+
             // ── Compute + push metrics ────────────────────────────────────
             val metrics = buildMetrics(
                 applicationContext,
@@ -140,8 +152,11 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
             if (metrics.isEmpty()) {
                 Log.i(TAG, "No new metrics to push")
+                log("Server: nothing new to push")
             } else {
-                val pushed = MetricsPusher(vmUrl, applicationContext.apiToken).push(metrics)
+                val pusher = MetricsPusher(vmUrl, applicationContext.apiToken)
+                val pushed = pusher.push(metrics)
+                log("Server: ${if (pushed) "pushed" else "push FAILED for"} ${metrics.size} metrics to $vmUrl (${pusher.lastResult})")
                 if (!pushed) {
                     scheduleNext(applicationContext)
                     return Result.success()
@@ -162,7 +177,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                     ?.let { applicationContext.lastSleepMs = it }
                 applicationContext.sleepSchema = 2
 
-                runCatching { postPending() }
+                runCatching { postPending() }.onSuccess { n -> if (n > 0) log("Server: showed $n notifications") }
             }
 
             applicationContext.lastSyncMs = System.currentTimeMillis()
@@ -170,6 +185,9 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             scheduleNext(applicationContext)
             Result.success()
 
+        } catch (e: Exception) {
+            log("Sync error: ${e.javaClass.simpleName}: ${e.message}")
+            throw e
         } finally {
             conn.disconnect()
         }
@@ -378,10 +396,10 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
     /** Silent no-op without a backend (404 -> null). Unposted (no permission) stay pending. */
     @SuppressLint("MissingPermission")
-    private suspend fun postPending() {
+    private suspend fun postPending(): Int {
         val ctx = applicationContext
-        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
-        val pending = Api.notifications(ctx) as? JsonArray ?: return
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return 0
+        val pending = Api.notifications(ctx) as? JsonArray ?: return 0
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(NotificationChannel("health", "Health", NotificationManager.IMPORTANCE_DEFAULT))
         val open = PendingIntent.getActivity(
@@ -400,6 +418,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             nm.notify(1000 + id, notif) // offset keeps clear of the sync notification id
             Api.ack(ctx, id)
         }
+        return pending.size
     }
 
     // ── Foreground notification ────────────────────────────────────────────
@@ -426,12 +445,12 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
     }
 
     companion object {
-        private const val SYNC_INTERVAL_MINUTES = 5L
 
         // Kick off the first sync immediately; each run re-schedules the next one.
         // PeriodicWorkRequest has a hard 15-min OS floor, so we use self-chaining
         // OneTimeWorkRequests with an initial delay instead.
         fun schedule(ctx: Context) {
+            if (ctx.syncIntervalMin <= 0) return
             val wm = WorkManager.getInstance(ctx)
             wm.cancelUniqueWork("ring_sync_periodic")
             val request = OneTimeWorkRequestBuilder<SyncWorker>()
@@ -445,14 +464,26 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         }
 
         internal fun scheduleNext(ctx: Context) {
+            val minutes = ctx.syncIntervalMin
+            if (minutes <= 0) {
+                SyncLog.add(ctx, "Background sync is off; nothing scheduled")
+                return
+            }
+            SyncLog.add(ctx, "Next sync in $minutes min")
             val request = OneTimeWorkRequestBuilder<SyncWorker>()
-                .setInitialDelay(SYNC_INTERVAL_MINUTES, TimeUnit.MINUTES)
+                .setInitialDelay(minutes.toLong(), TimeUnit.MINUTES)
                 .build()
             WorkManager.getInstance(ctx).enqueueUniqueWork(
                 "ring_sync",
                 androidx.work.ExistingWorkPolicy.REPLACE,
                 request
             )
+        }
+
+        /** Applies a changed interval: drops the pending run, then (unless off) syncs now and re-chains. */
+        fun reschedule(ctx: Context) {
+            WorkManager.getInstance(ctx).cancelUniqueWork("ring_sync")
+            if (ctx.syncIntervalMin > 0) runNow(ctx) else SyncLog.add(ctx, "Background sync turned off")
         }
 
         fun runNow(ctx: Context) {
