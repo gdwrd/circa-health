@@ -15,6 +15,7 @@ object Prefs {
     private const val KEY_LAST_HR_MS      = "last_hr_ms"
     private const val KEY_LAST_HRV_MS     = "last_hrv_ms"
     private const val KEY_LAST_SLEEP_MS   = "last_sleep_ms"
+    private const val KEY_SLEEP_SCHEMA    = "sleep_schema"
     private const val KEY_LAST_ACTIVITY_MS = "last_activity_ms"
     private const val KEY_LAST_STRESS_MS  = "last_stress_ms"
     private const val KEY_LAST_SPO2_MS    = "last_spo2_ms"
@@ -57,6 +58,11 @@ object Prefs {
     var Context.lastSleepMs: Long
         get() = prefs(this).getLong(KEY_LAST_SLEEP_MS, 0L)
         set(v) = prefs(this).edit().putLong(KEY_LAST_SLEEP_MS, v).apply()
+
+    // 2 = sleep sessions are pushed with awake/end/stage series (v1.1+).
+    var Context.sleepSchema: Int
+        get() = prefs(this).getInt(KEY_SLEEP_SCHEMA, 0)
+        set(v) = prefs(this).edit().putInt(KEY_SLEEP_SCHEMA, v).apply()
 
     var Context.lastActivityMs: Long
         get() = prefs(this).getLong(KEY_LAST_ACTIVITY_MS, 0L)

@@ -33,6 +33,7 @@
 - [x] **T8 Deploy phase 1 to the homelab.** (2026-11-08) — backend/, compose, .env.example, biometrics.json copied to ~/ring-health; API_TOKEN (generated on host) + TZ=Europe/London appended to remote .env (backup .env.bak-2026-11-08); ring-backend up on 8429. /health 200, /today 401 without / 200 with token, Grafana /login 200, VM data intact, token not in logs. Not verified: new panels rendered on homelab Grafana (restart ring-grafana if missing), app -> backend sync. Read token: ssh d0p3@192.168.0.104 "grep '^API_TOKEN=' ~/ring-health/infra/.env | cut -d= -f2".
 
 ## Done (record, newest first)
+- [x] **F1 v2.0.1: sleep and history missing after upgrade** (2026-11-08) — cause: the night was already pushed by v1.0, so the `lastSleepMs` watermark blocked re-sending it with the v1.1 awake/end/stage series; the backend only rescored pushed dates, so pre-backend days had no rows. Fix: app re-sends the ring's sleep sessions once (`Prefs.sleepSchema`), versionCode 4 / 2.0.1, released; backend `_night` derives the end from start + minutes when `end_ts` is missing, and rescores the last 14 days on startup (`BACKFILL_DAYS`, 0 in tests). pytest 26 passed; homelab redeployed: last night now scores (sleep 62, readiness 54). Not fixed: SpO₂ — the ring returns no SpO₂ history (its periodic SpO₂ measurement is likely off).
 
 ## Parked (record only)
 

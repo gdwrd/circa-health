@@ -1,6 +1,7 @@
 import logging
 import os
 import secrets
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
@@ -32,6 +33,8 @@ def _night(d: date) -> dict | None:
     lo, hi = vm.midnight(d) - timedelta(hours=12), vm.midnight(d + timedelta(1))
     ends = vm.series("biometric_sleep_end_ts", lo, hi, "5m")
     parts = {k: vm.series(f"biometric_sleep_{k}_min", lo, hi, "5m") for k in ("total", "awake", "rem", "deep")}
+    for t, total in parts["total"].items():  # sessions pushed before app v1.1 have no end_ts
+        ends.setdefault(t, t + (total + parts["awake"].get(t, 0.0)) * 60)
     best = None
     for end in set(ends.values()):
         if datetime.fromtimestamp(end, vm.tz()).date() != d:
@@ -114,6 +117,11 @@ def rescore(dates: set[date]) -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.init()
+    # Score history pushed before the backend existed (or before a rule change); ingest only rescores pushed dates.
+    days = int(os.environ.get("BACKFILL_DAYS", "14"))
+    today = datetime.now(vm.tz()).date()
+    if days > 0:
+        threading.Thread(target=rescore, args=({today - timedelta(i) for i in range(days)},), daemon=True).start()
     yield
 
 

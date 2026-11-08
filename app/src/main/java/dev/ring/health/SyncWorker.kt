@@ -35,6 +35,7 @@ import dev.ring.health.Prefs.lastActivityMs
 import dev.ring.health.Prefs.lastHrMs
 import dev.ring.health.Prefs.lastHrvMs
 import dev.ring.health.Prefs.lastSleepMs
+import dev.ring.health.Prefs.sleepSchema
 import dev.ring.health.Prefs.lastSpo2Ms
 import dev.ring.health.Prefs.lastStressMs
 import dev.ring.health.Prefs.lastSyncMs
@@ -159,6 +160,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                     ?.let { applicationContext.lastSpo2Ms = it }
                 sleepSessions.maxOfOrNull { it.startMs }
                     ?.let { applicationContext.lastSleepMs = it }
+                applicationContext.sleepSchema = 2
 
                 runCatching { postPending() }
             }
@@ -310,7 +312,8 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         val lastActivityMs = ctx.lastActivityMs
         val lastStressMs   = ctx.lastStressMs
         val lastSpo2Ms     = ctx.lastSpo2Ms
-        val lastSleepMs    = ctx.lastSleepMs
+        // Once after upgrading from v1.0: re-send the sessions the ring still holds with the v1.1 series.
+        val lastSleepMs    = if (ctx.sleepSchema < 2) 0L else ctx.lastSleepMs
 
         // ── Battery (always push — instantaneous reading) ─────────────────
         if (battery != null) {

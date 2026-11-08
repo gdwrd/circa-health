@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta
 import httpx
 from fastapi.testclient import TestClient
 
-from app import db, vm
+from app import db, main, vm
 from app.main import app
 
 H = {"Authorization": "Bearer secret"}
@@ -86,3 +86,12 @@ def test_tags() -> None:
         assert c.post("/tags", json={"tag": "Old", "ts": 1}, headers=H).status_code == 200
         t = c.get("/tags?days=1", headers=H).json()["tags"]
         assert [x["tag"] for x in t] == ["Alcohol"] and t[0]["note"] == "2 beers"
+
+
+def test_night_without_end_ts(monkeypatch) -> None:
+    """Sessions pushed by app v1.0 carry only *_min series; the night still resolves."""
+    d = date.today()
+    t0 = (vm.midnight(d) - timedelta(minutes=30)).timestamp()
+    monkeypatch.setattr(vm, "series", lambda expr, s, e, step: {t0: 420.0} if expr == "biometric_sleep_total_min" else {})
+    n = main._night(d)
+    assert n is not None and n["end"] == t0 + 420 * 60 and n["total_min"] == 420
