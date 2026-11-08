@@ -55,6 +55,7 @@ Routes:
 | `GET /today` | scores + contributors for today/last night, latest vitals, baseline status ("learning: N/14 days") |
 | `GET /sleep?date=` | session(s): stages timeline, totals, contributors |
 | `GET /trends?metric=&days=` | daily series for score/RHR/HRV/steps/sleep (for charts) |
+| `GET /hr?hours=` | raw 5-min heart rate for the Heart screen's 24 h chart (added in T12) |
 | `GET /notifications/pending`, `POST /notifications/{id}/ack` | phase 3 uses them; stub returns `[]` in phase 1 |
 | `GET /health` | liveness |
 All except `/health` require `Authorization: Bearer <token>`.
