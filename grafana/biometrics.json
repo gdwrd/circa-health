@@ -9,9 +9,141 @@
   "panels": [
     {
       "type": "row",
+      "id": 90,
+      "title": "Scores",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "gauge",
+      "id": 91,
+      "title": "Sleep",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 7, "w": 4, "x": 0, "y": 1 },
+      "targets": [
+        { "expr": "last_over_time(score_sleep[2d])", "refId": "A", "legendFormat": "Sleep" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 100,
+          "decimals": 0,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "green", "value": 80 }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showThresholdMarkers": true,
+        "showThresholdLabels": false
+      }
+    },
+    {
+      "type": "gauge",
+      "id": 92,
+      "title": "Readiness",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 7, "w": 4, "x": 4, "y": 1 },
+      "targets": [
+        { "expr": "last_over_time(score_readiness[2d])", "refId": "A", "legendFormat": "Readiness" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 100,
+          "decimals": 0,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "green", "value": 80 }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showThresholdMarkers": true,
+        "showThresholdLabels": false
+      }
+    },
+    {
+      "type": "gauge",
+      "id": 93,
+      "title": "Activity",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 7, "w": 4, "x": 8, "y": 1 },
+      "targets": [
+        { "expr": "last_over_time(score_activity[2d])", "refId": "A", "legendFormat": "Activity" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 100,
+          "decimals": 0,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "green", "value": 80 }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showThresholdMarkers": true,
+        "showThresholdLabels": false
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 94,
+      "title": "Scores (30 days)",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 1 },
+      "timeFrom": "30d",
+      "targets": [
+        { "expr": "score_sleep",     "refId": "A", "legendFormat": "Sleep",     "interval": "1d" },
+        { "expr": "score_readiness", "refId": "B", "legendFormat": "Readiness", "interval": "1d" },
+        { "expr": "score_activity",  "refId": "C", "legendFormat": "Activity",  "interval": "1d" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 100,
+          "decimals": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "always", "pointSize": 6 },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": [
+        { "matcher": { "id": "byName", "options": "Sleep" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "#5E5CE6" } } ] },
+        { "matcher": { "id": "byName", "options": "Readiness" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "#30D158" } } ] },
+        { "matcher": { "id": "byName", "options": "Activity" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "#FF375F" } } ] }
+        ]
+      },
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }
+      }
+    },
+    {
+      "type": "row",
       "id": 100,
       "title": "Vitals (raw)",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 8 },
       "collapsed": false,
       "panels": []
     },
@@ -20,7 +152,7 @@
       "id": 1,
       "title": "Heart Rate (latest)",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 9 },
       "targets": [
         { "expr": "last_over_time(biometric_hr_bpm[1h])", "refId": "A", "legendFormat": "bpm" }
       ],
@@ -54,7 +186,7 @@
       "id": 2,
       "title": "Resting HR (24h min)",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 9 },
       "targets": [
         { "expr": "min_over_time(biometric_hr_bpm[24h])", "refId": "A", "legendFormat": "bpm" }
       ],
@@ -87,7 +219,7 @@
       "id": 3,
       "title": "HRV (latest RMSSD)",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 9 },
       "targets": [
         { "expr": "last_over_time(biometric_hrv_rmssd[6h])", "refId": "A", "legendFormat": "ms" }
       ],
@@ -118,7 +250,7 @@
       "id": 4,
       "title": "SpO2 (latest)",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 9 },
       "targets": [
         { "expr": "last_over_time(biometric_spo2_pct[6h])", "refId": "A", "legendFormat": "%" }
       ],
@@ -151,7 +283,7 @@
       "id": 5,
       "title": "Stress (latest)",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 9 },
       "targets": [
         { "expr": "last_over_time(biometric_stress[2h])", "refId": "A", "legendFormat": "stress" }
       ],
@@ -183,7 +315,7 @@
       "id": 6,
       "title": "Ring Battery",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 9 },
       "targets": [
         { "expr": "last_over_time(ring_battery_pct[1h])", "refId": "A", "legendFormat": "%" }
       ],
@@ -217,7 +349,7 @@
       "id": 10,
       "title": "Heart Rate (5-min raw)",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 5 },
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 13 },
       "targets": [
         { "expr": "biometric_hr_bpm", "refId": "A", "legendFormat": "HR (bpm)" },
         { "expr": "min_over_time(biometric_hr_bpm[1h])", "refId": "B", "legendFormat": "1h min (RHR proxy)" }
@@ -256,7 +388,7 @@
       "id": 11,
       "title": "HRV (RMSSD, 30-min raw)",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 5 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 13 },
       "targets": [
         { "expr": "biometric_hrv_rmssd", "refId": "A", "legendFormat": "HRV" },
         { "expr": "avg_over_time(biometric_hrv_rmssd[8h])", "refId": "B", "legendFormat": "8h avg" }
@@ -284,7 +416,7 @@
       "type": "row",
       "id": 200,
       "title": "Activity",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 },
       "collapsed": false,
       "panels": []
     },
@@ -293,7 +425,7 @@
       "id": 20,
       "title": "Steps per hour",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 14 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 22 },
       "targets": [
         { "expr": "biometric_steps", "refId": "A", "legendFormat": "steps" }
       ],
@@ -320,7 +452,7 @@
       "id": 21,
       "title": "Calories per hour",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 14 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 22 },
       "targets": [
         { "expr": "biometric_calories", "refId": "A", "legendFormat": "kcal" }
       ],
@@ -347,7 +479,7 @@
       "id": 22,
       "title": "Distance per hour",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 14 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 22 },
       "targets": [
         { "expr": "biometric_distance_meters", "refId": "A", "legendFormat": "meters" }
       ],
@@ -374,7 +506,7 @@
       "id": 23,
       "title": "Steps today",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 22 },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 30 },
       "targets": [
         { "expr": "sum_over_time(biometric_steps[24h])", "refId": "A", "legendFormat": "steps" }
       ],
@@ -405,7 +537,7 @@
       "id": 24,
       "title": "Calories today",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 22 },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 30 },
       "targets": [
         { "expr": "sum_over_time(biometric_calories[24h])", "refId": "A", "legendFormat": "kcal" }
       ],
@@ -429,7 +561,7 @@
       "id": 25,
       "title": "Distance today",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 22 },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 30 },
       "targets": [
         { "expr": "sum_over_time(biometric_distance_meters[24h])", "refId": "A", "legendFormat": "m" }
       ],
@@ -452,7 +584,7 @@
       "type": "row",
       "id": 300,
       "title": "Stress & SpO2",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 },
       "collapsed": false,
       "panels": []
     },
@@ -461,7 +593,7 @@
       "id": 30,
       "title": "Stress (30-min)",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 },
       "targets": [
         { "expr": "biometric_stress", "refId": "A", "legendFormat": "stress" }
       ],
@@ -500,7 +632,7 @@
       "id": 31,
       "title": "SpO2 (hourly)",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 },
       "targets": [
         { "expr": "biometric_spo2_pct", "refId": "A", "legendFormat": "SpO2" }
       ],
@@ -528,7 +660,7 @@
       "type": "row",
       "id": 400,
       "title": "Sleep",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 43 },
       "collapsed": false,
       "panels": []
     },
@@ -537,7 +669,7 @@
       "id": 40,
       "title": "Last sleep total",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 36 },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 44 },
       "targets": [
         { "expr": "last_over_time(biometric_sleep_total_min[2d]) / 60", "refId": "A", "legendFormat": "hours" }
       ],
@@ -568,7 +700,7 @@
       "id": 41,
       "title": "Last deep",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 36 },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 44 },
       "targets": [
         { "expr": "last_over_time(biometric_sleep_deep_min[2d]) / 60", "refId": "A", "legendFormat": "hours" }
       ],
@@ -590,7 +722,7 @@
       "id": 42,
       "title": "Last REM",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 36 },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 44 },
       "targets": [
         { "expr": "last_over_time(biometric_sleep_rem_min[2d]) / 60", "refId": "A", "legendFormat": "hours" }
       ],
@@ -612,7 +744,7 @@
       "id": 43,
       "title": "Last light",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 36 },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 44 },
       "targets": [
         { "expr": "last_over_time(biometric_sleep_light_min[2d]) / 60", "refId": "A", "legendFormat": "hours" }
       ],
@@ -630,11 +762,41 @@
       }
     },
     {
+      "type": "state-timeline",
+      "id": 45,
+      "title": "Hypnogram",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 48 },
+      "targets": [
+        { "expr": "last_over_time(biometric_sleep_stage[3h])", "refId": "A", "legendFormat": "stage" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 0, "fillOpacity": 85 },
+          "color": { "mode": "fixed", "fixedColor": "transparent" },
+          "mappings": [
+        { "type": "value", "options": { "0": { "text": "none", "color": "transparent" } } },
+        { "type": "value", "options": { "1": { "text": "light", "color": "#0A84FF" } } },
+        { "type": "value", "options": { "2": { "text": "deep", "color": "#5E5CE6" } } },
+        { "type": "value", "options": { "3": { "text": "REM", "color": "#64D2FF" } } },
+        { "type": "value", "options": { "4": { "text": "awake", "color": "#FF9F0A" } } }
+          ]
+        }
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "auto",
+        "alignValue": "left",
+        "rowHeight": 0.9,
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false }
+      }
+    },
+    {
       "type": "timeseries",
       "id": 44,
       "title": "Sleep stages over time",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 40 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 56 },
       "targets": [
         { "expr": "biometric_sleep_deep_min / 60",  "refId": "A", "legendFormat": "deep" },
         { "expr": "biometric_sleep_rem_min / 60",   "refId": "B", "legendFormat": "rem" },
@@ -671,7 +833,7 @@
       "type": "row",
       "id": 500,
       "title": "Ring status",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 48 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 64 },
       "collapsed": false,
       "panels": []
     },
@@ -680,7 +842,7 @@
       "id": 50,
       "title": "Battery %",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 49 },
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 65 },
       "targets": [
         { "expr": "ring_battery_pct", "refId": "A", "legendFormat": "battery" }
       ],
@@ -710,7 +872,7 @@
       "id": 51,
       "title": "Charging state",
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 49 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 65 },
       "targets": [
         { "expr": "ring_charging", "refId": "A", "legendFormat": "charging" }
       ],
