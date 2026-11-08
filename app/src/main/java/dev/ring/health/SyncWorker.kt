@@ -18,6 +18,7 @@ import dev.ring.health.ColmiProtocol.ActivitySample
 import dev.ring.health.ColmiProtocol.BatteryStatus
 import dev.ring.health.ColmiProtocol.HrSample
 import dev.ring.health.ColmiProtocol.HrvSample
+import dev.ring.health.ColmiProtocol.SLEEP_AWAKE
 import dev.ring.health.ColmiProtocol.SLEEP_DEEP
 import dev.ring.health.ColmiProtocol.SLEEP_LIGHT
 import dev.ring.health.ColmiProtocol.SLEEP_REM
@@ -343,6 +344,15 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             if (deepMin  > 0) metrics += Metric("biometric_sleep_deep_min",  labels, deepMin.toDouble(),  s.startMs)
             if (remMin   > 0) metrics += Metric("biometric_sleep_rem_min",   labels, remMin.toDouble(),   s.startMs)
             if (lightMin > 0) metrics += Metric("biometric_sleep_light_min", labels, lightMin.toDouble(), s.startMs)
+
+            val awakeMin = s.stages.filter { it.stage == SLEEP_AWAKE }.sumOf { it.durationMinutes }
+            metrics += Metric("biometric_sleep_awake_min", labels, awakeMin.toDouble(), s.startMs)
+            metrics += Metric("biometric_sleep_end_ts", labels, s.endMs / 1000.0, s.startMs)
+            for (seg in s.stages) {
+                val v = when (seg.stage) { SLEEP_LIGHT -> 1.0; SLEEP_DEEP -> 2.0; SLEEP_REM -> 3.0; SLEEP_AWAKE -> 4.0; else -> continue }
+                metrics += Metric("biometric_sleep_stage", labels, v, seg.startMs)
+            }
+            metrics += Metric("biometric_sleep_stage", labels, 0.0, s.endMs)
         }
 
         return metrics
