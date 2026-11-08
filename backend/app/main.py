@@ -260,6 +260,39 @@ def trends(metric: str, days: int = 30) -> dict:
     return {"metric": metric, "days": days, "points": pts}
 
 
+def _week(end: date) -> dict:
+    """7 days ending at end: per-day values, means over days that have them, best/worst night by sleep score."""
+    rows = {r["date"]: r for r in db.days(end - timedelta(6), end)}
+    days = []
+    for i in range(7):
+        d = end - timedelta(6 - i)
+        r = rows.get(d) or {"c": {}, "inputs": {}}
+        days.append({"date": d.isoformat(), **{k: r.get(v) for k, v in SCORES.items()},
+                     "steps": r["inputs"].get("steps"), "sleep_min": r["inputs"].get("sleep_min"),
+                     "strain": (r["c"].get("signals") or {}).get("index")})
+
+    def avg(k: str) -> float | None:
+        v = [x[k] for x in days if x[k] is not None]
+        return round(mean(v), 1) if v else None
+
+    nights = [{"date": x["date"], "score": x["sleep"]} for x in days if x["sleep"] is not None]
+    steps = [x["steps"] for x in days if x["steps"] is not None]
+    return {"start": days[0]["date"], "end": end.isoformat(), "days": days, "means": {k: avg(k) for k in SCORES},
+            "scored_days": sum(any(x[k] is not None for k in SCORES) for x in days),
+            "best_night": max(nights, key=lambda x: x["score"], default=None),
+            "worst_night": min(nights, key=lambda x: x["score"], default=None),
+            "steps_total": sum(steps) if steps else None, "sleep_avg_min": avg("sleep_min")}
+
+
+@api.get("/week")
+def week(end: str | None = None) -> dict:
+    try:
+        e = date.fromisoformat(end) if end else _today()
+    except ValueError:
+        raise HTTPException(422, "bad date")
+    return {**_week(e), "previous": _week(e - timedelta(7))}
+
+
 @api.get("/hr")
 def hr(hours: int = 24) -> dict:
     now = datetime.now(vm.tz())

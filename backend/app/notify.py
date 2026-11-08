@@ -113,7 +113,7 @@ def _weekly(now: datetime, dates: set[date]) -> None:
     sleeps = [r for r in rows if r["sleep_score"] is not None]
     if sleeps:
         body += f" Best night: {max(sleeps, key=lambda r: r['sleep_score'])['date']:%a}."
-    _add("weekly", "Your week", body, now)
+    _add("weekly", "Your week", body, now, {"open": "trends"})
 
 
 def _checkin(now: datetime, dates: set[date]) -> None:

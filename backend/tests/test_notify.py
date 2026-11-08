@@ -143,6 +143,7 @@ def test_weekly_fires_monday_once(monkeypatch, env) -> None:
     notify.evaluate(set())
     (n,) = notify.pending()
     assert n["title"] == "Your week" and n["body"] == "Sleep 84 · Readiness 70 · Activity 60 avg. Best night: Mon."
+    assert n["extra"] == {"open": "trends"}
     at(monkeypatch, 10, day=D + timedelta(1))  # Tuesday
     notify.evaluate(set())
     assert kinds() == ["weekly"]

@@ -210,3 +210,31 @@ def test_spo2_null_without_samples(tmp_path, monkeypatch) -> None:
     c = db.days(d, d)[0]["c"]
     assert c["sleep_extra"]["spo2"] is None and c["inputs"]["spo2"] is None and c["sleep_extra"]["regularity"]["sd_min"] is None
     assert c["sleep"]["regularity"] is None and c["sleep_extra"]["naps"] == [] and c["inputs"]["nap_min"] == 0
+
+
+def test_week_shape_means_nights_and_previous(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "w.db"))
+    db.init()
+    end = date(2026, 11, 8)
+    for i, (sl, rd) in enumerate([(80, 70), (60, None), (90, 75)]):  # 8th, 7th, 6th; 2nd-5th missing
+        c = {"inputs": {"steps": 1000.0 * (i + 1), "sleep_min": 400.0 + 20 * i}, "signals": {"index": 10 + i}}
+        db.save_day(end - timedelta(i), (sl, rd, None), c, {})
+    db.save_day(end - timedelta(7), (50, 60, 70), {"inputs": {"steps": 9000.0}}, {})  # previous week
+    with TestClient(app) as c:
+        w = c.get("/week?end=2026-11-08", headers=H).json()
+        assert [x["date"] for x in w["days"]] == [(end - timedelta(6 - i)).isoformat() for i in range(7)]
+        assert w["days"][-1] == {"date": "2026-11-08", "sleep": 80, "readiness": 70, "activity": None,
+                                 "steps": 1000.0, "sleep_min": 400.0, "strain": 10}
+        assert w["days"][0]["sleep"] is None and w["scored_days"] == 3
+        assert w["means"] == {"sleep": 76.7, "readiness": 72.5, "activity": None}
+        assert w["best_night"] == {"date": "2026-11-06", "score": 90}
+        assert w["worst_night"] == {"date": "2026-11-07", "score": 60}
+        assert w["steps_total"] == 6000.0 and w["sleep_avg_min"] == 420.0
+        p = w["previous"]
+        assert p["start"] == "2026-10-26" and p["end"] == "2026-11-01" and p["scored_days"] == 1
+        assert p["means"] == {"sleep": 50.0, "readiness": 60.0, "activity": 70.0} and p["steps_total"] == 9000.0
+        assert p["sleep_avg_min"] is None and "previous" not in p
+        e = c.get("/week?end=2026-10-25", headers=H).json()
+        assert e["scored_days"] == 0 and e["best_night"] is None and e["steps_total"] is None
+        assert c.get("/week", headers=H).json()["end"] == date.today().isoformat()
+        assert c.get("/week?end=bogus", headers=H).status_code == 422
