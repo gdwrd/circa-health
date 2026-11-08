@@ -33,6 +33,10 @@ import com.patrykandpatrick.vico.compose.common.shape.markerCorneredShape
 import com.patrykandpatrick.vico.compose.common.shape.rounded
 import com.patrykandpatrick.vico.core.cartesian.CartesianChart
 import com.patrykandpatrick.vico.core.cartesian.CartesianDrawingContext
+import com.patrykandpatrick.vico.core.cartesian.CartesianMeasuringContext
+import com.patrykandpatrick.vico.core.cartesian.data.CartesianChartModel
+import com.patrykandpatrick.vico.core.cartesian.layer.CartesianLayerDimensions
+import com.patrykandpatrick.vico.core.cartesian.layer.CartesianLayerMargins
 import com.patrykandpatrick.vico.core.cartesian.Zoom
 import com.patrykandpatrick.vico.core.cartesian.axis.HorizontalAxis
 import com.patrykandpatrick.vico.core.cartesian.axis.VerticalAxis
@@ -48,7 +52,7 @@ import com.patrykandpatrick.vico.core.common.shape.CorneredShape
 /** Shared Vico pieces: scrub marker, axes, 2.5 dp lines with a faded area, and the host every chart uses. */
 
 /**
- * Press-and-drag marker: hairline guideline, a card label with a tick pointing down at it, a dot on each opaque line.
+ * Press-and-drag marker: hairline guideline, a card label floating over the plot by the point, a dot on each opaque line.
  * [format] gets the chart x under the finger and returns e.g. "72 bpm · 3:15 PM". Ticks the haptics when x changes.
  */
 @Composable
@@ -72,12 +76,18 @@ fun rememberScrubMarker(color: Color, format: (Double) -> CharSequence): Cartesi
         object : DefaultCartesianMarker(
             label = label,
             valueFormatter = { _, targets -> format(targets.first().x) },
-            labelPosition = LabelPosition.Top,
+            labelPosition = LabelPosition.AroundPoint,
             // Translucent series (baseline bands) get no dot.
             indicator = { argb -> if (Color(argb).alpha < 0.5f) none else dot },
             indicatorSizeDp = 10f,
             guideline = guideline,
         ) {
+            // Float the label over the plot; the default reserves the label's height above every chart.
+            override fun updateLayerMargins(
+                context: CartesianMeasuringContext, layerMargins: CartesianLayerMargins,
+                layerDimensions: CartesianLayerDimensions, model: CartesianChartModel,
+            ) = Unit
+
             private var lastX = Double.NaN
             private var lastTick = 0L
 

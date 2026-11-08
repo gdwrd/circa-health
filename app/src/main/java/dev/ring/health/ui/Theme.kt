@@ -2,6 +2,7 @@ package dev.ring.health.ui
 
 import android.graphics.BlurMaskFilter
 import android.provider.Settings
+import android.text.format.DateFormat
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.Spring
@@ -90,6 +91,11 @@ import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.hazeChild
 import dev.chrisbanes.haze.haze
 import dev.ring.health.R
+import java.time.Instant
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import kotlin.math.roundToInt
 
 /** One-file design system: iOS-style palette, type scale, shapes, spacing and the shared composables. */
@@ -132,6 +138,14 @@ data class AppColors(
     /** Sleep "Time asleep" band: deep indigo fading to black (dark) / to nothing (light), both at 12 %. */
     val nightTop: Color = SleepIndigo.copy(alpha = 0.12f),
     val nightBottom: Color = Color.Transparent,
+    /** Good / bad change text (insight pills, medication Change); darker in light mode for 4.5:1 on white. */
+    val goodText: Color = ReadinessGreen,
+    val badText: Color = StageAwake,
+    /** Unfilled capsule segment and the regularity median band; stronger in dark mode. */
+    val emptySegment: Color = Color(0x298E8E93),
+    val sleepBand: Color = SleepIndigo.copy(alpha = 0.12f),
+    /** Launcher icon background (res ic_launcher bg), for the mark shown as the app icon. */
+    val brandTile: Color = Color(0xFF0B0B10),
 ) {
     /** Lighter gradient partner of a score colour (the arc head); other colours pair with themselves. */
     fun light(c: Color): Color = when (c) {
@@ -170,6 +184,7 @@ private val LightColors = AppColors(
     heart = HeartRed, hrv = HrvCyan,
     zoneRestored = ReadinessGreen, zoneRelaxed = StageRem, zoneEngaged = ZoneEngaged, zoneStressed = StageAwake,
     cardStroke = Color(0x0A000000),
+    goodText = Color(0xFF1F7A35), badText = Color(0xFFC93400),
 )
 
 private val DarkColors = AppColors(
@@ -186,6 +201,7 @@ private val DarkColors = AppColors(
     zoneRestored = ReadinessGreen, zoneRelaxed = StageRem, zoneEngaged = ZoneEngaged, zoneStressed = StageAwake,
     cardStroke = Color(0x0FFFFFFF),
     nightBottom = Color(0x1F000000),
+    emptySegment = Color(0x598E8E93), sleepBand = SleepIndigo.copy(alpha = 0.3f),
 )
 
 /** Bundled OFL Nunito: rounded numerals and titles; body text stays on the platform sans. */
@@ -200,6 +216,26 @@ object AppType {
     val subhead = TextStyle(fontSize = 15.sp, lineHeight = 20.sp)
     val footnote = TextStyle(fontSize = 13.sp, lineHeight = 18.sp)
     val tab = TextStyle(fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.Medium)
+}
+
+// shortcut: read when AppTheme composes; a 12/24 h switch shows on the next app start, fine for a rarely changed setting.
+private var is24h = false
+
+/** Clock pattern in the device's 12/24 h setting. */
+fun clockFormat(): DateTimeFormatter = DateTimeFormatter.ofPattern(if (is24h) "HH:mm" else "h:mm a", Locale.getDefault())
+
+/** Clock time of an epoch second. */
+fun clock(epochS: Double): String = Instant.ofEpochSecond(epochS.toLong()).atZone(ZoneId.systemDefault()).format(clockFormat())
+
+/** A LocalTime or a stored "HH:MM" (journal medication) in the device format; unparsable text is returned as is. */
+fun clock(t: LocalTime): String = t.format(clockFormat())
+fun clock(hhmm: String): String = runCatching { clock(LocalTime.parse(hhmm)) }.getOrDefault(hhmm)
+
+/** "7 h 15 min", "1 h" when the minutes are 0, "45 min" under an hour. */
+fun duration(min: Int): String = when {
+    min < 60 -> "$min min"
+    min % 60 == 0 -> "${min / 60} h"
+    else -> "${min / 60} h ${min % 60} min"
 }
 
 object AppShape {
@@ -247,7 +283,9 @@ fun AppTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> U
         labelSmall = AppType.tab,
     )
     val shapes = Shapes(small = AppShape.small, medium = AppShape.card, large = AppShape.card)
-    val resolver = LocalContext.current.contentResolver
+    val ctx = LocalContext.current
+    is24h = DateFormat.is24HourFormat(ctx)
+    val resolver = ctx.contentResolver
     val reduceMotion = remember { Settings.Global.getFloat(resolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f }
     MaterialTheme(colorScheme = scheme, typography = type, shapes = shapes) {
         CompositionLocalProvider(

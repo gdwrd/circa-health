@@ -155,6 +155,7 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
     var sheetDay by remember { mutableStateOf<Int?>(null) } // 0 Yesterday, 1 Today; null = by time of day
     var insights by remember { mutableStateOf<JsonObject?>(null) }
     var hr by remember { mutableStateOf<List<Double>>(emptyList()) }
+    var hrv by remember { mutableStateOf<List<Double>>(emptyList()) }
     LaunchedEffect(journalDate) {
         if (journalDate == null) return@LaunchedEffect
         sheetDay = if (journalDate == LocalDate.now().toString()) 1 else 0
@@ -170,6 +171,7 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
         Api.settings(ctx)?.let { s -> s["medication_time"].str()?.let { medTime = it }; medStarted = s["medication_started"].str() }
         insights = Api.insights(ctx).obj()?.get("kinds").obj()
         hr = (Api.hr(ctx, 24).obj()?.get("points") as? JsonArray)?.mapNotNull { it.obj()?.get("bpm").num() }.orEmpty()
+        hrv = (Api.trends(ctx, "hrv", 14).obj()?.get("points") as? JsonArray)?.mapNotNull { it.obj()?.get("value").num() }.orEmpty()
     }
     LaunchedEffect(Unit) { load() }
 
@@ -228,7 +230,7 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
         d["signals"].obj()?.let { item { BodySignals(it, medStarted) } }
         item {
             val v = d["vitals"].obj()
-            val tiles = listOf("Heart rate" to ("hr" to "bpm"), "HRV" to ("hrv" to "ms"), "SpO₂" to ("spo2" to "%"), "Ring battery" to ("battery" to "%"))
+            val tiles = listOf("Heart rate" to ("hr" to "bpm"), "HRV" to ("hrv" to "ms"), "SpO₂ · latest" to ("spo2" to "%"), "Ring battery" to ("battery" to "%"))
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
                 Text("Vitals", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
                 tiles.chunked(2).forEach { pair ->
@@ -242,7 +244,8 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
                                         Text(x?.roundToInt()?.toString() ?: "—", style = AppType.title)
                                         if (x != null) Text(" ${m.second}", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(bottom = 3.dp))
                                     }
-                                    if (m.first == "hr" && hr.size > 1) Sparkline(hr, c.heart, Modifier.padding(top = AppSpace.s).fillMaxWidth().height(40.dp))
+                                    val line = if (m.first == "hr") hr else if (m.first == "hrv") hrv else emptyList()
+                                    if (line.size > 1) Sparkline(line, if (m.first == "hr") c.heart else c.hrv, Modifier.padding(top = AppSpace.s).fillMaxWidth().height(40.dp))
                                 }
                             }
                         }
@@ -306,7 +309,9 @@ private fun SmallRingsContent(d: JsonObject, open: String?, onOpen: (String?) ->
     val meta = mapOf("sleep" to ("Sleep" to c.sleep), "activity" to ("Activity" to c.activity))
     @Composable fun ring(key: String, size: Int, stroke: Int, number: TextStyle) {
         val score = d[key].obj()?.get("score").num()?.roundToInt()
-        val m = if (s == null || a == null) Modifier else with(s) { Modifier.sharedElement(rememberSharedContentState("ring-$key"), a) }
+        // Only while the expand runs: a lazy-list prefetch measures this item before SharedTransitionLayout is placed,
+        // and a sharedElement measured then throws "Uninitialized LayoutCoordinates".
+        val m = if (s == null || a == null || a.transition.currentState == a.transition.targetState) Modifier else with(s) { Modifier.sharedElement(rememberSharedContentState("ring-$key"), a) }
         ScoreRing((score ?: 0) / 100f, meta.getValue(key).second, m.size(size.dp), stroke = stroke.dp, animate = animate) {
             if (score != null) CountUp(score, number, animate = animate) else Text("—", style = number)
         }
@@ -382,7 +387,7 @@ private fun coachLine(score: Int, contributors: JsonObject?): String {
     return listOfNotNull(band, low?.let { LOW_WORDS[it.first] }).joinToString(" ")
 }
 
-/** 24-h heart-rate line scaled to its own min..max. */
+/** Trend line (24 h HR, 14-day HRV) scaled to its own min..max. */
 @Composable
 private fun Sparkline(values: List<Double>, color: Color, modifier: Modifier) {
     Canvas(modifier) {
@@ -401,7 +406,7 @@ private fun Sparkline(values: List<Double>, color: Color, modifier: Modifier) {
 
 /** One journal row from `/journal`. */
 private class Entry(val id: Int, val date: String, val kind: String, val value: String?, val note: String?) {
-    fun label() = (KIND_LABEL[kind] ?: kind) + if (kind == "bp" || kind == "medication") " ${value.orEmpty()}" else ""
+    fun label() = (KIND_LABEL[kind] ?: kind) + if (kind == "bp") " ${value.orEmpty()}" else if (kind == "medication") " ${clock(value.orEmpty())}" else ""
 }
 
 private fun JsonElement?.str() = (this as? JsonPrimitive)?.contentOrNull
@@ -517,7 +522,7 @@ private fun DayForm(date: String, es: List<Entry>, medTime: String, scope: Corou
                     modifier = Modifier.clip(AppShape.small).clickable { run { Api.deleteJournal(ctx, d.id) } }.padding(AppSpace.s),
                 )
                 Text(
-                    d.value.orEmpty(), style = AppType.body, color = c.tint,
+                    clock(d.value.orEmpty()), style = AppType.body, color = c.tint,
                     modifier = Modifier.clip(AppShape.small).clickable { editing = d }.padding(AppSpace.s),
                 )
             }
@@ -650,13 +655,13 @@ internal fun iosSwitchColors(): SwitchColors {
     )
 }
 
-/** 24 h time picker dialog; [onPick] gets "HH:MM". */
+/** Time picker dialog in the device's 12/24 h format; [onPick] gets "HH:MM". */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun TimePickDialog(initial: String, onDismiss: () -> Unit, onPick: (String) -> Unit) {
     val c = AppTheme.colors
     val t = runCatching { LocalTime.parse(initial) }.getOrDefault(LocalTime.of(8, 0))
-    val state = rememberTimePickerState(t.hour, t.minute, is24Hour = true)
+    val state = rememberTimePickerState(t.hour, t.minute, is24Hour = android.text.format.DateFormat.is24HourFormat(LocalContext.current))
     val knob = if (c.background.luminance() < 0.5f) c.label else c.card
     val faint = c.secondaryLabel.copy(alpha = 0.16f)
     AlertDialog(
@@ -712,7 +717,7 @@ private fun BodySignals(s: JsonObject, medStarted: String?) {
                     val steps = listOf(c.signalCalm, c.signalElevated, c.signalHigh)
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
                         steps.forEachIndexed { i, col ->
-                            Box(Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(50)).background(if (i <= level) col else c.secondaryLabel.copy(alpha = 0.16f)))
+                            Box(Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(50)).background(if (i <= level) col else c.emptySegment))
                         }
                         Text(
                             listOf("Calm", "Elevated", "High")[level], style = AppType.footnote, fontWeight = FontWeight.SemiBold,
@@ -792,16 +797,16 @@ private val BETTER = mapOf("sleep_score" to 1, "deep_min" to 1, "rem_min" to 1, 
 internal fun effectColor(metric: String, delta: Double): Color {
     val c = AppTheme.colors
     val dir = if (kotlin.math.abs(delta) < (if (metric == "strain") 0.05 else 0.5)) 0.0 else (BETTER[metric] ?: 0) * delta
-    return if (dir > 0) c.signalCalm else if (dir < 0) c.signalHigh else c.secondaryLabel
+    return if (dir > 0) c.goodText else if (dir < 0) c.badText else c.secondaryLabel
 }
 
 /** bed_start is minutes from midnight (23:30 = -30). */
-internal fun bedClock(m: Double): String = ((m.roundToInt() % 1440 + 1440) % 1440).let { "%02d:%02d".format(it / 60, it % 60) }
+internal fun bedClock(m: Double): String = clock(LocalTime.MIDNIGHT.plusMinutes(m.roundToInt().toLong()))
 
-/** A value in its unit: "52 min", "7h 12m", "23:40", "58 bpm", "78". */
+/** A value in its unit: "52 min", "7 h 12 min", "11:40 PM", "58 bpm", "78". */
 internal fun metricValue(metric: String, v: Double): String = when (metric) {
     "bed_start" -> bedClock(v)
-    "total_min" -> v.roundToInt().let { "${it / 60}h ${it % 60}m" }
+    "total_min" -> duration(v.roundToInt())
     "strain" -> "%.1f".format(v)
     "sleep_score" -> v.roundToInt().toString()
     "hrv" -> "${v.roundToInt()} ms"

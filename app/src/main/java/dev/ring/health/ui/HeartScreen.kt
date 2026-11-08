@@ -57,12 +57,10 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.doubleOrNull
-import java.text.SimpleDateFormat
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.util.Date
 import java.util.Locale
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -164,24 +162,20 @@ fun HeartScreen(backend: Boolean?) {
                     val boundary = Instant.ofEpochSecond(t0.toLong()).atZone(zone).truncatedTo(java.time.temporal.ChronoUnit.HOURS)
                         .let { z -> generateSequence(z.plusHours(1)) { it.plusHours(1) }.first { it.hour % 6 == 0 } }
                     val offset = ceil((boundary.toEpochSecond() - t0) / SLOT_S).toInt()
-                    val fmt = SimpleDateFormat("h a", Locale.getDefault())
                     // Doses whose active window reaches into the chart, in chart x (5 min slots).
                     val now = System.currentTimeMillis() / 1000
                     val shown = doses.filter { it <= now && it + windowH * 3600 > t0 }
                     val windows = shown.map { (it - t0) / SLOT_S to (it + windowH * 3600 - t0) / SLOT_S }
                     val xy = pts.map { (it.first - t0) / SLOT_S to it.second }
                     val byX = xy.toMap()
-                    val tFmt = SimpleDateFormat("h:mm a", Locale.getDefault())
                     Chart(
                         listOf(xy), c.heart, true, 72, offset,
                         decorations = if (windows.isEmpty()) emptyList() else listOf(DoseWindows(windows, c.heart.toArgb())),
-                        marker = { x -> "${byX[x]?.roundToInt()} bpm · ${tFmt.format(Date(((t0 + x * SLOT_S) * 1000).toLong()))}" },
-                    ) { x -> fmt.format(Date(((t0 + x * SLOT_S) * 1000).toLong())) }
-                    val hm = DateTimeFormatter.ofPattern("HH:mm")
+                        marker = { x -> "${byX[x]?.roundToInt()} bpm · ${clock(t0 + x * SLOT_S)}" },
+                    ) { x -> clock(t0 + x * SLOT_S).replace(":00 ", " ") }
                     shown.forEach { t ->
-                        val z = { s: Double -> Instant.ofEpochSecond(s.toLong()).atZone(ZoneId.systemDefault()).format(hm) }
                         Text(
-                            "Dose ${z(t.toDouble())} · active until ~${z(t + windowH * 3600)}", style = AppType.footnote, color = c.secondaryLabel,
+                            "Dose ${clock(t.toDouble())} · active until ~${clock(t + windowH * 3600.0)}", style = AppType.footnote, color = c.secondaryLabel,
                             modifier = Modifier.padding(start = AppSpace.l, bottom = AppSpace.s),
                         )
                     }
@@ -380,7 +374,7 @@ private fun MedicationCard(med: JsonObject?, started: String, rhr: List<JsonObje
                 Row {
                     Spacer(Modifier.weight(1f))
                     listOf("With", "Without", "Change").forEach {
-                        Text(it, style = AppType.footnote, color = c.secondaryLabel, textAlign = TextAlign.End, modifier = Modifier.width(64.dp))
+                        Text(it, style = AppType.footnote, color = c.secondaryLabel, textAlign = TextAlign.End, modifier = Modifier.width(76.dp))
                     }
                 }
                 MED_ROWS.forEach { m ->
@@ -388,16 +382,16 @@ private fun MedicationCard(med: JsonObject?, started: String, rhr: List<JsonObje
                     val d = e["delta"].num() ?: 0.0
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(METRIC[m]?.first ?: m, style = AppType.subhead, modifier = Modifier.weight(1f))
-                        Text(e["with"].num()?.let { metricValue(m, it) } ?: "—", style = AppType.subhead, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.End, modifier = Modifier.width(64.dp))
-                        Text(e["without"].num()?.let { metricValue(m, it) } ?: "—", style = AppType.subhead, color = c.secondaryLabel, textAlign = TextAlign.End, modifier = Modifier.width(64.dp))
-                        Text(metricDelta(m, d, null), style = AppType.subhead, color = effectColor(m, d), textAlign = TextAlign.End, modifier = Modifier.width(64.dp))
+                        Text(e["with"].num()?.let { metricValue(m, it) } ?: "—", style = AppType.subhead, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.End, modifier = Modifier.width(76.dp))
+                        Text(e["without"].num()?.let { metricValue(m, it) } ?: "—", style = AppType.subhead, color = c.secondaryLabel, textAlign = TextAlign.End, modifier = Modifier.width(76.dp))
+                        Text(metricDelta(m, d, null), style = AppType.subhead, color = effectColor(m, d), textAlign = TextAlign.End, modifier = Modifier.width(76.dp))
                     }
                 }
                 Text("$nWith days with a dose, $nWithout without, since $since.", style = AppType.footnote, color = c.secondaryLabel)
                 val bt = med?.get("by_time").obj()
                 val later = (bt?.get("all") as? JsonArray)?.mapNotNull { it.obj() }?.firstOrNull { it["metric"].str() == "bed_start" }?.get("delta").num()
                 if (bt?.get("status").str() == "ok" && later != null && kotlin.math.abs(later) >= 5) Text(
-                    "Doses after ${bt?.get("split").str()}: you tended to fall asleep ${kotlin.math.abs(later).roundToInt()} min ${if (later > 0) "later" else "earlier"}.",
+                    "Doses after ${clock(bt?.get("split").str().orEmpty())}: you tended to fall asleep ${kotlin.math.abs(later).roundToInt()} min ${if (later > 0) "later" else "earlier"}.",
                     style = AppType.subhead,
                 )
             } else {

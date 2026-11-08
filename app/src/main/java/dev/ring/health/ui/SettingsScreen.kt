@@ -11,6 +11,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,6 +27,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.Icon
+import androidx.compose.foundation.Image
 import androidx.compose.material3.DatePickerDefaults
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -186,7 +191,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 Hairline(Modifier.padding(start = AppSpace.l))
                 ButtonRow(if (scanning) "Scanning…" else "Scan for ring", enabled = !scanning, onClick = ::startScan)
                 Hairline(Modifier.padding(start = AppSpace.l))
-                ValueRow("Last sync", if (lastSync == 0L) "Never" else SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date(lastSync)))
+                ValueRow("Last sync", if (lastSync == 0L) "Never" else SimpleDateFormat("d MMM, ", Locale.getDefault()).format(Date(lastSync)) + clock(lastSync / 1000.0))
             }
         }
         item {
@@ -220,7 +225,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                         Hairline(Modifier.padding(start = AppSpace.l))
                         ChevronRow("Started on", runCatching { LocalDate.parse(started).format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())) }.getOrDefault(started)) { pickStart = true }
                         Hairline(Modifier.padding(start = AppSpace.l))
-                        ChevronRow("Usual time", (s["medication_time"] as? JsonPrimitive)?.contentOrNull.orEmpty()) { pickTime = true }
+                        ChevronRow("Usual time", clock((s["medication_time"] as? JsonPrimitive)?.contentOrNull.orEmpty())) { pickTime = true }
                         Hairline(Modifier.padding(start = AppSpace.l))
                         ChevronRow("Active window", "${(s["medication_window_h"] as? JsonPrimitive)?.doubleOrNull?.toInt() ?: "—"} h") { pickWindow = true }
                     }
@@ -255,7 +260,11 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
         item {
             Column(Modifier.fillMaxWidth().padding(vertical = AppSpace.xl), horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(painterResource(R.drawable.ic_stat_circa), contentDescription = null, tint = c.secondaryLabel, modifier = Modifier.size(28.dp))
+                // The mark on its launcher tile reads as the app icon; alone, an open ring reads as a spinner.
+                // 66 dp = the 108 dp adaptive canvas cropped to its 72 dp visible area in a 44 dp tile, like the launcher.
+                Box(Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).background(c.brandTile), contentAlignment = Alignment.Center) {
+                    Image(painterResource(R.drawable.ic_launcher_fg), contentDescription = null, modifier = Modifier.requiredSize(66.dp))
+                }
                 Text(
                     "Circa " + ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName,
                     style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.xs),

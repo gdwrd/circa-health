@@ -67,7 +67,6 @@ import kotlin.math.roundToInt
 private fun JsonElement?.obj() = this as? JsonObject
 private fun JsonElement?.num() = (this as? JsonPrimitive)?.doubleOrNull
 
-private fun hm(min: Int) = "${min / 60} h ${min % 60} min"
 
 private val LEVELS = listOf(
     "limited" to "Your body has had little room to recover lately.",
@@ -116,7 +115,7 @@ fun StressScreen(backend: Boolean?) {
                             Row(Modifier.fillMaxWidth().padding(AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
                                 Box(Modifier.size(10.dp).background(col, CircleShape))
                                 Text(name, style = AppType.body, modifier = Modifier.weight(1f).padding(start = AppSpace.m))
-                                Text(hm(min), style = AppType.body, color = c.secondaryLabel)
+                                Text(duration(min), style = AppType.body, color = c.secondaryLabel)
                             }
                         }
                     }

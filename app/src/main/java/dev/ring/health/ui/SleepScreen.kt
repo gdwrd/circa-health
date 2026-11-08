@@ -63,14 +63,11 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
 import java.time.Instant
 import java.time.LocalTime
 import java.time.ZoneId
-import java.time.format.DateTimeFormatter
 import java.time.LocalDate
 import java.time.format.TextStyle as DayStyle
-import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -84,20 +81,17 @@ private class HrPt(val t: Double, val bpm: Double)
 
 private val STAGE_NAME = mapOf(4 to "Awake", 3 to "REM", 1 to "Light", 2 to "Deep")
 
-private fun hm(min: Double) = "${(min / 60).toInt()} h ${(min % 60).roundToInt()} min"
-private fun clock(sec: Double) = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date((sec * 1000).toLong()))
-
-/** "1:10 – 1:45 PM": AM/PM once when both ends share it. */
+/** "1:10 – 1:45 PM": AM/PM once when both ends share it (24 h: "13:10 – 13:45"). */
 private fun span(a: Double, b: Double): String {
-    val ap = SimpleDateFormat("a", Locale.getDefault())
-    val same = ap.format(Date((a * 1000).toLong())) == ap.format(Date((b * 1000).toLong()))
-    val start = if (same) SimpleDateFormat("h:mm", Locale.getDefault()).format(Date((a * 1000).toLong())) else clock(a)
-    return "$start – ${clock(b)}"
+    val x = clock(a)
+    val y = clock(b)
+    val ap = y.substringAfterLast(' ', "")
+    return (if (ap.isNotEmpty() && x.endsWith(" $ap")) x.removeSuffix(" $ap") else x) + " – " + y
 }
 
 /** Local minutes after noon, as the backend's _after_noon. */
 private fun afterNoon(sec: Double): Int = Instant.ofEpochSecond(sec.toLong()).atZone(ZoneId.systemDefault()).let { (it.hour * 60 + it.minute + 720) % 1440 }
-private fun noonClock(min: Double): String = LocalTime.NOON.plusMinutes(min.roundToInt().toLong()).format(DateTimeFormatter.ofPattern("h:mm a", Locale.getDefault()))
+private fun noonClock(min: Double): String = clock(LocalTime.NOON.plusMinutes(min.roundToInt().toLong()))
 private fun median(v: List<Int>): Double = v.sorted().let { s -> if (s.size % 2 == 1) s[s.size / 2].toDouble() else (s[s.size / 2 - 1] + s[s.size / 2]) / 2.0 }
 
 /** A segment runs until the next sample with a different stage; stage 0 ends the night. */
@@ -199,6 +193,8 @@ fun SleepScreen(backend: Boolean?) {
                     "Awake" to (awake to c.stageAwake), "REM" to (rem to c.stageRem),
                     "Light" to (light to c.stageCore), "Deep" to (deep to c.stageDeep),
                 )
+                Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                Text("Time in stages", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
                 InsetCard {
                     // One stacked bar of the night, then the list.
                     Row(Modifier.fillMaxWidth().padding(AppSpace.l).height(12.dp).clip(CircleShape), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -209,9 +205,10 @@ fun SleepScreen(backend: Boolean?) {
                         Row(Modifier.fillMaxWidth().padding(AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
                             Box(Modifier.size(10.dp).background(v.second, CircleShape))
                             Text(name, style = AppType.body, modifier = Modifier.weight(1f).padding(start = AppSpace.m))
-                            Text(hm(v.first), style = AppType.body, color = c.secondaryLabel)
+                            Text(duration(v.first.roundToInt()), style = AppType.body, color = c.secondaryLabel)
                         }
                     }
+                }
                 }
             }
             item { Regularity(d["contributors"].obj()?.get("regularity").num(), week, d["sleep_extra"].obj()?.get("regularity").obj()) }
@@ -239,7 +236,7 @@ fun SleepScreen(backend: Boolean?) {
                             bottomAxis = bottomAxis(CartesianValueFormatter { _, x, _ -> day(x) }),
                             marker = rememberScrubMarker(c.sleep) { x ->
                                 val min = t.getOrNull(x.toInt())?.second?.toInt() ?: 0
-                                "${min / 60} h ${"%02d".format(min % 60)} min · ${day(x)}"
+                                "${duration(min)} · ${day(x)}"
                             },
                             decorations = listOf(dashedLine(need.toDouble(), c.secondaryLabel)),
                         ),
@@ -318,12 +315,11 @@ private fun Hypnogram(segs: List<Seg>, startS: Double, endS: Double, hr: List<Hr
             }
         }
         val step = if (span > 6 * 3600) 2 else 1
-        val fmt = SimpleDateFormat("h a", Locale.getDefault())
         var t = ceil(startS / 3600).toLong() * 3600
         var n = 0
         while (t <= endS) {
             if (n++ % step == 0) {
-                val m = measurer.measure(fmt.format(Date(t * 1000)), label)
+                val m = measurer.measure(clock(t.toDouble()).replace(":00 ", " "), label)
                 val tx = (x(t.toDouble()) - m.size.width / 2f).coerceIn(left, size.width - m.size.width)
                 drawText(m, topLeft = Offset(tx, size.height - m.size.height))
             }
@@ -380,10 +376,10 @@ private fun Regularity(score: Double?, week: List<Pair<LocalDate, JsonObject?>>,
                 val rowH = 18.dp.toPx()
                 val barH = 8.dp.toPx()
                 fun x(m: Double) = left + ((m.coerceIn(360.0, 1440.0) - 360) / 1080 * (size.width - left)).toFloat()
-                drawRoundRect(c.sleep.copy(alpha = 0.12f), Offset(x(bed), 0f), Size(x(up) - x(bed), rowH * 7), CornerRadius(4.dp.toPx()))
+                drawRoundRect(c.sleepBand, Offset(x(bed), 0f), Size(x(up) - x(bed), rowH * 7), CornerRadius(4.dp.toPx()))
                 listOf(360.0, 720.0, 1080.0, 1440.0).forEach { m ->
                     drawLine(c.separator, Offset(x(m), 0f), Offset(x(m), rowH * 7), 0.5.dp.toPx())
-                    val lm = measurer.measure(noonClock(m).replace(":00", ""), label)
+                    val lm = measurer.measure(noonClock(m).replace(":00 ", " "), label)
                     drawText(lm, topLeft = Offset((x(m) - lm.size.width / 2f).coerceIn(left, size.width - lm.size.width), size.height - lm.size.height))
                 }
                 rows.forEachIndexed { i, (day, n) ->
@@ -407,7 +403,7 @@ private fun BloodOxygen(sp: JsonObject?) {
         Text("Blood oxygen", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
         InsetCard {
             Column(Modifier.padding(AppSpace.l)) {
-                if (sp == null) Text("No SpO₂ last night — the ring's periodic SpO₂ may be off", style = AppType.subhead, color = c.secondaryLabel)
+                if (sp == null) Text("No SpO₂ last night — the ring's periodic SpO₂ may be off.", style = AppType.subhead, color = c.secondaryLabel)
                 else {
                     val low = sp["low_count"].num()?.roundToInt() ?: 0
                     Text("Average ${sp["mean"].num()?.roundToInt()} % · lowest ${sp["min"].num()?.roundToInt()} %", style = AppType.headline)
