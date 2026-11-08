@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -143,21 +142,6 @@ private fun TabBar(current: String?, modifier: Modifier, onSelect: (TabItem) -> 
     }
 }
 
-/** Shell for tabs whose content lands in later items: a large title and one card. */
+/** Today still calls this; one no-backend empty state everywhere. */
 @Composable
-internal fun PlaceholderTab(title: String, backend: Boolean?) {
-    LargeTitleScaffold(title) {
-        if (backend != null) item {
-            InsetCard {
-                Column(Modifier.padding(AppSpace.l)) {
-                    Text(if (backend) "Coming soon" else "Scores need the backend", style = AppType.headline)
-                    Text(
-                        if (backend) "This screen is being built." else "Set the server URL and token in Settings.",
-                        style = AppType.subhead, color = AppTheme.colors.secondaryLabel,
-                        modifier = Modifier.padding(top = AppSpace.xs),
-                    )
-                }
-            }
-        }
-    }
-}
+internal fun PlaceholderTab(title: String, backend: Boolean?) = NoBackendTab(title, backend)

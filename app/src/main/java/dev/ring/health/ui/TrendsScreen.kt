@@ -6,10 +6,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -19,6 +21,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,7 +57,9 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
+import kotlinx.coroutines.launch
 import java.text.DecimalFormat
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -105,28 +110,36 @@ private val MARKER_AXIS = 49.dp // approx. width of the chart's y-axis labels, s
 
 @Composable
 fun TrendsScreen(backend: Boolean?) {
-    if (backend != true) return PlaceholderTab("Trends", backend)
+    if (backend != true) return NoBackendTab("Trends", backend)
     val ctx = LocalContext.current
     var m by remember { mutableStateOf(METRICS[0]) }
     var days by remember { mutableIntStateOf(30) }
     var data by remember { mutableStateOf<Pts?>(null) }
     var loaded by remember { mutableStateOf(false) }
     var journal by remember { mutableStateOf<List<Pair<LocalDate, String>>>(emptyList()) }
-    LaunchedEffect(days) {
+    var week by remember { mutableStateOf<JsonObject?>(null) }
+    val scope = rememberCoroutineScope()
+    var refreshing by remember { mutableStateOf(false) }
+    suspend fun load() {
+        week = runCatching { Api.week(ctx).obj() }.getOrNull()
         journal = runCatching {
             (Api.journal(ctx, days).obj()?.get("entries") as JsonArray).mapNotNull { it.obj() }.map {
                 LocalDate.parse((it["date"] as JsonPrimitive).content) to (it["kind"] as JsonPrimitive).content
             }
         }.getOrDefault(emptyList())
+        data = runCatching { parse(Api.trends(ctx, m.key, days), m.div) }.getOrNull()
     }
     LaunchedEffect(m, days) {
         loaded = false
-        data = runCatching { parse(Api.trends(ctx, m.key, days), m.div) }.getOrNull()
+        load()
         loaded = true
     }
 
     val c = AppTheme.colors
-    LargeTitleScaffold("Trends") {
+    LargeTitleScaffold("Trends", refreshing = refreshing, onRefresh = {
+        scope.launch { refreshing = true; try { load() } finally { refreshing = false } }
+    }) {
+        week?.let { item { WeekCard(it) } }
         item {
             androidx.compose.foundation.layout.Column(verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
                 Segmented(listOf("30 D", "90 D"), if (days == 30) 0 else 1) { days = if (it == 0) 30 else 90 }
@@ -183,6 +196,77 @@ fun TrendsScreen(backend: Boolean?) {
                     )
                 }
             }
+        }
+    }
+}
+
+private fun day(e: JsonElement?) = (e as? JsonPrimitive)?.contentOrNull?.let(LocalDate::parse)
+
+/** Seven readiness rings, score means with ▲/▼ vs the previous week, best/worst night, steps + sleep; learning under 3 scored days. */
+@Composable
+private fun WeekCard(w: JsonObject) {
+    val c = AppTheme.colors
+    val days = (w["days"] as? JsonArray)?.mapNotNull { it.obj() } ?: return
+    val fmt = DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
+    val dow = DateTimeFormatter.ofPattern("EEE", Locale.getDefault())
+    val scored = w["scored_days"].num()?.toInt() ?: 0
+    InsetCard {
+        Column(Modifier.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
+            Column {
+                Text("This week", style = AppType.headline)
+                Text("${day(w["start"])?.format(fmt)} – ${day(w["end"])?.format(fmt)}", style = AppType.footnote, color = c.secondaryLabel)
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                days.forEach { d ->
+                    val r = d["readiness"].num()
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        ScoreRing(((r ?: 0.0) / 100).toFloat(), c.readiness, Modifier.size(28.dp), stroke = 3.dp) {
+                            Text(
+                                r?.roundToInt()?.toString() ?: "–", style = AppType.tab.copy(fontWeight = FontWeight.SemiBold),
+                                color = if (r == null) c.secondaryLabel else c.label,
+                            )
+                        }
+                        Text(
+                            day(d["date"])?.dayOfWeek?.getDisplayName(java.time.format.TextStyle.NARROW, Locale.getDefault()).orEmpty(),
+                            style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.xs),
+                        )
+                    }
+                }
+            }
+            if (scored < 3) return@Column Text(
+                "Learning your week · $scored/3 days scored. Your summary appears after 3.", style = AppType.subhead, color = c.secondaryLabel,
+            )
+            val means = w["means"].obj()
+            val prev = w["previous"].obj()?.get("means").obj()
+            Row(Modifier.fillMaxWidth()) {
+                listOf("sleep" to "Sleep", "readiness" to "Readiness", "activity" to "Activity").forEach { (k, label) ->
+                    val v = means?.get(k).num()?.roundToInt()
+                    val p = prev?.get(k).num()?.roundToInt()
+                    val delta = if (v != null && p != null) v - p else 0
+                    Column(Modifier.weight(1f)) {
+                        Text(label, style = AppType.footnote, color = c.secondaryLabel)
+                        Text(
+                            buildAnnotatedString {
+                                append(v?.toString() ?: "–")
+                                // Every score here is better when higher, so up is good.
+                                if (delta != 0) withStyle(SpanStyle(fontSize = 13.sp, color = if (delta > 0) c.goodText else c.badText)) {
+                                    append(if (delta > 0) " ▲$delta" else " ▼${-delta}")
+                                }
+                            },
+                            style = AppType.headline,
+                        )
+                    }
+                }
+            }
+            val best = day(w["best_night"].obj()?.get("date"))
+            val worst = day(w["worst_night"].obj()?.get("date"))?.takeIf { it != best }
+            if (best != null) Text(listOfNotNull("Best night ${best.format(dow)}", worst?.let { "Worst ${it.format(dow)}" }).joinToString(" · "), style = AppType.subhead)
+            val steps = w["steps_total"].num()
+            val line = listOfNotNull(
+                steps?.let { if (it >= 10_000) "Steps ${(it / 1000).roundToInt()} k" else "Steps %,d".format(it.roundToInt()) },
+                w["sleep_avg_min"].num()?.let { "Sleep ${duration(it.roundToInt())} avg" },
+            ).joinToString(" · ")
+            if (line.isNotEmpty()) Text(line, style = AppType.subhead)
         }
     }
 }
