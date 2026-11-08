@@ -154,7 +154,8 @@ def test_strain_streak_resets_and_medication_window(tmp_path, monkeypatch) -> No
 
 
 def test_sleep_depth_naps_regularity_spo2_wear(tmp_path, monkeypatch) -> None:
-    """Yesterday (all 24 h past): 23:00-06:20 main night, 35 min nap kept, 10 min nap dropped, ring off 10:00 on."""
+    """Yesterday (all 24 h past): 23:00-06:20 main night, 35 min nap kept, 10 min nap dropped, ring off 10:00 on.
+    Re-sent copies overlapping the night (23:10) and the nap (+5 min) are not naps."""
     monkeypatch.setenv("DB_PATH", str(tmp_path / "c1.db"))
     monkeypatch.delenv("TZ", raising=False)
     db.init()
@@ -165,8 +166,10 @@ def test_sleep_depth_naps_regularity_spo2_wear(tmp_path, monkeypatch) -> None:
         ps = vm.midnight(d - timedelta(i)).timestamp() - 3600
         db.save_day(d - timedelta(i), (None, None, None), {"inputs": {"sleep_min": 400.0, "nap_min": 30.0},
                     "session": {"start": ps, "end": ps + 440 * 60}}, {})
-    data = {"biometric_sleep_end_ts": {t0: t0 + 440 * 60, nap: nap + 40 * 60, short: short + 600},
-            "biometric_sleep_total_min": {t0: 420.0, nap: 35.0, short: 10.0},
+    dup, ndup = t0 + 600, nap + 300
+    data = {"biometric_sleep_end_ts": {t0: t0 + 440 * 60, nap: nap + 40 * 60, short: short + 600,
+                                       dup: t0 + 435 * 60, ndup: ndup + 38 * 60},
+            "biometric_sleep_total_min": {t0: 420.0, nap: 35.0, short: 10.0, dup: 415.0, ndup: 30.0},
             "biometric_sleep_awake_min": {t0: 20.0, nap: 5.0},
             "biometric_hr_bpm": {**{t0 + i * 300: v for i, v in enumerate([60.0, 58.0, 52.0, 50.0, 51.0, 55.0])},
                                  m + 3 * 3600: 50.0, m + 8 * 3600: 70.0, m + 8 * 3600 + 300: 72.0,
