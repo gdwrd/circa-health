@@ -3,7 +3,7 @@ from datetime import date, datetime
 
 from fastapi.testclient import TestClient
 
-from app import vm
+from app import db, main, vm
 from app.main import app
 
 
@@ -21,10 +21,12 @@ def test_dates_in_body_spans_midnight(monkeypatch) -> None:
     assert vm.dates_in_body(body) == {date(2026, 1, 1), date(2026, 1, 2)}
 
 
-def test_auth() -> None:
+def test_auth(monkeypatch) -> None:
+    monkeypatch.setattr(main, "_vitals", lambda: {})  # no real VM
+    db.init()
     c = TestClient(app)
     assert c.get("/health").status_code == 200
     assert c.get("/today").status_code == 401
     assert c.get("/today", headers={"Authorization": "Bearer wrong"}).status_code == 401
     r = c.get("/today", headers={"Authorization": f"Bearer {os.environ['API_TOKEN']}"})
-    assert r.json() == {"status": "learning"}
+    assert r.status_code == 200 and r.json()["status"] == "learning"
