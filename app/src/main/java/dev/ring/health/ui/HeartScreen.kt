@@ -1,6 +1,23 @@
 package dev.ring.health.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextAlign
+import androidx.core.content.ContextCompat
+import dev.ring.health.Prefs.ringAddress
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -11,6 +28,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -88,6 +106,7 @@ fun HeartScreen(backend: Boolean?) {
 
     val c = AppTheme.colors
     LargeTitleScaffold("Heart") {
+        item { Section("Now") { MeasureNow() } }
         if (!loaded) return@LargeTitleScaffold
         item {
             Section("Heart rate") {
@@ -147,6 +166,63 @@ private fun Section(title: String, content: @Composable androidx.compose.foundat
     Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
         Text(title, style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
         InsetCard(content = content)
+    }
+}
+
+/** On-demand live reading: connects to the ring, streams ~12-30 s, shows the bpm. Leaving the tab cancels it. */
+@Composable
+private fun MeasureNow() {
+    val ctx = LocalContext.current
+    val c = AppTheme.colors
+    val scope = rememberCoroutineScope()
+    var job by remember { mutableStateOf<Job?>(null) }
+    var bpm by remember { mutableStateOf<Int?>(null) }
+    var status by remember { mutableStateOf("Tap to read your heart rate from the ring.") }
+    val sweep = remember { Animatable(0f) }
+    val measuring = job?.isActive == true
+
+    fun start() {
+        if (measuring) return
+        val address = ctx.ringAddress
+        val granted = ContextCompat.checkSelfPermission(ctx, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+        status = when {
+            address.isNullOrBlank() -> return run { status = "Set the ring address in Settings first." }
+            !granted -> return run { status = "Allow Bluetooth for Ring Health first (Settings > Apps)." }
+            else -> "Connecting to ring…"
+        }
+        bpm = null
+        job = scope.launch {
+            launch { sweep.snapTo(0f); sweep.animateTo(1f, tween(30_000, easing = LinearEasing)) }
+            val result = runLiveHr(ctx.applicationContext, address!!, onBpm = { bpm = it }) { p ->
+                status = if (p.startsWith("♥")) "Measuring… keep your hand still" else p
+            }
+            status = if (result.startsWith("♥")) "Just now" else result
+            sweep.animateTo(if (result.startsWith("♥")) 1f else 0f, tween(300))
+            job = null
+        }
+    }
+
+    Column(
+        Modifier.fillMaxWidth().padding(AppSpace.l),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(AppSpace.m),
+    ) {
+        ScoreRing(sweep.value, c.heart, Modifier.size(160.dp), stroke = 12.dp) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(bpm?.toString() ?: "—", style = AppType.largeTitle, color = if (bpm == null) c.secondaryLabel else c.label)
+                Text("bpm", style = AppType.footnote, color = c.secondaryLabel)
+            }
+        }
+        Text(status, style = AppType.subhead, color = c.secondaryLabel, textAlign = TextAlign.Center)
+        Box(
+            Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(AppShape.small)
+                .background(if (measuring) c.background else c.heart.copy(alpha = 0.12f))
+                .clickable(enabled = !measuring, onClick = ::start),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(if (measuring) "Measuring…" else if (bpm != null) "Measure again" else "Measure now",
+                style = AppType.headline, color = if (measuring) c.secondaryLabel else c.heart)
+        }
     }
 }
 

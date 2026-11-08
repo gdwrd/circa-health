@@ -386,7 +386,7 @@ private fun ButtonRow(title: String, enabled: Boolean = true, onClick: () -> Uni
 // ── Live heart rate (moved from MainActivity; behaviour unchanged) ──────────
 
 @SuppressLint("MissingPermission")
-private suspend fun runLiveHr(ctx: Context, address: String, onProgress: (String) -> Unit): String {
+internal suspend fun runLiveHr(ctx: Context, address: String, onBpm: (Int) -> Unit = {}, onProgress: (String) -> Unit): String {
     val conn = ColmiConnection(ctx, address)
     var measurementStarted = false
     return try {
@@ -411,6 +411,7 @@ private suspend fun runLiveHr(ctx: Context, address: String, onProgress: (String
                 1 -> { notWorn = true; break@loop }
                 0 -> if (parsed.bpm > 0) {
                     lastBpm = parsed.bpm
+                    onBpm(parsed.bpm)
                     onProgress("♥ ${parsed.bpm} bpm  (measuring…)")
                     // Stable enough after ~6 valid readings (≈12s of streaming)
                     if (System.currentTimeMillis() > deadline - 18_000) break@loop

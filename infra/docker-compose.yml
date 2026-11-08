@@ -9,6 +9,9 @@ services:
       - vm-data:/victoria-metrics-data
     command:
       - "--retentionPeriod=10y"
+      # Keep one sample per series+timestamp (the larger value): a re-sent, corrected sleep session replaces the
+      # truncated one pushed at the same timestamp; distinct timestamps are never touched.
+      - "--dedup.minScrapeInterval=1ms"
 
   backend:
     build: ../backend
