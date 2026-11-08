@@ -58,3 +58,12 @@ def save_day(d: date, scores: tuple[int | None, int | None, int | None], contrib
         con.execute("INSERT OR REPLACE INTO daily VALUES(?,?,?,?,?,?)",
                     (d.isoformat(), *scores, json.dumps(contributors), datetime.now().isoformat()))
         con.executemany("INSERT OR REPLACE INTO baselines VALUES(?,?,?)", [(m, d.isoformat(), v) for m, v in base.items()])
+
+
+def add_tag(ts: int, tag: str, note: str | None) -> None:
+    with closing(connect()) as con, con:
+        con.execute("INSERT INTO tags VALUES(?,?,?)", (ts, tag, note))
+
+
+def tags(since_ts: int) -> list[dict]:
+    return [dict(r) for r in query("SELECT ts, tag, note FROM tags WHERE ts>=? ORDER BY ts DESC", (since_ts,))]

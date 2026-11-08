@@ -1,11 +1,12 @@
 import logging
 import os
 import secrets
+import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from statistics import mean
 
-from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from . import db, notify, scoring, vm
@@ -205,6 +206,20 @@ def hr(hours: int = 24) -> dict:
     now = datetime.now(vm.tz())
     s = vm.series("biometric_hr_bpm", now - timedelta(hours=min(max(hours, 1), 48)), now, "5m")
     return {"points": [{"t": t, "bpm": v} for t, v in s.items() if v > 0]}
+
+
+@api.post("/tags")
+def add_tag(body: dict = Body(...)) -> dict:
+    tag, note, ts = str(body.get("tag") or "").strip(), body.get("note"), body.get("ts")
+    if not 1 <= len(tag) <= 40 or not (ts is None or isinstance(ts, int)) or not (note is None or isinstance(note, str)):
+        raise HTTPException(422, "bad tag")
+    db.add_tag(ts if ts is not None else int(time.time()), tag, note or None)
+    return {"status": "ok"}
+
+
+@api.get("/tags")
+def list_tags(days: int = 30) -> dict:
+    return {"tags": db.tags(int(time.time()) - min(max(days, 1), 365) * 86400)}
 
 
 @api.get("/notifications/pending")

@@ -12,7 +12,17 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.style.TextAlign
+import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonArray
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -44,6 +54,7 @@ private val NAMES = mapOf(
 private fun JsonElement?.obj() = this as? JsonObject
 private fun JsonElement?.num() = (this as? JsonPrimitive)?.doubleOrNull
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun TodayScreen(backend: Boolean?) {
     if (backend != true) return PlaceholderTab("Today", backend)
@@ -51,7 +62,12 @@ fun TodayScreen(backend: Boolean?) {
     var data by remember { mutableStateOf<JsonObject?>(null) }
     var open by remember { mutableStateOf<String?>(null) }
     // The tab leaves composition when deselected, so this also reloads on reselect.
-    LaunchedEffect(Unit) { data = Api.today(ctx).obj() }
+    var tags by remember { mutableStateOf<List<String>>(emptyList()) }
+    var sheet by remember { mutableStateOf(false) }
+    suspend fun loadTags() {
+        tags = (Api.tags(ctx, 1).obj()?.get("tags") as? JsonArray)?.mapNotNull { (it.obj()?.get("tag") as? JsonPrimitive)?.contentOrNull } ?: emptyList()
+    }
+    LaunchedEffect(Unit) { data = Api.today(ctx).obj(); loadTags() }
 
     val c = AppTheme.colors
     val rings = listOf("sleep" to ("Sleep" to c.sleep), "readiness" to ("Readiness" to c.readiness), "activity" to ("Activity" to c.activity))
@@ -118,6 +134,68 @@ fun TodayScreen(backend: Boolean?) {
                         }
                 }
             }
+        }
+        item {
+            InsetCard {
+                if (tags.isNotEmpty()) {
+                    FlowRow(
+                        Modifier.padding(start = AppSpace.l, top = AppSpace.l, end = AppSpace.l),
+                        horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s),
+                    ) { tags.forEach { TagChip(it, false) {} } }
+                    Hairline(Modifier.padding(start = AppSpace.l, top = AppSpace.m))
+                }
+                Text(
+                    "+ Add tag", style = AppType.body, color = c.tint,
+                    modifier = Modifier.fillMaxWidth().clickable { sheet = true }.padding(AppSpace.l),
+                )
+            }
+        }
+    }
+    if (sheet) AddTagSheet(
+        onDismiss = { sheet = false },
+        onAdd = { tag, note -> if (Api.addTag(ctx, tag, note)) { loadTags(); sheet = false } },
+    )
+}
+
+private val QUICK = listOf("Alcohol", "Caffeine", "Late meal", "Workout", "Sick", "Travel", "Stress")
+
+@Composable
+private fun TagChip(text: String, selected: Boolean, onClick: () -> Unit) {
+    val c = AppTheme.colors
+    Text(
+        text, style = AppType.footnote.copy(fontWeight = FontWeight.Medium), color = if (selected) Color.White else c.label,
+        modifier = Modifier.clip(RoundedCornerShape(50)).background(if (selected) c.tint else c.secondaryLabel.copy(alpha = 0.16f))
+            .clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 6.dp),
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
+private fun AddTagSheet(onDismiss: () -> Unit, onAdd: suspend (String, String?) -> Unit) {
+    val c = AppTheme.colors
+    val scope = rememberCoroutineScope()
+    var text by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = c.background, shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp)) {
+        Column(Modifier.padding(horizontal = AppSpace.l).padding(bottom = AppSpace.xl), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
+            Text("Add tag", style = AppType.title)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                QUICK.forEach { q -> TagChip(q, text == q) { text = q } }
+            }
+            Box(Modifier.fillMaxWidth().clip(AppShape.small).background(c.card).padding(AppSpace.l)) {
+                if (text.isEmpty()) Text("Or type your own", style = AppType.body, color = c.secondaryLabel)
+                BasicTextField(
+                    text, { text = it.take(40) }, singleLine = true, textStyle = AppType.body.copy(color = c.label),
+                    cursorBrush = SolidColor(c.tint), modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            val ok = text.isNotBlank() && !busy
+            Text(
+                "Add", style = AppType.headline, color = Color.White, textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().clip(AppShape.small).background(if (ok) c.tint else c.tint.copy(alpha = 0.4f))
+                    .clickable(enabled = ok) { busy = true; scope.launch { onAdd(text.trim(), null); busy = false } }
+                    .padding(vertical = AppSpace.m),
+            )
         }
     }
 }

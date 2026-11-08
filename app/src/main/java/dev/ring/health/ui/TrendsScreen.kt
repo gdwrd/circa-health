@@ -1,5 +1,6 @@
 package dev.ring.health.ui
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -22,6 +23,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
@@ -60,7 +62,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.doubleOrNull
 import java.text.DecimalFormat
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.ceil
@@ -99,6 +103,8 @@ private fun parse(json: JsonElement?, div: Double): Pts? {
     return Pts(first, dates.last(), col("value"), col("baseline"))
 }
 
+private val TAG_AXIS = 49.dp // approx. width of the chart's y-axis labels, so markers align with the plot
+
 @Composable
 fun TrendsScreen(backend: Boolean?) {
     if (backend != true) return PlaceholderTab("Trends", backend)
@@ -107,6 +113,15 @@ fun TrendsScreen(backend: Boolean?) {
     var days by remember { mutableIntStateOf(30) }
     var data by remember { mutableStateOf<Pts?>(null) }
     var loaded by remember { mutableStateOf(false) }
+    var tags by remember { mutableStateOf<List<Pair<LocalDate, String>>>(emptyList()) }
+    LaunchedEffect(days) {
+        tags = runCatching {
+            (Api.tags(ctx, days).obj()?.get("tags") as JsonArray).mapNotNull { it.obj() }.map {
+                Instant.ofEpochSecond((it["ts"] as JsonPrimitive).content.toLong()).atZone(ZoneId.systemDefault()).toLocalDate() to
+                    (it["tag"] as JsonPrimitive).content
+            }
+        }.getOrDefault(emptyList())
+    }
     LaunchedEffect(m, days) {
         loaded = false
         data = runCatching { parse(Api.trends(ctx, m.key, days), m.div) }.getOrNull()
@@ -160,6 +175,21 @@ fun TrendsScreen(backend: Boolean?) {
                     modifier = Modifier.padding(start = AppSpace.l),
                 )
                 androidx.compose.runtime.key(m, days) { TrendChart(d, m, m.color(c), days) }
+                val inPeriod = tags.filter { it.first >= d.first && it.first <= d.last }
+                if (inPeriod.isNotEmpty()) {
+                    val span = maxOf(d.last.toEpochDay() - d.first.toEpochDay(), 1L)
+                    val dot = c.secondaryLabel
+                    Canvas(Modifier.fillMaxWidth().height(10.dp).padding(start = AppSpace.l + TAG_AXIS, end = AppSpace.l)) {
+                        inPeriod.forEach {
+                            val f = ((it.first.toEpochDay() - d.first.toEpochDay()) + 0.5) / (span + 1.5)
+                            drawCircle(dot, 2.5.dp.toPx(), Offset((f * size.width).toFloat(), size.height / 2))
+                        }
+                    }
+                    Text(
+                        "Tags in this period: " + inPeriod.groupingBy { it.second }.eachCount().entries.joinToString(", ") { "${it.key} ×${it.value}" },
+                        style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(AppSpace.l),
+                    )
+                }
             }
         }
     }

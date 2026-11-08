@@ -75,3 +75,14 @@ def test_hr_drops_nonpositive_and_clamps_hours(monkeypatch) -> None:
         c.get("/hr?hours=999", headers=H)
         assert seen[-1] == 48
         assert c.get("/hr").status_code == 401
+
+
+def test_tags() -> None:
+    with TestClient(app) as c:
+        assert c.post("/tags", json={"tag": "Alcohol"}).status_code == 401
+        assert c.post("/tags", json={"tag": " "}, headers=H).status_code == 422
+        assert c.post("/tags", json={"tag": "x" * 41}, headers=H).status_code == 422
+        assert c.post("/tags", json={"tag": " Alcohol ", "note": "2 beers"}, headers=H).json() == {"status": "ok"}
+        assert c.post("/tags", json={"tag": "Old", "ts": 1}, headers=H).status_code == 200
+        t = c.get("/tags?days=1", headers=H).json()["tags"]
+        assert [x["tag"] for x in t] == ["Alcohol"] and t[0]["note"] == "2 beers"

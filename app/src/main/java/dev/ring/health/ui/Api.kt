@@ -7,7 +7,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.OkHttpClient
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
@@ -19,14 +22,14 @@ object Api {
         .readTimeout(10, TimeUnit.SECONDS)
         .build()
 
-    private fun request(ctx: Context, path: String, post: Boolean = false): Request? {
+    private fun request(ctx: Context, path: String, post: Boolean = false, json: String? = null): Request? {
         val base = ctx.vmUrl.trim().trimEnd('/')
         if (base.isEmpty()) return null
         val token = ctx.apiToken
         return runCatching {
             Request.Builder().url("$base$path")
                 .apply { if (token.isNotBlank()) header("Authorization", "Bearer $token") }
-                .apply { if (post) post(ByteArray(0).toRequestBody()) }
+                .apply { if (post) post(json?.toRequestBody("application/json".toMediaType()) ?: ByteArray(0).toRequestBody()) }
                 .build()
         }.getOrNull()
     }
@@ -44,10 +47,17 @@ object Api {
     suspend fun sleep(ctx: Context, date: String) = get(ctx, "/sleep?date=$date")
     suspend fun trends(ctx: Context, metric: String, days: Int) = get(ctx, "/trends?metric=$metric&days=$days")
     suspend fun hr(ctx: Context, hours: Int) = get(ctx, "/hr?hours=$hours")
+    suspend fun tags(ctx: Context, days: Int) = get(ctx, "/tags?days=$days")
     suspend fun notifications(ctx: Context) = get(ctx, "/notifications/pending")
 
     suspend fun ack(ctx: Context, id: Int): Boolean = withContext(Dispatchers.IO) {
         val req = request(ctx, "/notifications/$id/ack", post = true) ?: return@withContext false
+        runCatching { client.newCall(req).execute().use { it.isSuccessful } }.getOrDefault(false)
+    }
+
+    suspend fun addTag(ctx: Context, tag: String, note: String?): Boolean = withContext(Dispatchers.IO) {
+        val body = JsonObject(mapOf("tag" to JsonPrimitive(tag), "note" to JsonPrimitive(note))).toString()
+        val req = request(ctx, "/tags", post = true, json = body) ?: return@withContext false
         runCatching { client.newCall(req).execute().use { it.isSuccessful } }.getOrDefault(false)
     }
 
