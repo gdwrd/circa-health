@@ -36,19 +36,13 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.patrykandpatrick.vico.compose.cartesian.CartesianChartHost
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberBottom
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberStart
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberColumnCartesianLayer
 import com.patrykandpatrick.vico.compose.cartesian.rememberCartesianChart
 import com.patrykandpatrick.vico.compose.common.component.rememberLineComponent
 import com.patrykandpatrick.vico.compose.common.fill
-import com.patrykandpatrick.vico.core.cartesian.axis.HorizontalAxis
-import com.patrykandpatrick.vico.core.cartesian.axis.VerticalAxis
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianChartModelProducer
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianLayerRangeProvider
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianValueFormatter
-import com.patrykandpatrick.vico.core.cartesian.decoration.HorizontalLine
 import com.patrykandpatrick.vico.core.cartesian.data.columnSeries
 import com.patrykandpatrick.vico.core.cartesian.layer.ColumnCartesianLayer
 import com.patrykandpatrick.vico.core.common.shape.CorneredShape
@@ -214,7 +208,8 @@ fun SleepScreen(backend: Boolean?) {
                         "Hours asleep · goal $need h", style = AppType.footnote, color = c.secondaryLabel,
                         modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.l),
                     )
-                    CartesianChartHost(
+                    val day = { x: Double -> runCatching { LocalDate.parse(t[x.toInt()].first).dayOfWeek.getDisplayName(DayStyle.SHORT, Locale.getDefault()) }.getOrDefault("") }
+                    ScrubChartHost(
                         rememberCartesianChart(
                             rememberColumnCartesianLayer(
                                 ColumnCartesianLayer.ColumnProvider.series(
@@ -222,25 +217,15 @@ fun SleepScreen(backend: Boolean?) {
                                 ),
                                 rangeProvider = CartesianLayerRangeProvider.fixed(minY = 0.0, maxY = maxOf(9.0, need + 1.5)),
                             ),
-                            startAxis = VerticalAxis.rememberStart(
-                                guideline = rememberLineComponent(fill = fill(c.separator), thickness = 0.5.dp),
-                                itemPlacer = VerticalAxis.ItemPlacer.step({ 3.0 }),
-                            ),
-                            bottomAxis = HorizontalAxis.rememberBottom(
-                                guideline = null,
-                                valueFormatter = CartesianValueFormatter { _, x, _ ->
-                                    runCatching { LocalDate.parse(t[x.toInt()].first).dayOfWeek.getDisplayName(DayStyle.SHORT, Locale.getDefault()) }.getOrDefault("")
-                                },
-                            ),
-                            decorations = listOf(
-                                HorizontalLine(
-                                    y = { need.toDouble() },
-                                    line = rememberLineComponent(fill = fill(c.secondaryLabel), thickness = 1.dp),
-                                ),
-                            ),
+                            startAxis = startAxis(3.0),
+                            bottomAxis = bottomAxis(CartesianValueFormatter { _, x, _ -> day(x) }),
+                            marker = rememberScrubMarker(c.sleep) { x ->
+                                val min = t.getOrNull(x.toInt())?.second?.toInt() ?: 0
+                                "${min / 60} h ${"%02d".format(min % 60)} min · ${day(x)}"
+                            },
+                            decorations = listOf(dashedLine(need.toDouble(), c.secondaryLabel)),
                         ),
-                        producer,
-                        Modifier.fillMaxWidth().height(200.dp).padding(AppSpace.l),
+                        producer, 200.dp,
                     )
                 }
             }

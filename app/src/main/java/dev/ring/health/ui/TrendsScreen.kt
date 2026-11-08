@@ -24,7 +24,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
@@ -33,20 +35,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.patrykandpatrick.vico.compose.cartesian.CartesianChartHost
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberAxisLabelComponent
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberBottom
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberStart
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberColumnCartesianLayer
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLine
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLineCartesianLayer
 import com.patrykandpatrick.vico.compose.cartesian.rememberCartesianChart
-import com.patrykandpatrick.vico.compose.cartesian.rememberVicoZoomState
 import com.patrykandpatrick.vico.compose.common.component.rememberLineComponent
 import com.patrykandpatrick.vico.compose.common.fill
-import com.patrykandpatrick.vico.core.cartesian.Zoom
-import com.patrykandpatrick.vico.core.cartesian.axis.HorizontalAxis
-import com.patrykandpatrick.vico.core.cartesian.axis.VerticalAxis
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianChartModelProducer
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianLayerRangeProvider
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianValueFormatter
@@ -101,6 +95,12 @@ private fun parse(json: JsonElement?, div: Double): Pts? {
     return Pts(first, dates.last(), col("value"), col("baseline"))
 }
 
+private fun Metric.format(v: Double) = when (key) {
+    "steps" -> "%,d".format(v.roundToInt())
+    "sleep_min" -> "%.1f".format(v)
+    else -> v.roundToInt().toString()
+}
+
 private val MARKER_AXIS = 49.dp // approx. width of the chart's y-axis labels, so markers align with the plot
 
 @Composable
@@ -136,7 +136,8 @@ fun TrendsScreen(backend: Boolean?) {
                         Text(
                             x.chip, style = AppType.subhead.copy(fontWeight = FontWeight.Medium),
                             color = if (sel) Color.White else c.label,
-                            modifier = Modifier.clip(RoundedCornerShape(50)).background(if (sel) x.color(c) else c.card)
+                            modifier = Modifier.clip(RoundedCornerShape(50))
+                                .background(if (sel) Brush.horizontalGradient(listOf(x.color(c), c.light(x.color(c)))) else SolidColor(c.card))
                                 .clickable { m = x }.padding(horizontal = 14.dp, vertical = 7.dp),
                         )
                     }
@@ -156,13 +157,7 @@ fun TrendsScreen(backend: Boolean?) {
                 Text("Average", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.l))
                 Text(
                     buildAnnotatedString {
-                        append(
-                            when (m.key) {
-                                "steps" -> "%,d".format(avg.roundToInt())
-                                "sleep_min" -> "%.1f".format(avg)
-                                else -> avg.roundToInt().toString()
-                            },
-                        )
+                        append(m.format(avg))
                         if (m.unit.isNotEmpty()) withStyle(SpanStyle(fontSize = 17.sp, color = c.secondaryLabel)) { append(" ${m.unit}") }
                     },
                     style = AppType.largeTitle, modifier = Modifier.padding(start = AppSpace.l),
@@ -171,7 +166,7 @@ fun TrendsScreen(backend: Boolean?) {
                     "${d.first.format(dateFmt)} – ${d.last.format(dateFmt)}", style = AppType.subhead, color = c.secondaryLabel,
                     modifier = Modifier.padding(start = AppSpace.l),
                 )
-                androidx.compose.runtime.key(m, days) { TrendChart(d, m, m.color(c), days) }
+                androidx.compose.runtime.key(m, days) { TrendChart(d, m, m.color(c), avg) }
                 val inPeriod = journal.filter { it.first >= d.first && it.first <= d.last }
                 if (inPeriod.isNotEmpty()) {
                     val span = maxOf(d.last.toEpochDay() - d.first.toEpochDay(), 1L)
@@ -213,8 +208,7 @@ internal fun Segmented(options: List<String>, selected: Int, onSelect: (Int) -> 
 
 /** Line (scores, rhr, hrv) or columns (steps, time asleep) in [color]; baseline as the wide translucent band from HeartScreen. */
 @Composable
-private fun TrendChart(p: Pts, m: Metric, color: Color, days: Int) {
-    val c = AppTheme.colors
+private fun TrendChart(p: Pts, m: Metric, color: Color, avg: Double) {
     val producer = remember { CartesianChartModelProducer() }
     val hasBase = p.b.isNotEmpty()
     LaunchedEffect(p) {
@@ -263,10 +257,7 @@ private fun TrendChart(p: Pts, m: Metric, color: Color, days: Int) {
         )
     } else null
     val lineLayer = if (!m.columns || hasBase) {
-        val main = LineCartesianLayer.rememberLine(
-            fill = LineCartesianLayer.LineFill.single(fill(color)),
-            pointConnector = LineCartesianLayer.PointConnector.cubic(),
-        )
+        val main = chartLine(color, area = true)
         rememberLineCartesianLayer(
             if (m.columns || !hasBase) LineCartesianLayer.LineProvider.series(if (m.columns) band else main)
             else LineCartesianLayer.LineProvider.series(main, band),
@@ -275,25 +266,16 @@ private fun TrendChart(p: Pts, m: Metric, color: Color, days: Int) {
     } else null
     val kFmt = DecimalFormat("0.#")
     val dateFmt = DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
-    CartesianChartHost(
+    val byX = p.v.toMap()
+    val unit = if (m.unit.isEmpty()) "" else " ${m.unit}"
+    ScrubChartHost(
         rememberCartesianChart(
             *listOfNotNull<CartesianLayer<*>>(colLayer, lineLayer).toTypedArray(),
-            startAxis = VerticalAxis.rememberStart(
-                itemPlacer = VerticalAxis.ItemPlacer.step({ step }),
-                guideline = rememberLineComponent(fill = fill(c.separator), thickness = 0.5.dp),
-                label = rememberAxisLabelComponent(color = c.secondaryLabel),
-                valueFormatter = CartesianValueFormatter { _, y, _ -> if (y >= 1000) kFmt.format(y / 1000) + "k" else kFmt.format(y) },
-                line = null, tick = null,
-            ),
-            bottomAxis = HorizontalAxis.rememberBottom(
-                label = rememberAxisLabelComponent(color = c.secondaryLabel),
-                guideline = null, line = null, tick = null,
-                valueFormatter = CartesianValueFormatter { _, x, _ -> p.first.plusDays(x.toLong()).format(dateFmt) },
-                itemPlacer = HorizontalAxis.ItemPlacer.aligned({ if (span > 30) 15 else 7 }, { 0 }),
-            ),
+            startAxis = startAxis(step, CartesianValueFormatter { _, y, _ -> if (y >= 1000) kFmt.format(y / 1000) + "k" else kFmt.format(y) }),
+            bottomAxis = bottomAxis(CartesianValueFormatter { _, x, _ -> p.first.plusDays(x.toLong()).format(dateFmt) }, if (span > 30) 15 else 7),
+            marker = rememberScrubMarker(color) { x -> "${byX[x]?.let { m.format(it) + unit } ?: "—"} · ${p.first.plusDays(x.toLong()).format(dateFmt)}" },
+            decorations = listOf(dashedLine(avg, AppTheme.colors.secondaryLabel)),
         ),
-        producer,
-        Modifier.fillMaxWidth().height(220.dp).padding(AppSpace.l),
-        zoomState = rememberVicoZoomState(zoomEnabled = false, initialZoom = remember { Zoom.Content }),
+        producer, 220.dp,
     )
 }

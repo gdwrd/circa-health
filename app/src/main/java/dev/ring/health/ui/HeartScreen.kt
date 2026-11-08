@@ -38,19 +38,10 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.patrykandpatrick.vico.compose.cartesian.CartesianChartHost
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberAxisLabelComponent
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberBottom
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberStart
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLine
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLineCartesianLayer
 import com.patrykandpatrick.vico.compose.cartesian.rememberCartesianChart
-import com.patrykandpatrick.vico.compose.cartesian.rememberVicoZoomState
-import com.patrykandpatrick.vico.compose.common.component.rememberLineComponent
 import com.patrykandpatrick.vico.compose.common.fill
-import com.patrykandpatrick.vico.core.cartesian.axis.HorizontalAxis
-import com.patrykandpatrick.vico.core.cartesian.axis.VerticalAxis
-import com.patrykandpatrick.vico.core.cartesian.Zoom
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianChartModelProducer
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianLayerRangeProvider
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianValueFormatter
@@ -168,9 +159,13 @@ fun HeartScreen(backend: Boolean?) {
                     val now = System.currentTimeMillis() / 1000
                     val shown = doses.filter { it <= now && it + windowH * 3600 > t0 }
                     val windows = shown.map { (it - t0) / SLOT_S to (it + windowH * 3600 - t0) / SLOT_S }
+                    val xy = pts.map { (it.first - t0) / SLOT_S to it.second }
+                    val byX = xy.toMap()
+                    val tFmt = SimpleDateFormat("h:mm a", Locale.getDefault())
                     Chart(
-                        listOf(pts.map { (it.first - t0) / SLOT_S to it.second }), c.heart, true, 72, offset,
+                        listOf(xy), c.heart, true, 72, offset,
                         decorations = if (windows.isEmpty()) emptyList() else listOf(DoseWindows(windows, c.heart.toArgb())),
+                        marker = { x -> "${byX[x]?.roundToInt()} bpm · ${tFmt.format(Date(((t0 + x * SLOT_S) * 1000).toLong()))}" },
                     ) { x -> fmt.format(Date(((t0 + x * SLOT_S) * 1000).toLong())) }
                     val hm = DateTimeFormatter.ofPattern("HH:mm")
                     shown.forEach { t ->
@@ -207,7 +202,11 @@ private fun TrendCard(title: String, t: Trend?, unit: String, color: Color) {
             )
         }
         val fmt = DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
-        Chart(listOf(t.value, t.base), color, false, 7, 0) { x -> t.first.plusDays(x.toLong()).format(fmt) }
+        val byX = t.value.toMap()
+        Chart(
+            listOf(t.value, t.base), color, false, 7, 0,
+            marker = { x -> "${byX[x]?.roundToInt()?.let { "$it $unit" } ?: "—"} · ${t.first.plusDays(x.toLong()).format(fmt)}" },
+        ) { x -> t.first.plusDays(x.toLong()).format(fmt) }
     }
 }
 
@@ -292,27 +291,20 @@ private fun Value(v: Double, unit: String, color: Color) {
     )
 }
 
-/** [series] 0 is the main line with a light area fill; series 1 (optional) is a wide translucent band. */
+/** [series] 0 is the main line with a faded area fill; series 1 (optional) is a wide translucent band. */
 @Composable
 private fun Chart(
     series: List<List<Pair<Double, Double>>>, color: Color, area: Boolean, spacing: Int, offset: Int,
-    second: Color? = null, decorations: List<Decoration> = emptyList(), label: (Double) -> String,
+    second: Color? = null, decorations: List<Decoration> = emptyList(), marker: (Double) -> CharSequence, label: (Double) -> String,
 ) {
-    val c = AppTheme.colors
     val producer = remember { CartesianChartModelProducer() }
     LaunchedEffect(series) {
         producer.runTransaction {
             lineSeries { series.filter { it.isNotEmpty() }.forEach { s -> series(s.map { it.first }, s.map { it.second }) } }
         }
     }
-    val main = LineCartesianLayer.rememberLine(
-        fill = LineCartesianLayer.LineFill.single(fill(color)),
-        areaFill = if (area) LineCartesianLayer.AreaFill.single(fill(color.copy(alpha = 0.15f))) else null,
-        pointConnector = LineCartesianLayer.PointConnector.cubic(),
-    )
-    val band = if (second != null) LineCartesianLayer.rememberLine(
-        fill = LineCartesianLayer.LineFill.single(fill(second)), pointConnector = LineCartesianLayer.PointConnector.cubic(),
-    ) else LineCartesianLayer.rememberLine(
+    val main = chartLine(color, area)
+    val band = if (second != null) chartLine(second) else LineCartesianLayer.rememberLine(
         fill = LineCartesianLayer.LineFill.single(fill(color.copy(alpha = 0.18f))),
         stroke = LineCartesianLayer.LineStroke.Continuous(thicknessDp = 22f),
     )
@@ -321,29 +313,18 @@ private fun Chart(
     val step = if (span > 60) 20.0 else if (span > 24) 10.0 else 5.0
     val lo = floor((ys.min() - span * 0.1) / step) * step
     val hi = ceil((ys.max() + span * 0.1) / step) * step
-    CartesianChartHost(
+    ScrubChartHost(
         rememberCartesianChart(
             rememberLineCartesianLayer(
                 LineCartesianLayer.LineProvider.series(main, band),
                 rangeProvider = CartesianLayerRangeProvider.fixed(minY = lo, maxY = maxOf(hi, lo + step)),
             ),
-            startAxis = VerticalAxis.rememberStart(
-                itemPlacer = VerticalAxis.ItemPlacer.step({ step }),
-                guideline = rememberLineComponent(fill = fill(c.separator), thickness = 0.5.dp),
-                label = rememberAxisLabelComponent(color = c.secondaryLabel),
-                line = null, tick = null,
-            ),
-            bottomAxis = HorizontalAxis.rememberBottom(
-                label = rememberAxisLabelComponent(color = c.secondaryLabel),
-                guideline = null, line = null, tick = null,
-                valueFormatter = CartesianValueFormatter { _, x, _ -> label(x) },
-                itemPlacer = HorizontalAxis.ItemPlacer.aligned({ spacing }, { offset }),
-            ),
+            startAxis = startAxis(step),
+            bottomAxis = bottomAxis(CartesianValueFormatter { _, x, _ -> label(x) }, spacing, offset),
+            marker = rememberScrubMarker(color, marker),
             decorations = decorations,
         ),
-        producer,
-        Modifier.fillMaxWidth().height(180.dp).padding(AppSpace.l),
-        zoomState = rememberVicoZoomState(zoomEnabled = false, initialZoom = remember { Zoom.Content }),
+        producer, 180.dp,
     )
 }
 
@@ -446,11 +427,13 @@ private fun BloodPressureCard(pts: List<Triple<LocalDate, Int, Int>>) {
             }
         }
         val first = pts.first().first
+        val byX = pts.associateBy { (it.first.toEpochDay() - first.toEpochDay()).toDouble() }
         if (pts.size < 2) Text("Log another reading to see the trend.", style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(AppSpace.l))
         else Chart(
             listOf(pts.map { (it.first.toEpochDay() - first.toEpochDay()).toDouble() to it.second.toDouble() },
                 pts.map { (it.first.toEpochDay() - first.toEpochDay()).toDouble() to it.third.toDouble() }),
             c.heart, false, 7, 0, second = c.hrv,
+            marker = { x -> "${byX[x]?.let { "${it.second}/${it.third} mmHg" } ?: "—"} · ${first.plusDays(x.toLong()).format(fmt)}" },
         ) { x -> first.plusDays(x.toLong()).format(fmt) }
         Text(
             "From the cuff readings in your journal.", style = AppType.footnote, color = c.secondaryLabel,

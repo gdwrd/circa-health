@@ -32,18 +32,11 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.patrykandpatrick.vico.compose.cartesian.CartesianChartHost
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberAxisLabelComponent
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberBottom
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberStart
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberColumnCartesianLayer
-import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLine
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLineCartesianLayer
 import com.patrykandpatrick.vico.compose.cartesian.rememberCartesianChart
 import com.patrykandpatrick.vico.compose.common.component.rememberLineComponent
 import com.patrykandpatrick.vico.compose.common.fill
-import com.patrykandpatrick.vico.core.cartesian.axis.HorizontalAxis
-import com.patrykandpatrick.vico.core.cartesian.axis.VerticalAxis
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianChartModelProducer
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianLayerRangeProvider
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianValueFormatter
@@ -268,10 +261,7 @@ private fun MiniChart(title: String, pts: List<Pair<LocalDate, Double?>>, color:
     } else {
         rememberLineCartesianLayer(
             LineCartesianLayer.LineProvider.series(
-                LineCartesianLayer.rememberLine(
-                    fill = LineCartesianLayer.LineFill.single(fill(color)),
-                    pointConnector = LineCartesianLayer.PointConnector.cubic(),
-                ),
+                chartLine(color),
             ),
             rangeProvider = range,
         )
@@ -280,24 +270,17 @@ private fun MiniChart(title: String, pts: List<Pair<LocalDate, Double?>>, color:
     Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
         Text(title, style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
         InsetCard {
-            CartesianChartHost(
+            val byX = xy.toMap()
+            ScrubChartHost(
                 rememberCartesianChart(
                     layer,
-                    startAxis = VerticalAxis.rememberStart(
-                        itemPlacer = VerticalAxis.ItemPlacer.step({ top / 2 }),
-                        guideline = rememberLineComponent(fill = fill(c.separator), thickness = 0.5.dp),
-                        label = rememberAxisLabelComponent(color = c.secondaryLabel),
-                        line = null, tick = null,
-                    ),
-                    bottomAxis = HorizontalAxis.rememberBottom(
-                        label = rememberAxisLabelComponent(color = c.secondaryLabel),
-                        guideline = null, line = null, tick = null,
-                        valueFormatter = CartesianValueFormatter { _, x, _ -> first.plusDays(x.toLong()).format(fmt) },
-                        itemPlacer = HorizontalAxis.ItemPlacer.aligned({ 4 }, { 0 }),
-                    ),
+                    startAxis = startAxis(top / 2),
+                    bottomAxis = bottomAxis(CartesianValueFormatter { _, x, _ -> first.plusDays(x.toLong()).format(fmt) }, 4),
+                    marker = rememberScrubMarker(color) { x ->
+                        "${byX[x]?.let { if (column) "%.1f h".format(it) else it.roundToInt().toString() } ?: "—"} · ${first.plusDays(x.toLong()).format(fmt)}"
+                    },
                 ),
-                producer,
-                Modifier.fillMaxWidth().height(140.dp).padding(AppSpace.l),
+                producer, 140.dp,
             )
         }
     }
