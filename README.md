@@ -1,4 +1,6 @@
-# Ring Health Tracker
+# Circa — self-hosted health for the Colmi ring
+
+*Know your normal.* (Formerly Ring Health Tracker.)
 
 A self-hosted biometric pipeline for the **Colmi R02** smart ring.
 
@@ -155,7 +157,7 @@ days have data, so expect the first week to be incomplete.
 
 ### First-time setup in the app
 
-1. Launch **Ring Health Tracker** on the phone.
+1. Launch **Circa** on the phone.
 2. Grant the Bluetooth and notification permissions.
 3. Tap **Scan for ring**, pick your Colmi R02 from the list (the MAC fills in).
 4. Enter your VictoriaMetrics URL, e.g. `http://192.168.1.10:8428`.

@@ -16,11 +16,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DatePicker
+import androidx.compose.material3.Icon
 import androidx.compose.material3.DatePickerDefaults
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -48,6 +50,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -62,6 +65,7 @@ import dev.ring.health.ColmiProtocol
 import dev.ring.health.Metric
 import dev.ring.health.MetricsPusher
 import dev.ring.health.MainActivity
+import dev.ring.health.R
 import dev.ring.health.Prefs.apiToken
 import dev.ring.health.Prefs.lastSyncMs
 import dev.ring.health.Prefs.ringAddress
@@ -247,6 +251,15 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 }
                 Hairline(Modifier.padding(start = AppSpace.l))
                 ButtonRow(if (measuring) "Measuring…" else "Measure heart rate now", enabled = !measuring, onClick = ::measureHeartRate)
+            }
+        }
+        item {
+            Column(Modifier.fillMaxWidth().padding(vertical = AppSpace.xl), horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(painterResource(R.drawable.ic_stat_circa), contentDescription = null, tint = c.secondaryLabel, modifier = Modifier.size(28.dp))
+                Text(
+                    "Circa " + ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName,
+                    style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.xs),
+                )
             }
         }
     }

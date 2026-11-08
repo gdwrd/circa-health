@@ -413,7 +413,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             // request code = id: each notification keeps its own extras
             val open = PendingIntent.getActivity(ctx, id, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
             val notif = NotificationCompat.Builder(ctx, "health")
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setSmallIcon(R.drawable.ic_stat_circa)
                 .setContentTitle(o["title"]!!.jsonPrimitive.content)
                 .setContentText(o["body"]!!.jsonPrimitive.content)
                 .setContentIntent(open)
@@ -429,14 +429,11 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
     private fun buildForegroundInfo(text: String): ForegroundInfo {
         val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (nm.getNotificationChannel(NOTIF_CHANNEL) == null) {
-            nm.createNotificationChannel(
-                NotificationChannel(NOTIF_CHANNEL, "Ring sync", NotificationManager.IMPORTANCE_LOW)
-            )
-        }
+        // unguarded: re-creating renames the channel left by v2.x ("Ring sync")
+        nm.createNotificationChannel(NotificationChannel(NOTIF_CHANNEL, "Circa sync", NotificationManager.IMPORTANCE_LOW))
         val notif = NotificationCompat.Builder(applicationContext, NOTIF_CHANNEL)
-            .setSmallIcon(android.R.drawable.ic_popup_sync)
-            .setContentTitle("Ring Health")
+            .setSmallIcon(R.drawable.ic_stat_circa)
+            .setContentTitle(applicationContext.getString(R.string.app_name))
             .setContentText(text)
             .setOngoing(true)
             .build()

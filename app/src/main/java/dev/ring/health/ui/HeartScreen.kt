@@ -254,7 +254,7 @@ private fun MeasureNow() {
         val granted = ContextCompat.checkSelfPermission(ctx, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
         status = when {
             address.isNullOrBlank() -> return run { status = "Set the ring address in Settings first." }
-            !granted -> return run { status = "Allow Bluetooth for Ring Health first (Settings > Apps)." }
+            !granted -> return run { status = "Allow Bluetooth for Circa first (Settings > Apps)." }
             else -> "Connecting to ring…"
         }
         bpm = null
