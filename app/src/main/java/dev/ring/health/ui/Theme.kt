@@ -1,11 +1,16 @@
 package dev.ring.health.ui
 
+import android.graphics.BlurMaskFilter
+import android.provider.Settings
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -50,16 +55,29 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.hapticfeedback.HapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.ring.health.R
+import kotlin.math.roundToInt
 
 /** One-file design system: iOS-style palette, type scale, shapes, spacing and the shared composables. */
 
@@ -85,7 +103,29 @@ data class AppColors(
     val zoneRelaxed: Color,
     val zoneEngaged: Color,
     val zoneStressed: Color,
-)
+    val cardStroke: Color,
+    val sleepLight: Color = SleepLight,
+    val readinessLight: Color = ReadinessLight,
+    val activityLight: Color = ActivityLight,
+    val heartLight: Color = HeartLight,
+    /** Alpha of the blurred glow under large rings. */
+    val glow: Float = 0.35f,
+    val moodGood: Color = ReadinessGreen.copy(alpha = 0.1f),
+    val moodFair: Color = ZoneEngaged.copy(alpha = 0.1f),
+    val moodLow: Color = ActivityPink.copy(alpha = 0.1f),
+    val signalCalm: Color = ReadinessGreen,
+    val signalElevated: Color = ZoneEngaged,
+    val signalHigh: Color = StageAwake,
+) {
+    /** Lighter gradient partner of a score colour (the arc head); other colours pair with themselves. */
+    fun light(c: Color): Color = when (c) {
+        sleep -> sleepLight
+        readiness -> readinessLight
+        activity -> activityLight
+        heart -> heartLight
+        else -> c
+    }
+}
 
 private val SleepIndigo = Color(0xFF5E5CE6)
 private val ReadinessGreen = Color(0xFF30D158)
@@ -96,6 +136,10 @@ private val StageCore = Color(0xFF0A84FF)
 private val HeartRed = Color(0xFFFF2D55)
 private val HrvCyan = Color(0xFF64D2FF)
 private val ZoneEngaged = Color(0xFFFFD60A)
+private val SleepLight = Color(0xFF8E8CFF)
+private val ReadinessLight = Color(0xFF7CF2A2)
+private val ActivityLight = Color(0xFFFF7A9A)
+private val HeartLight = Color(0xFFFF6B8A)
 
 private val LightColors = AppColors(
     background = Color(0xFFF2F2F7),
@@ -109,6 +153,7 @@ private val LightColors = AppColors(
     stageAwake = StageAwake, stageRem = StageRem, stageCore = StageCore, stageDeep = SleepIndigo,
     heart = HeartRed, hrv = HrvCyan,
     zoneRestored = ReadinessGreen, zoneRelaxed = StageRem, zoneEngaged = ZoneEngaged, zoneStressed = StageAwake,
+    cardStroke = Color(0x0A000000),
 )
 
 private val DarkColors = AppColors(
@@ -123,11 +168,16 @@ private val DarkColors = AppColors(
     stageAwake = StageAwake, stageRem = StageRem, stageCore = StageCore, stageDeep = SleepIndigo,
     heart = HeartRed, hrv = HrvCyan,
     zoneRestored = ReadinessGreen, zoneRelaxed = StageRem, zoneEngaged = ZoneEngaged, zoneStressed = StageAwake,
+    cardStroke = Color(0x0FFFFFFF),
 )
 
+/** Bundled OFL Nunito: rounded numerals and titles; body text stays on the platform sans. */
+private val Nunito = FontFamily(Font(R.font.nunito_bold, FontWeight.Bold), Font(R.font.nunito_extrabold, FontWeight.ExtraBold))
+
 object AppType {
-    val largeTitle = TextStyle(fontSize = 34.sp, lineHeight = 41.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.4.sp)
-    val title = TextStyle(fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold)
+    val display = TextStyle(fontFamily = Nunito, fontSize = 56.sp, lineHeight = 60.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-1).sp)
+    val largeTitle = TextStyle(fontFamily = Nunito, fontSize = 34.sp, lineHeight = 41.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.4.sp)
+    val title = TextStyle(fontFamily = Nunito, fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold)
     val headline = TextStyle(fontSize = 17.sp, lineHeight = 22.sp, fontWeight = FontWeight.SemiBold)
     val body = TextStyle(fontSize = 17.sp, lineHeight = 22.sp)
     val subhead = TextStyle(fontSize = 15.sp, lineHeight = 20.sp)
@@ -150,6 +200,12 @@ object AppSpace {
 
 private val LocalColors = staticCompositionLocalOf { LightColors }
 
+/** True when the system animator scale is 0 (Settings > Accessibility > Remove animations). */
+val LocalReduceMotion = staticCompositionLocalOf { false }
+
+/** Light selection tick for selection changes and measurement lock. */
+fun HapticFeedback.tick() = performHapticFeedback(HapticFeedbackType.TextHandleMove)
+
 object AppTheme {
     val colors: AppColors @Composable get() = LocalColors.current
 }
@@ -169,10 +225,13 @@ fun AppTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> U
         labelSmall = AppType.tab,
     )
     val shapes = Shapes(small = AppShape.small, medium = AppShape.card, large = AppShape.card)
+    val resolver = LocalContext.current.contentResolver
+    val reduceMotion = remember { Settings.Global.getFloat(resolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f }
     MaterialTheme(colorScheme = scheme, typography = type, shapes = shapes) {
         CompositionLocalProvider(
             LocalColors provides c,
             LocalContentColor provides c.label,
+            LocalReduceMotion provides reduceMotion,
             LocalRippleConfiguration provides RippleConfiguration(
                 color = c.secondaryLabel,
                 rippleAlpha = RippleAlpha(draggedAlpha = 0.1f, focusedAlpha = 0.08f, hoveredAlpha = 0.04f, pressedAlpha = 0.1f),
@@ -187,16 +246,17 @@ fun Hairline(modifier: Modifier = Modifier) {
     Box(modifier.fillMaxWidth().height(0.5.dp).background(AppTheme.colors.separator))
 }
 
-/** White (light) / #1C1C1E (dark) rounded group; no elevation. */
+/** White (light) / #1C1C1E (dark) rounded group with a 1 dp hairline stroke; no elevation. */
 @Composable
 fun InsetCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     Column(
-        modifier.fillMaxWidth().clip(AppShape.card).background(AppTheme.colors.card),
+        modifier.fillMaxWidth().clip(AppShape.card).background(AppTheme.colors.card)
+            .border(1.dp, AppTheme.colors.cardStroke, AppShape.card),
         content = content,
     )
 }
 
-/** Activity-style ring: faint track, round-cap arc that springs to [progress] (0..1). */
+/** Activity-style ring: faint track, sweep-gradient arc (light end at the head) that springs to [progress] (0..1); blurred glow when >= 120 dp. */
 @Composable
 fun ScoreRing(
     progress: Float,
@@ -209,14 +269,31 @@ fun ScoreRing(
     LaunchedEffect(progress) {
         p.animateTo(progress.coerceIn(0f, 1f), spring(Spring.DampingRatioLowBouncy, Spring.StiffnessVeryLow))
     }
+    val colors = AppTheme.colors
+    val light = colors.light(color)
     Box(modifier, contentAlignment = Alignment.Center) {
         Canvas(Modifier.fillMaxSize()) {
             val w = stroke.toPx()
             val topLeft = Offset(w / 2, w / 2)
             val arc = Size(size.width - w, size.height - w)
-            drawArc(color.copy(alpha = 0.2f), 0f, 360f, false, topLeft, arc, style = Stroke(w))
-            if (p.value > 0f) {
-                drawArc(color, -90f, 360f * p.value, false, topLeft, arc, style = Stroke(w, cap = StrokeCap.Round))
+            drawArc(color.copy(alpha = 0.12f), 0f, 360f, false, topLeft, arc, style = Stroke(w))
+            val v = p.value
+            if (v > 0f) rotate(-90f) {
+                val sweep = 360f * v
+                if (size.minDimension >= 120.dp.toPx()) drawIntoCanvas { canvas ->
+                    val glow = Paint().asFrameworkPaint().apply {
+                        isAntiAlias = true
+                        style = android.graphics.Paint.Style.STROKE
+                        strokeWidth = w
+                        strokeCap = android.graphics.Paint.Cap.ROUND
+                        this.color = color.copy(alpha = colors.glow).toArgb()
+                        maskFilter = BlurMaskFilter(w * 1.2f, BlurMaskFilter.Blur.NORMAL)
+                    }
+                    canvas.nativeCanvas.drawArc(topLeft.x, topLeft.y, topLeft.x + arc.width, topLeft.y + arc.height, 0f, sweep, false, glow)
+                }
+                // Gradient returns to the base colour after the head so the start cap does not pick up the light end.
+                val stops = if (v < 0.999f) arrayOf(0f to color, v to light, 1f to color) else arrayOf(0f to color, 1f to light)
+                drawArc(Brush.sweepGradient(*stops, center = center), 0f, sweep, false, topLeft, arc, style = Stroke(w, cap = StrokeCap.Round))
             }
         }
         content()
@@ -259,4 +336,15 @@ fun LargeTitleScaffold(title: String, back: (@Composable () -> Unit)? = null, co
             Hairline(Modifier.align(Alignment.BottomCenter))
         }
     }
+}
+
+/** Integer that counts up from 0 to [value] in 600 ms (ease-out); jumps straight there under reduce-motion. */
+@Composable
+fun CountUp(value: Int, style: TextStyle, modifier: Modifier = Modifier, color: Color = Color.Unspecified) {
+    val reduce = LocalReduceMotion.current
+    val n = remember { Animatable(if (reduce) value.toFloat() else 0f) }
+    LaunchedEffect(value) {
+        if (reduce) n.snapTo(value.toFloat()) else n.animateTo(value.toFloat(), tween(600, easing = EaseOut))
+    }
+    Text(n.value.roundToInt().toString(), modifier, color = color, style = style)
 }
