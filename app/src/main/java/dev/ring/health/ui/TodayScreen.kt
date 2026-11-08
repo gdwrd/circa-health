@@ -1,6 +1,15 @@
 package dev.ring.health.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -132,6 +141,7 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
     var sheet by remember { mutableStateOf(false) }
     var sheetDay by remember { mutableStateOf<Int?>(null) } // 0 Yesterday, 1 Today; null = by time of day
     var insights by remember { mutableStateOf<JsonObject?>(null) }
+    var hr by remember { mutableStateOf<List<Double>>(emptyList()) }
     LaunchedEffect(journalDate) {
         if (journalDate == null) return@LaunchedEffect
         sheetDay = if (journalDate == LocalDate.now().toString()) 1 else 0
@@ -145,35 +155,68 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
         loadJournal()
         Api.settings(ctx)?.let { s -> s["medication_time"].str()?.let { medTime = it }; medStarted = s["medication_started"].str() }
         insights = Api.insights(ctx).obj()?.get("kinds").obj()
+        hr = (Api.hr(ctx, 24).obj()?.get("points") as? JsonArray)?.mapNotNull { it.obj()?.get("bpm").num() }.orEmpty()
     }
 
     val c = AppTheme.colors
-    val rings = listOf("sleep" to ("Sleep" to c.sleep), "readiness" to ("Readiness" to c.readiness), "activity" to ("Activity" to c.activity))
     LargeTitleScaffold("Today") {
         val d = data ?: return@LargeTitleScaffold
-        if (d["status"]?.let { (it as? JsonPrimitive)?.contentOrNull } == "learning") item {
+        item {
+            val h = LocalTime.now().hour
+            Column(Modifier.padding(start = AppSpace.xs)) {
+                Text(if (h in 5..11) "Good morning" else if (h in 12..17) "Good afternoon" else "Good evening", style = AppType.subhead, color = c.secondaryLabel)
+                Text(LocalDate.now().format(DateTimeFormatter.ofPattern("EEEE d MMMM", Locale.getDefault())), style = AppType.headline)
+            }
+        }
+        // Ring until the 14-day baseline is full (backend "learning" ends at 5 days, when baselines start).
+        val n = d["baseline_days"].str()?.substringBefore('/')?.toIntOrNull() ?: 0
+        if (n < 14) item {
             InsetCard {
-                Text(
-                    "Learning your baseline · ${(d["baseline_days"] as? JsonPrimitive)?.contentOrNull ?: "?"} days",
-                    style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(AppSpace.l),
-                )
+                Row(Modifier.padding(AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
+                    ScoreRing(n / 14f, c.tint, Modifier.size(56.dp), stroke = 7.dp) { Text("$n", style = AppType.headline) }
+                    Column(Modifier.padding(start = AppSpace.l)) {
+                        Text("Day $n of 14", style = AppType.headline)
+                        Text("Learning your normal. Scores settle once there are 14 days.", style = AppType.subhead, color = c.secondaryLabel)
+                    }
+                }
             }
         }
         item {
+            val r = d["readiness"].obj()
+            val score = r?.get("score").num()?.roundToInt()
+            val mood = when { score == null -> c.moodFair.copy(alpha = 0f); score >= 80 -> c.moodGood; score >= 60 -> c.moodFair; else -> c.moodLow }
+            InsetCard {
+                Column(
+                    Modifier.fillMaxWidth().background(Brush.radialGradient(listOf(mood, mood.copy(alpha = 0f))))
+                        .clickable { open = if (open == "readiness") null else "readiness" }.padding(AppSpace.xl),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    ScoreRing((score ?: 0) / 100f, c.readiness, Modifier.size(220.dp), stroke = 20.dp) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            if (score != null) CountUp(score, AppType.display) else Text("—", style = AppType.display)
+                            Text("Readiness", style = AppType.subhead, color = c.secondaryLabel)
+                        }
+                    }
+                    if (score != null) Text(
+                        coachLine(score, r?.get("contributors").obj()), style = AppType.subhead, textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(top = AppSpace.l),
+                    )
+                }
+                ScoreDetails("readiness", "Readiness", c.readiness, d, open == "readiness", medStarted)
+            }
+        }
+        item {
+            val small = listOf("sleep" to ("Sleep" to c.sleep), "activity" to ("Activity" to c.activity))
             InsetCard {
                 Row(Modifier.padding(horizontal = AppSpace.m, vertical = AppSpace.l)) {
-                    rings.forEach { (key, meta) ->
-                        val score = d[key].obj()?.get("score").num()
+                    small.forEach { (key, meta) ->
+                        val score = d[key].obj()?.get("score").num()?.roundToInt()
                         Column(
-                            Modifier.weight(1f).clip(AppShape.small).clickable { open = if (open == key) null else key }
-                                .padding(AppSpace.s),
+                            Modifier.weight(1f).clip(AppShape.small).clickable { open = if (open == key) null else key }.padding(AppSpace.s),
                             horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
-                            ScoreRing(
-                                (score ?: 0.0).toFloat() / 100f, meta.second,
-                                Modifier.fillMaxWidth().aspectRatio(1f), stroke = 10.dp,
-                            ) {
-                                Text(score?.roundToInt()?.toString() ?: "—", style = AppType.title)
+                            ScoreRing((score ?: 0) / 100f, meta.second, Modifier.size(96.dp), stroke = 10.dp) {
+                                if (score != null) CountUp(score, AppType.title) else Text("—", style = AppType.title)
                             }
                             Text(
                                 meta.first, style = AppType.footnote, modifier = Modifier.padding(top = AppSpace.s),
@@ -183,48 +226,31 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
                         }
                     }
                 }
-                rings.forEach { (key, meta) ->
-                    AnimatedVisibility(open == key) {
-                        Column {
-                            Hairline(Modifier.padding(start = AppSpace.l))
-                            Column(Modifier.padding(horizontal = AppSpace.l, vertical = AppSpace.m)) {
-                                Text("What is ${meta.first}?", style = AppType.headline)
-                                Text(SCORE_INFO[key].orEmpty(), style = AppType.subhead, modifier = Modifier.padding(top = AppSpace.xs))
-                                Text(SCORE_SCALE, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s))
-                            }
-                            (d[key].obj()?.get("contributors").obj() ?: JsonObject(emptyMap())).forEach { (name, v) ->
-                                Hairline(Modifier.padding(start = AppSpace.l))
-                                Contributor(NAMES[name] ?: name, v.num(), meta.second, CONTRIBUTOR_INFO[name])
-                            }
-                            val since = medStarted?.let { runCatching { ChronoUnit.DAYS.between(LocalDate.parse(it), LocalDate.now()) }.getOrNull() }
-                            if (key == "readiness" && since != null && since in 0..60) {
-                                Hairline(Modifier.padding(start = AppSpace.l))
-                                Text(
-                                    "Resting HR is compared with your 14-day baseline, which now includes days on medication; it settles after about two weeks.",
-                                    style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l, vertical = AppSpace.m),
-                                )
-                            }
-                        }
-                    }
-                }
+                small.forEach { (key, meta) -> ScoreDetails(key, meta.first, meta.second, d, open == key, medStarted) }
             }
         }
         d["signals"].obj()?.let { item { BodySignals(it, medStarted) } }
         item {
             val v = d["vitals"].obj()
+            val tiles = listOf("Heart rate" to ("hr" to "bpm"), "HRV" to ("hrv" to "ms"), "SpO₂" to ("spo2" to "%"), "Ring battery" to ("battery" to "%"))
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
                 Text("Vitals", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-                InsetCard {
-                    listOf("Heart rate" to ("hr" to "bpm"), "HRV" to ("hrv" to "ms"), "SpO₂" to ("spo2" to "%"), "Ring battery" to ("battery" to "%"))
-                        .forEachIndexed { i, (label, m) ->
-                            if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
+                tiles.chunked(2).forEach { pair ->
+                    Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                        pair.forEach { (label, m) ->
                             val x = v?.get(m.first).num()
-                            Row(Modifier.fillMaxWidth().padding(AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
-                                Text(label, style = AppType.body, modifier = Modifier.weight(1f))
-                                Text(x?.roundToInt()?.toString() ?: "—", style = AppType.body, fontWeight = FontWeight.SemiBold)
-                                if (x != null) Text(" ${m.second}", style = AppType.body, color = c.secondaryLabel)
+                            InsetCard(Modifier.weight(1f).fillMaxHeight()) {
+                                Column(Modifier.padding(AppSpace.l)) {
+                                    Text(label, style = AppType.footnote, color = c.secondaryLabel)
+                                    Row(verticalAlignment = Alignment.Bottom) {
+                                        Text(x?.roundToInt()?.toString() ?: "—", style = AppType.title)
+                                        if (x != null) Text(" ${m.second}", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(bottom = 3.dp))
+                                    }
+                                    if (m.first == "hr" && hr.size > 1) Sparkline(hr, c.heart, Modifier.padding(top = AppSpace.s).fillMaxWidth().height(40.dp))
+                                }
                             }
                         }
+                    }
                 }
             }
         }
@@ -256,6 +282,69 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
         if (!kinds.isNullOrEmpty()) item { WhatAffectsYou(kinds) }
     }
     if (sheet) CheckInSheet(journal, medTime, scope, sheetDay, ::loadJournal) { sheet = false; sheetDay = null }
+}
+
+/** Explanation + contributor rows under a score; the readiness one adds the medication-baseline note. */
+@Composable
+private fun ScoreDetails(key: String, name: String, color: Color, d: JsonObject, visible: Boolean, medStarted: String?) {
+    val c = AppTheme.colors
+    AnimatedVisibility(visible) {
+        Column {
+            Hairline(Modifier.padding(start = AppSpace.l))
+            Column(Modifier.padding(horizontal = AppSpace.l, vertical = AppSpace.m)) {
+                Text("What is $name?", style = AppType.headline)
+                Text(SCORE_INFO[key].orEmpty(), style = AppType.subhead, modifier = Modifier.padding(top = AppSpace.xs))
+                Text(SCORE_SCALE, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s))
+            }
+            (d[key].obj()?.get("contributors").obj() ?: JsonObject(emptyMap())).forEach { (n, v) ->
+                Hairline(Modifier.padding(start = AppSpace.l))
+                Contributor(NAMES[n] ?: n, v.num(), color, CONTRIBUTOR_INFO[n])
+            }
+            val since = medStarted?.let { runCatching { ChronoUnit.DAYS.between(LocalDate.parse(it), LocalDate.now()) }.getOrNull() }
+            if (key == "readiness" && since != null && since in 0..60) {
+                Hairline(Modifier.padding(start = AppSpace.l))
+                Text(
+                    "Resting HR is compared with your 14-day baseline, which now includes days on medication; it settles after about two weeks.",
+                    style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l, vertical = AppSpace.m),
+                )
+            }
+        }
+    }
+}
+
+// Readiness contributors in words (app twin of backend notify.WORDS), said when that contributor is the lowest.
+private val LOW_WORDS = mapOf(
+    "resting_hr" to "Your resting heart rate is higher than usual.",
+    "hrv_balance" to "Your heart rate variability is lower than usual.",
+    "sleep" to "Last night's sleep was on the light side.",
+    "sleep_balance" to "You have slept less than you need lately.",
+    "previous_day_activity" to "Yesterday was far from your step goal.",
+    "activity_balance" to "Your recent activity is off your goal.",
+    "recovery_index" to "Your heart rate took a while to settle overnight.",
+)
+
+/** Band sentence, plus the lowest contributor when it is below 80. */
+private fun coachLine(score: Int, contributors: JsonObject?): String {
+    val band = if (score >= 80) "Well recovered. A good day to push." else if (score >= 60) "Recovered enough. Keep it steady." else "Take it easy today."
+    val low = contributors?.mapNotNull { (k, v) -> v.num()?.let { k to it } }?.minByOrNull { it.second }?.takeIf { it.second < 80 }
+    return listOfNotNull(band, low?.let { LOW_WORDS[it.first] }).joinToString(" ")
+}
+
+/** 24-h heart-rate line scaled to its own min..max. */
+@Composable
+private fun Sparkline(values: List<Double>, color: Color, modifier: Modifier) {
+    Canvas(modifier) {
+        val lo = values.min()
+        val span = (values.max() - lo).coerceAtLeast(1.0)
+        val w = 2.dp.toPx()
+        val path = Path()
+        values.forEachIndexed { i, v ->
+            val x = size.width * i / (values.size - 1)
+            val y = w + (size.height - 2 * w) * (1 - (v - lo) / span).toFloat()
+            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        }
+        drawPath(path, color, style = Stroke(w, cap = StrokeCap.Round, join = StrokeJoin.Round))
+    }
 }
 
 /** One journal row from `/journal`. */
