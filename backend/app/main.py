@@ -11,7 +11,7 @@ from statistics import mean
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from . import db, notify, scoring, vm
+from . import db, insights, notify, scoring, vm
 
 log = logging.getLogger("ring")
 
@@ -268,6 +268,36 @@ def add_journal(body: dict = Body(...)) -> dict:
     if not ok:
         raise HTTPException(422, "bad value")
     return {"status": "ok", "id": db.add_journal(d.isoformat(), kind, value, note, int(time.time()))}
+
+
+def _day_hr(rows: list[dict], start: date, end: date) -> dict[date, float]:
+    """Mean awake HR per day; one range query. shortcut: 30 min samples, upgrade if day_hr needs finer detail."""
+    sess = [(r["c"]["session"]["start"], r["c"]["session"]["end"]) for r in rows if r["c"].get("session")]
+    try:
+        s = vm.series("biometric_hr_bpm", vm.midnight(start), vm.midnight(end + timedelta(1)), "30m")
+    except Exception:
+        log.exception("day_hr failed")
+        return {}
+    by: dict[date, list[float]] = {}
+    for t, v in s.items():
+        if v > 0 and not any(a <= t < b for a, b in sess):
+            by.setdefault(datetime.fromtimestamp(t, vm.tz()).date(), []).append(v)
+    return {d: mean(v) for d, v in by.items()}
+
+
+@api.get("/journal/insights")
+def journal_insights() -> dict:
+    d = _today()
+    start = d - timedelta(insights.DAYS)
+    rows, entries = db.days(start, d), db.journal(start.isoformat())
+    hr = _day_hr(rows, start, d) if any(e["kind"] == "medication" for e in entries) else {}
+    return {"kinds": insights.kinds(rows, entries, d, hr, db.settings()["medication_started"])}
+
+
+@api.get("/journal/bp")
+def journal_bp(days: int = 30) -> dict:
+    since = _today() - timedelta(min(max(days, 1), 365) - 1)
+    return {"points": insights.bp(db.journal(since.isoformat()))}
 
 
 @api.delete("/journal/{id}")
