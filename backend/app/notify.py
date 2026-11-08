@@ -85,9 +85,33 @@ def _battery(now: datetime, dates: set[date]) -> None:
     _add("battery", f"Ring battery {round(s[max(s)])}%", "Charge the ring soon.", now)
 
 
+def _weekly(now: datetime, dates: set[date]) -> None:
+    """Monday 08-12 local: averages of the previous 7 days, once (no weekly row in the last 6 days)."""
+    if now.weekday() or not 8 <= now.hour < 12:
+        return
+    last = db.query("SELECT created_at FROM notifications WHERE kind='weekly' ORDER BY id DESC LIMIT 1")
+    if last and now - datetime.fromisoformat(last[0]["created_at"]) < timedelta(days=6):
+        return
+    d = now.date()
+    rows = [r for r in db.days(d - timedelta(7), d - timedelta(1))
+            if any(r[k] is not None for k in ("sleep_score", "readiness_score", "activity_score"))]
+    if len(rows) < 3:
+        return
+    parts = []
+    for name, k in (("Sleep", "sleep_score"), ("Readiness", "readiness_score"), ("Activity", "activity_score")):
+        v = [r[k] for r in rows if r[k] is not None]
+        if v:
+            parts.append(f"{name} {round(sum(v) / len(v))}")
+    body = " · ".join(parts) + " avg."
+    sleeps = [r for r in rows if r["sleep_score"] is not None]
+    if sleeps:
+        body += f" Best night: {max(sleeps, key=lambda r: r['sleep_score'])['date']:%a}."
+    _add("weekly", "Your week", body, now)
+
+
 def evaluate(dates: set[date]) -> None:
     now = _now()
-    for rule in (_readiness, _bedtime, _inactivity, _battery):
+    for rule in (_readiness, _bedtime, _inactivity, _battery, _weekly):
         try:
             rule(now, dates)
         except Exception:

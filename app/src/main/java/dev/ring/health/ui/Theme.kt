@@ -225,7 +225,7 @@ fun ScoreRing(
 
 /** iOS large-title screen: 34 sp bold title that collapses into a translucent 44 dp bar on scroll. */
 @Composable
-fun LargeTitleScaffold(title: String, content: LazyListScope.() -> Unit) {
+fun LargeTitleScaffold(title: String, back: (@Composable () -> Unit)? = null, content: LazyListScope.() -> Unit) {
     val c = AppTheme.colors
     val state = rememberLazyListState()
     val collapsed by remember {
@@ -243,7 +243,10 @@ fun LargeTitleScaffold(title: String, content: LazyListScope.() -> Unit) {
             verticalArrangement = Arrangement.spacedBy(AppSpace.xl),
         ) {
             item {
-                Text(title, style = AppType.largeTitle, modifier = Modifier.padding(top = AppSpace.xl, start = AppSpace.xs))
+                Column(Modifier.padding(top = AppSpace.xl)) {
+                    back?.invoke()
+                    Text(title, style = AppType.largeTitle, modifier = Modifier.padding(start = AppSpace.xs))
+                }
             }
             content()
         }
@@ -252,6 +255,7 @@ fun LargeTitleScaffold(title: String, content: LazyListScope.() -> Unit) {
                 .graphicsLayer { alpha = barAlpha }.background(c.tabBar).statusBarsPadding().height(44.dp),
         ) {
             Text(title, style = AppType.headline, modifier = Modifier.align(Alignment.Center), textAlign = TextAlign.Center)
+            back?.let { Box(Modifier.align(Alignment.CenterStart).padding(start = AppSpace.l)) { it() } }
             Hairline(Modifier.align(Alignment.BottomCenter))
         }
     }

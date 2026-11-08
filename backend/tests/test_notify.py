@@ -124,3 +124,39 @@ def test_pending_and_ack_routes(monkeypatch, env) -> None:
         assert set(n) == {"id", "kind", "title", "body", "created_at"} and n["kind"] == "battery"
         assert c.post(f"/notifications/{n['id']}/ack", headers=H).status_code == 200
         assert c.get("/notifications/pending", headers=H).json() == []
+
+
+def seed_week(n: int, sleep: int = 80) -> None:
+    for i in range(1, n + 1):  # D is a Monday; days D-1.. are the previous week
+        db.save_day(D - timedelta(i), (sleep + i, 70, 60), {}, {})
+
+
+def test_weekly_fires_monday_once(monkeypatch, env) -> None:
+    env["biometric_steps"] = {1.0: 100.0}
+    seed_week(7)
+    at(monkeypatch, 9)
+    notify.evaluate(set())
+    notify.evaluate(set())
+    (n,) = notify.pending()
+    assert n["title"] == "Your week" and n["body"] == "Sleep 84 · Readiness 70 · Activity 60 avg. Best night: Mon."
+    at(monkeypatch, 10, day=D + timedelta(1))  # Tuesday
+    notify.evaluate(set())
+    assert kinds() == ["weekly"]
+
+
+def test_weekly_not_tuesday_or_outside_window(monkeypatch, env) -> None:
+    env["biometric_steps"] = {1.0: 100.0}
+    seed_week(7)
+    at(monkeypatch, 9, day=D + timedelta(1))
+    notify.evaluate(set())
+    at(monkeypatch, 13)
+    notify.evaluate(set())
+    assert kinds() == []
+
+
+def test_weekly_needs_three_days(monkeypatch, env) -> None:
+    env["biometric_steps"] = {1.0: 100.0}
+    seed_week(2)
+    at(monkeypatch, 9)
+    notify.evaluate(set())
+    assert kinds() == []

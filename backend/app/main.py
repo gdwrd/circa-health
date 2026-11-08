@@ -185,7 +185,7 @@ def sleep(day: str | None = Query(None, alias="date")) -> dict:
 
 
 SCORES = {"sleep": "sleep_score", "readiness": "readiness_score", "activity": "activity_score"}
-INPUTS = ("rhr", "hrv", "steps", "sleep_min")
+INPUTS = ("rhr", "hrv", "steps", "sleep_min", "stress_load")
 
 
 @api.get("/trends")
