@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Picker preview: the 2x2 widget, Readiness ring at ~75 %. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="110dp" android:height="110dp" android:viewportWidth="110" android:viewportHeight="110">
+    <path android:fillColor="#FFFFFFFF" android:pathData="M16,0h78a16,16 0,0 1,16 16v78a16,16 0,0 1,-16 16h-78a16,16 0,0 1,-16 -16v-78a16,16 0,0 1,16 -16z" />
+    <path android:strokeColor="#1F30D158" android:strokeWidth="9" android:pathData="M55,18a30,30 0,1 1,0 60a30,30 0,1 1,0 -60" />
+    <path android:strokeColor="#FF30D158" android:strokeWidth="9" android:strokeLineCap="round" android:pathData="M55,18a30,30 0,1 1,-30 30" />
+    <path android:fillColor="#FF8E8E93" android:pathData="M30,90h50a3,3 0,0 1,0 6h-50a3,3 0,0 1,0 -6z" />
+</vector>

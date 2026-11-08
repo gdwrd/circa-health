@@ -21,6 +21,8 @@ object Prefs {
     private const val KEY_LAST_ACTIVITY_MS = "last_activity_ms"
     private const val KEY_LAST_STRESS_MS  = "last_stress_ms"
     private const val KEY_LAST_SPO2_MS    = "last_spo2_ms"
+    private const val KEY_TODAY_JSON      = "today_json"
+    private const val KEY_TODAY_JSON_MS   = "today_json_ms"
 
     private fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -86,4 +88,13 @@ object Prefs {
     var Context.lastSpo2Ms: Long
         get() = prefs(this).getLong(KEY_LAST_SPO2_MS, 0L)
         set(v) = prefs(this).edit().putLong(KEY_LAST_SPO2_MS, v).apply()
+
+    /** Last /today body for the home-screen widget, and when it was fetched. */
+    var Context.todayJson: String
+        get() = prefs(this).getString(KEY_TODAY_JSON, "") ?: ""
+        set(v) = prefs(this).edit().putString(KEY_TODAY_JSON, v).apply()
+
+    var Context.todayJsonMs: Long
+        get() = prefs(this).getLong(KEY_TODAY_JSON_MS, 0L)
+        set(v) = prefs(this).edit().putLong(KEY_TODAY_JSON_MS, v).apply()
 }

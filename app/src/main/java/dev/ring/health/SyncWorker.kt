@@ -37,12 +37,16 @@ import dev.ring.health.Prefs.lastHrvMs
 import dev.ring.health.Prefs.lastSleepMs
 import dev.ring.health.Prefs.sleepSchema
 import dev.ring.health.Prefs.syncIntervalMin
+import dev.ring.health.Prefs.todayJson
+import dev.ring.health.Prefs.todayJsonMs
 import dev.ring.health.Prefs.lastSpo2Ms
 import dev.ring.health.Prefs.lastStressMs
 import dev.ring.health.Prefs.lastSyncMs
 import dev.ring.health.Prefs.ringAddress
 import dev.ring.health.Prefs.vmUrl
 import dev.ring.health.ui.Api
+import dev.ring.health.widget.RingWidget
+import androidx.glance.appwidget.updateAll
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -180,6 +184,15 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
                 runCatching { postPending() }.onSuccess { n -> if (n > 0) log("Server: showed $n notifications") }
             }
+
+            // Widget snapshot (a failed push returned above); plain VM answers /today 404 (null), so the widget keeps "Open to sync".
+            runCatching {
+                Api.today(applicationContext)?.let {
+                    applicationContext.todayJson = it.toString()
+                    applicationContext.todayJsonMs = System.currentTimeMillis()
+                }
+                RingWidget().updateAll(applicationContext)
+            }.onFailure { log("Widget: ${it.javaClass.simpleName}: ${it.message}") }
 
             applicationContext.lastSyncMs = System.currentTimeMillis()
             Log.i(TAG, "Sync complete, pushed ${metrics.size} metrics")

@@ -39,6 +39,18 @@
             </intent-filter>
         </activity>
 
+        <receiver
+            android:name=".widget.RingWidgetReceiver"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/ring_widget_info" />
+        </receiver>
+
         <!-- WorkManager foreground service -->
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"

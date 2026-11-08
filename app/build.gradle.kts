@@ -68,4 +68,5 @@ dependencies {
     implementation(libs.vico.compose.m3)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.haze)
+    implementation(libs.androidx.glance.appwidget)
 }
