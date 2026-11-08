@@ -116,28 +116,33 @@ fun SleepScreen(backend: Boolean?) {
     var trend by remember { mutableStateOf<List<Pair<String, Double?>>?>(null) }
     var week by remember { mutableStateOf<List<Pair<LocalDate, JsonObject?>>>(emptyList()) }
     val producer = remember { CartesianChartModelProducer() }
+    var date by remember { mutableStateOf(LocalDate.now()) }
     val need = remember { ctx.sleepNeedHours }
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
     suspend fun load() {
-        val days = (6 downTo 0).map { LocalDate.now().minusDays(it.toLong()) }
+        val days = (6 downTo 0).map { date.minusDays(it.toLong()) }
         val all = coroutineScope { days.map { day -> async { Api.sleep(ctx, day.toString()).obj() } }.awaitAll() }
         week = days.zip(all.map { it?.get("session").obj() })
         data = all.last()
-        val pts = (Api.trends(ctx, "sleep_min", 7).obj()?.get("points") as? JsonArray)?.mapNotNull { it.obj() }
-        trend = pts?.map { (it["date"] as? JsonPrimitive)?.contentOrNull.orEmpty() to it["value"].num() }
-        trend?.let { t -> producer.runTransaction { columnSeries { series(t.map { (it.second ?: 0.0) / 60 }) } } }
+        val t = week.map { (day, s) -> day.toString() to s?.get("total_min").num() }
+        trend = t
+        producer.runTransaction { columnSeries { series(t.map { (it.second ?: 0.0) / 60 }) } }
     }
-    LaunchedEffect(Unit) { load() }
+    LaunchedEffect(date) { load() }
 
     val c = AppTheme.colors
     LargeTitleScaffold("Sleep", refreshing = refreshing, onRefresh = {
         scope.launch { refreshing = true; try { load() } finally { refreshing = false } }
     }) {
         val d = data ?: return@LargeTitleScaffold
+        item { DayPicker(date) { date = it } }
         val ses = d["session"].obj()
         if (ses == null) item {
-            InsetCard { EmptyState(Icons.Rounded.Bedtime, "No sleep recorded", "Wear the ring to bed; last night appears after the morning sync.") }
+            InsetCard {
+                if (date == LocalDate.now()) EmptyState(Icons.Rounded.Bedtime, "No sleep recorded", "Wear the ring to bed; last night appears after the morning sync.")
+                else EmptyState(Icons.Rounded.Bedtime, "No sleep recorded for this night", "Wear the ring to bed and sync in the morning.")
+            }
         } else {
             val startS = ses["start"].num() ?: 0.0
             val endS = ses["end"].num() ?: startS
@@ -212,7 +217,7 @@ fun SleepScreen(backend: Boolean?) {
                 }
             }
             item { Regularity(d["contributors"].obj()?.get("regularity").num(), week, d["sleep_extra"].obj()?.get("regularity").obj()) }
-            if (d.containsKey("sleep_extra")) item { BloodOxygen(d["sleep_extra"].obj()?.get("spo2").obj()) }
+            if (d.containsKey("sleep_extra")) item { BloodOxygen(d["sleep_extra"].obj()?.get("spo2").obj(), date != LocalDate.now()) }
         }
         val t = trend ?: return@LargeTitleScaffold
         item {
@@ -397,13 +402,13 @@ private fun Regularity(score: Double?, week: List<Pair<LocalDate, JsonObject?>>,
 }
 
 @Composable
-private fun BloodOxygen(sp: JsonObject?) {
+private fun BloodOxygen(sp: JsonObject?, past: Boolean) {
     val c = AppTheme.colors
     Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
         Text("Blood oxygen", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
         InsetCard {
             Column(Modifier.padding(AppSpace.l)) {
-                if (sp == null) Text("No SpO₂ last night — the ring's periodic SpO₂ may be off.", style = AppType.subhead, color = c.secondaryLabel)
+                if (sp == null) Text("No SpO₂ ${if (past) "that" else "last"} night — the ring's periodic SpO₂ may be off.", style = AppType.subhead, color = c.secondaryLabel)
                 else {
                     val low = sp["low_count"].num()?.roundToInt() ?: 0
                     Text("Average ${sp["mean"].num()?.roundToInt()} % · lowest ${sp["min"].num()?.roundToInt()} %", style = AppType.headline)

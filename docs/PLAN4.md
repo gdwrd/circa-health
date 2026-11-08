@@ -70,7 +70,7 @@ design) stay the references for what already exists; nothing in them is re-deriv
 - `DayPicker` above "Time asleep"; the night shown is `/sleep?date=<picked>` (the backend already keys a night
   by the day it ends on). The 7-night chart, Regularity and Blood oxygen cards follow the picked date: the week is
   `picked-6..picked`, so `load(date)` reruns the existing 7 parallel calls. No-session copy on a past day:
-  "No sleep recorded for this night."
+  "No sleep recorded for this night" (EmptyState title; Blood oxygen null copy says "that night")
 - Check: `compileDebugKotlin`; Pixel_9a light + dark: last night, two nights back, a night without data.
 
 ## Phase N — ring notifications
