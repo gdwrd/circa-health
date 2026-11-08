@@ -10,6 +10,21 @@ services:
     command:
       - "--retentionPeriod=10y"
 
+  backend:
+    build: ../backend
+    container_name: ring-backend
+    restart: unless-stopped
+    ports:
+      - "8429:8000"
+    environment:
+      VM_URL: http://victoriametrics:8428
+      API_TOKEN: ${API_TOKEN:?set in .env}
+      TZ: ${TZ:-Europe/London}
+    volumes:
+      - backend-data:/data
+    depends_on:
+      - victoriametrics
+
   grafana:
     image: grafana/grafana-oss:12.4.3
     container_name: ring-grafana
@@ -30,3 +45,4 @@ services:
 volumes:
   vm-data:
   grafana-data:
+  backend-data:
