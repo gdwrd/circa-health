@@ -213,3 +213,55 @@ def test_checkin_skipped_when_yesterday_logged(monkeypatch, env) -> None:
     at(monkeypatch, 9)
     notify.evaluate(set())
     assert kinds() == []
+
+
+def seed_morning(score: int | None = 78, ready: int | None = 71) -> None:
+    """Night 23:00 (D-1) to 07:00 (D), 7 h 15 min asleep."""
+    seed(D, ready)
+    row = db.days(D, D)[0]
+    db.save_day(D, (score, ready, None), row["c"] | {"inputs": {"sleep_min": 435}}, {})
+
+
+def test_morning_fires_once_with_extra(monkeypatch) -> None:
+    seed_morning()
+    at(monkeypatch, 7, 29)
+    notify.evaluate(set())
+    assert kinds() == []  # before end + 30 min
+    at(monkeypatch, 7, 30)
+    notify.evaluate(set())
+    notify.evaluate(set())
+    (n,) = notify.pending()
+    assert n["kind"] == "morning" and n["title"] == "Last night · Sleep 78"
+    assert n["body"] == "7 h 15 min asleep · Readiness 71" and n["extra"] == {"open": "sleep"}
+
+
+def test_morning_not_after_two_pm(monkeypatch) -> None:
+    seed_morning()
+    at(monkeypatch, 14)
+    notify.evaluate(set())
+    assert "morning" not in kinds()
+
+
+def test_morning_null_scores(monkeypatch) -> None:
+    seed_morning(None, None)
+    at(monkeypatch, 9)
+    notify.evaluate(set())
+    (n,) = notify.pending()
+    assert (n["title"], n["body"]) == ("Last night", "7 h 15 min asleep")
+
+
+def test_morning_needs_a_session(monkeypatch) -> None:
+    db.save_day(D, (78, 71, None), {"inputs": {"sleep_min": 435}}, {})
+    at(monkeypatch, 9)
+    notify.evaluate(set())
+    assert kinds() == []
+
+
+def test_morning_waits_for_scored_night(monkeypatch) -> None:
+    seed(D, 71)  # session but no inputs yet
+    at(monkeypatch, 9)
+    notify.evaluate(set())
+    assert "morning" not in kinds()
+    seed_morning()
+    notify.evaluate(set())
+    assert "morning" in kinds()

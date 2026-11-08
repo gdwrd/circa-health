@@ -110,6 +110,25 @@ def _checkin(now: datetime, dates: set[date]) -> None:
          {"open": "journal", "date": y})
 
 
+def _duration(minutes: float) -> str:
+    h, m = divmod(round(minutes), 60)
+    return " ".join(p for p in (f"{h} h" if h else "", f"{m} min" if m or not h else "") if p)
+
+
+def _morning(now: datetime, dates: set[date]) -> None:
+    """Once per day, 30 min after today's night ended and before 14:00 local; tap opens the Sleep tab."""
+    row = next(iter(db.days(now.date(), now.date())), None)
+    n = row and row["c"].get("session")
+    asleep = row and row["inputs"].get("sleep_min")
+    if not n or asleep is None or now.timestamp() < n["end"] + 1800 or now.hour >= 14 or _fired("morning", now):
+        return  # no sleep_min: night not scored yet, the next sync after the rescore fires it
+    score = row["sleep_score"]
+    body = f"{_duration(asleep)} asleep"
+    if row["readiness_score"] is not None:
+        body += f" · Readiness {row['readiness_score']}"
+    _add("morning", "Last night" + ("" if score is None else f" · Sleep {score}"), body, now, {"open": "sleep"})
+
+
 def explain(d: date) -> list[str]:
     """Journal kinds logged the day before d that commonly raise the strain inputs."""
     y = (d - timedelta(1)).isoformat()
@@ -148,7 +167,7 @@ def _strain(now: datetime, dates: set[date]) -> None:
 
 def evaluate(dates: set[date]) -> None:
     now = _now()
-    for rule in (_readiness, _bedtime, _inactivity, _weekly, _strain, _checkin):
+    for rule in (_readiness, _bedtime, _inactivity, _weekly, _strain, _checkin, _morning):
         try:
             rule(now, dates)
         except Exception:

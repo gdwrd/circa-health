@@ -81,6 +81,7 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
         LaunchedEffect(link) {
             when (link?.first) {
                 "trends" -> { go(TabItem.Trends); onLinkHandled() }
+                "sleep" -> { go(TabItem.Sleep); onLinkHandled() }
                 "journal" -> { go(TabItem.Today); if (link.second == null) onLinkHandled() }
                 null -> {}
                 else -> onLinkHandled()
