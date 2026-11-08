@@ -113,6 +113,8 @@ Backend also writes `score_sleep`, `score_readiness`, `score_activity`, `stress_
   resilience), **Trends** (pick metric, 30/90 days), **Settings** (scan ring, server URL, token, step goal,
   sleep need, Sync now, Measure HR — i.e. today's MainActivity content). Direct-to-VM mode shows Settings +
   a "Scores need the backend" state on the other tabs.
+- Look: Apple Health / Fitness style (user, 2026-11-08) — iOS grouped backgrounds, white/#1C1C1E inset cards, large titles,
+  Activity-style score rings, no elevation; all tokens in `ui/Theme.kt` over Material3 components. No Apple fonts or symbols copied.
 - Release `v2.0.0`.
 
 ## Phase 3 — notifications

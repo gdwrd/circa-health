@@ -19,7 +19,7 @@ The plan is `docs/PLAN.md`; the task ledger is `NEXTSTEPS.md`.
   `& "$env:LOCALAPPDATA\Android\Sdk\build-tools\35.0.0\apksigner.bat" verify --print-certs app\build\outputs\apk\release\app-release.apk`.
   Cert SHA-256 must start `3c236b22` (same keystore as v1.0.0 or Android refuses the upgrade).
 - Metric emission pattern: `metrics += Metric(name, labels, value, timestampMs)` in `SyncWorker.buildMetrics`; the `last*Ms` watermark in `Prefs` decides what is new. Follow it.
-- Phase 2 UI is Jetpack Compose + Material3; keep `ColmiProtocol`, `ColmiConnection`, `SyncWorker`, `MetricsPusher`, `Prefs` unchanged except what the ledger item names.
+- Phase 2 UI is Jetpack Compose + Material3, restyled to an Apple Health look via `ui/Theme.kt` tokens only (no inline colors); keep `ColmiProtocol`, `ColmiConnection`, `SyncWorker`, `MetricsPusher`, `Prefs` unchanged except what the ledger item names.
 
 ## Python Rules (backend/)
 - Python 3.12 in Docker, 3.13 locally. FastAPI, sqlite3 stdlib, httpx. No ORM, no pydantic models beyond what FastAPI needs, no extra packages without a ledger item saying so.
