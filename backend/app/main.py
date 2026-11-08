@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import secrets
 import threading
 import time
@@ -216,18 +217,81 @@ def hr(hours: int = 24) -> dict:
     return {"points": [{"t": t, "bpm": v} for t, v in s.items() if v > 0]}
 
 
-@api.post("/tags")
-def add_tag(body: dict = Body(...)) -> dict:
-    tag, note, ts = str(body.get("tag") or "").strip(), body.get("note"), body.get("ts")
-    if not 1 <= len(tag) <= 40 or not (ts is None or isinstance(ts, int)) or not (note is None or isinstance(note, str)):
-        raise HTTPException(422, "bad tag")
-    db.add_tag(ts if ts is not None else int(time.time()), tag, note or None)
+HHMM = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
+
+
+def _num(v: object, lo: float, hi: float) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and lo <= v <= hi
+
+
+def _bp_ok(v: object) -> bool:
+    m = re.fullmatch(r"(\d{2,3})/(\d{2,3})", v) if isinstance(v, str) else None
+    return bool(m) and 70 <= int(m[1]) <= 250 and 40 <= int(m[2]) <= 150
+
+
+@api.get("/journal")
+def list_journal(days: int = 30) -> dict:
+    since = _today() - timedelta(min(max(days, 1), 365) - 1)
+    return {"entries": db.journal(since.isoformat()), "kinds": list(db.KINDS)}
+
+
+@api.post("/journal")
+def add_journal(body: dict = Body(...)) -> dict:
+    kind, value, note = body.get("kind"), body.get("value"), body.get("note")
+    try:
+        d = date.fromisoformat(body.get("date"))
+    except (TypeError, ValueError):
+        raise HTTPException(422, "bad date")
+    if d > _today() or kind not in db.KINDS:
+        raise HTTPException(422, "bad date or kind")
+    if note is not None and (not isinstance(note, str) or len(note) > 200):
+        raise HTTPException(422, "bad note")
+    note = note.strip() or None if note else None
+    ok = {"medication": isinstance(value, str) and HHMM.fullmatch(value), "bp": _bp_ok(value),
+          "note": value is None and note}.get(kind, value is None)
+    if not ok:
+        raise HTTPException(422, "bad value")
+    return {"status": "ok", "id": db.add_journal(d.isoformat(), kind, value, note, int(time.time()))}
+
+
+@api.delete("/journal/{id}")
+def delete_journal(id: int) -> dict:
+    db.delete_journal(id)
     return {"status": "ok"}
 
 
-@api.get("/tags")
-def list_tags(days: int = 30) -> dict:
-    return {"tags": db.tags(int(time.time()) - min(max(days, 1), 365) * 86400)}
+def _settings_out() -> dict:
+    s = db.settings()
+    return {"step_goal": float(s["step_goal"]), "sleep_need_min": float(s["sleep_need_min"]),
+            "medication_started": s["medication_started"], "medication_time": s["medication_time"],
+            "medication_window_h": float(s["medication_window_h"])}
+
+
+def _started_ok(v: object) -> bool:
+    if v == "":
+        return True
+    try:
+        return date.fromisoformat(v) <= _today()
+    except (TypeError, ValueError):
+        return False
+
+
+SETTINGS = {"step_goal": lambda v: _num(v, 1000, 100000), "sleep_need_min": lambda v: _num(v, 240, 720),
+            "medication_started": _started_ok, "medication_time": lambda v: isinstance(v, str) and HHMM.fullmatch(v),
+            "medication_window_h": lambda v: _num(v, 1, 24)}
+
+
+@api.get("/settings")
+def get_settings() -> dict:
+    return _settings_out()
+
+
+@api.patch("/settings")
+def patch_settings(body: dict = Body(...)) -> dict:
+    if not body or any(k not in SETTINGS or not SETTINGS[k](v) for k, v in body.items()):
+        raise HTTPException(422, "bad settings")
+    db.set_settings({k: str(v) for k, v in body.items()})
+    return _settings_out()
 
 
 @api.get("/notifications/pending")
