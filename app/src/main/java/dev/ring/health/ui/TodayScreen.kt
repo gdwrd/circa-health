@@ -1,6 +1,8 @@
 package dev.ring.health.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ExperimentalSharedTransitionApi
@@ -147,6 +149,7 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
     val ctx = LocalContext.current
     var data by remember { mutableStateOf<JsonObject?>(null) }
     var open by remember { mutableStateOf<String?>(null) }
+    BackHandler(open != null) { open = null }
     // The tab leaves composition when deselected, so this also reloads on reselect.
     var journal by remember { mutableStateOf<List<Entry>>(emptyList()) }
     var medTime by remember { mutableStateOf("08:00") }
@@ -291,7 +294,8 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
 @Composable
 private fun SmallRings(d: JsonObject, open: String?, onOpen: (String?) -> Unit, medStarted: String?) {
     // Only the first rings count up; the copies made by expand/collapse start at the score.
-    var shown by remember { mutableStateOf(false) }
+    // Saveable: the lazy item is disposed when scrolled away and must not count up from 0 again.
+    var shown by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) { shown = true }
     if (LocalReduceMotion.current) return SmallRingsContent(d, open, onOpen, medStarted, !shown, null, null)
     SharedTransitionLayout {

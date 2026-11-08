@@ -379,11 +379,14 @@ private fun MedicationCard(med: JsonObject?, started: String, rhr: List<JsonObje
                 }
                 MED_ROWS.forEach { m ->
                     val e = all[m] ?: return@forEach
-                    val d = e["delta"].num() ?: 0.0
+                    val w = e["with"].num()
+                    val wo = e["without"].num()
+                    // From the displayed (whole-number) values, so "65 / 65" never reads "+1".
+                    val d = if (w != null && wo != null) (w.roundToInt() - wo.roundToInt()).toDouble() else e["delta"].num() ?: 0.0
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(METRIC[m]?.first ?: m, style = AppType.subhead, modifier = Modifier.weight(1f))
-                        Text(e["with"].num()?.let { metricValue(m, it) } ?: "—", style = AppType.subhead, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.End, modifier = Modifier.width(76.dp))
-                        Text(e["without"].num()?.let { metricValue(m, it) } ?: "—", style = AppType.subhead, color = c.secondaryLabel, textAlign = TextAlign.End, modifier = Modifier.width(76.dp))
+                        Text(w?.let { metricValue(m, it) } ?: "—", style = AppType.subhead, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.End, modifier = Modifier.width(76.dp))
+                        Text(wo?.let { metricValue(m, it) } ?: "—", style = AppType.subhead, color = c.secondaryLabel, textAlign = TextAlign.End, modifier = Modifier.width(76.dp))
                         Text(metricDelta(m, d, null), style = AppType.subhead, color = effectColor(m, d), textAlign = TextAlign.End, modifier = Modifier.width(76.dp))
                     }
                 }
