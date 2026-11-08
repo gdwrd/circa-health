@@ -131,6 +131,7 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
     var medStarted by remember { mutableStateOf<String?>(null) }
     var sheet by remember { mutableStateOf(false) }
     var sheetDay by remember { mutableStateOf<Int?>(null) } // 0 Yesterday, 1 Today; null = by time of day
+    var insights by remember { mutableStateOf<JsonObject?>(null) }
     LaunchedEffect(journalDate) {
         if (journalDate == null) return@LaunchedEffect
         sheetDay = if (journalDate == LocalDate.now().toString()) 1 else 0
@@ -143,6 +144,7 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
         data = Api.today(ctx).obj()
         loadJournal()
         Api.settings(ctx)?.let { s -> s["medication_time"].str()?.let { medTime = it }; medStarted = s["medication_started"].str() }
+        insights = Api.insights(ctx).obj()?.get("kinds").obj()
     }
 
     val c = AppTheme.colors
@@ -249,6 +251,9 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
                 }
             }
         }
+        // Kinds the user has logged at least once; never-logged kinds would all read "log 3 more days".
+        val kinds = insights?.let { k -> AFFECT_KINDS.mapNotNull { kind -> k[kind].obj()?.takeIf { it["status"].str() == "ok" || (it["n_with"].num() ?: 0.0) > 0 }?.let { kind to it } } }
+        if (!kinds.isNullOrEmpty()) item { WhatAffectsYou(kinds) }
     }
     if (sheet) CheckInSheet(journal, medTime, scope, sheetDay, ::loadJournal) { sheet = false; sheetDay = null }
 }
@@ -619,6 +624,123 @@ private fun Contributor(name: String, value: Double?, color: Color, info: String
         val bar = RoundedCornerShape(2.dp)
         Box(Modifier.padding(top = AppSpace.s).fillMaxWidth().height(4.dp).clip(bar).background(color.copy(alpha = 0.2f))) {
             if (value != null) Box(Modifier.fillMaxWidth((value / 100).coerceIn(0.0, 1.0).toFloat()).height(4.dp).clip(bar).background(color))
+        }
+    }
+}
+
+private val AFFECT_KINDS = listOf("alcohol", "caffeine_late", "late_meal", "workout", "stress", "travel", "sick")
+
+private val AFTER = mapOf(
+    "alcohol" to "after alcohol", "caffeine_late" to "after late caffeine", "late_meal" to "after a late meal",
+    "workout" to "after a workout", "stress" to "after a stressful day", "travel" to "after travel",
+)
+
+/** Short name (pills, tables) and sentence name per insight metric. */
+internal val METRIC = mapOf(
+    "sleep_score" to ("Sleep score" to "sleep score"), "deep_min" to ("Deep" to "deep sleep"), "rem_min" to ("REM" to "REM sleep"),
+    "hrv" to ("HRV" to "HRV"), "rhr" to ("Resting HR" to "resting heart rate"), "total_min" to ("Time asleep" to "time asleep"),
+    "awake_min" to ("Awake" to "time awake"), "bed_start" to ("Bedtime" to "bedtime"), "strain" to ("Strain" to "strain index"),
+    "day_hr" to ("Daytime HR" to "daytime heart rate"),
+)
+
+// 1 = higher is better, -1 = lower is better; bedtime is neither.
+private val BETTER = mapOf("sleep_score" to 1, "deep_min" to 1, "rem_min" to 1, "hrv" to 1, "total_min" to 1, "rhr" to -1, "awake_min" to -1, "strain" to -1, "day_hr" to -1)
+
+/** Pill / change colour: good, bad or neutral for this metric. */
+@Composable
+internal fun effectColor(metric: String, delta: Double): Color {
+    val c = AppTheme.colors
+    val dir = if (kotlin.math.abs(delta) < (if (metric == "strain") 0.05 else 0.5)) 0.0 else (BETTER[metric] ?: 0) * delta
+    return if (dir > 0) c.signalCalm else if (dir < 0) c.signalHigh else c.secondaryLabel
+}
+
+/** bed_start is minutes from midnight (23:30 = -30). */
+internal fun bedClock(m: Double): String = ((m.roundToInt() % 1440 + 1440) % 1440).let { "%02d:%02d".format(it / 60, it % 60) }
+
+/** A value in its unit: "52 min", "7h 12m", "23:40", "58 bpm", "78". */
+internal fun metricValue(metric: String, v: Double): String = when (metric) {
+    "bed_start" -> bedClock(v)
+    "total_min" -> v.roundToInt().let { "${it / 60}h ${it % 60}m" }
+    "strain" -> "%.1f".format(v)
+    "sleep_score" -> v.roundToInt().toString()
+    "hrv" -> "${v.roundToInt()} ms"
+    "rhr", "day_hr" -> "${v.roundToInt()} bpm"
+    else -> "${v.roundToInt()} min"
+}
+
+/** Signed change: "−25 min", "+3 bpm"; HRV as a percent when [pct] is given. */
+internal fun metricDelta(metric: String, d: Double, pct: Double?): String {
+    val a = kotlin.math.abs(d)
+    val body = when {
+        metric == "hrv" && pct != null -> "${kotlin.math.abs(pct).roundToInt()} %"
+        metric == "strain" -> "%.1f".format(a)
+        metric == "sleep_score" -> "${a.roundToInt()} pts"
+        metric == "bed_start" || metric == "total_min" -> "${a.roundToInt()} min"
+        else -> metricValue(metric, a)
+    }
+    return if (body.startsWith("0 ") || body == "0.0") body else (if (d < 0) "−" else "+") + body // no "−0 ms"
+}
+
+private fun sentence(kind: String, e: JsonObject): String? {
+    val m = e["metric"].str() ?: return null
+    val w = e["with"].num() ?: return null
+    val wo = e["without"].num() ?: return null
+    if (kind == "sick") return "Around days you logged feeling unwell, your strain index averaged ${metricValue(m, w)} vs ${metricValue(m, wo)} on other nights."
+    val on = "On nights ${AFTER[kind]}"
+    return if (m == "bed_start") "$on you tended to fall asleep at ${bedClock(w)} vs ${bedClock(wo)}."
+    else "$on your ${METRIC[m]?.second ?: m} averaged ${metricValue(m, w)} vs ${metricValue(m, wo)}."
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun WhatAffectsYou(kinds: List<Pair<String, JsonObject>>) {
+    val c = AppTheme.colors
+    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+        Text("What affects you", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
+        InsetCard {
+            kinds.forEachIndexed { i, (kind, k) ->
+                if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
+                val ok = k["status"].str() == "ok"
+                var open by remember { mutableStateOf(false) }
+                val nWith = k["n_with"].num()?.roundToInt() ?: 0
+                val name = if (kind == "sick") "Feeling unwell" else KIND_LABEL[kind] ?: kind
+                Column(Modifier.fillMaxWidth().clickable(enabled = ok) { open = !open }.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                    if (!ok) {
+                        val need = 3 - nWith
+                        val wo = 3 - (k["n_without"].num()?.roundToInt() ?: 0)
+                        Text(
+                            "$name · " + if (need > 0) "log $need more ${if (need == 1) "day" else "days"} to see the effect." else "needs $wo more ${if (wo == 1) "day" else "days"} without it.",
+                            style = AppType.subhead, color = c.secondaryLabel,
+                        )
+                        return@Column
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(name, style = AppType.headline)
+                        Text(" · $nWith ${if (kind == "sick") "days" else "nights"}", style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.weight(1f))
+                        Text(if (open) "Less" else "More", style = AppType.footnote, color = c.tint)
+                    }
+                    val top = (k["top"] as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
+                    if (top.isEmpty()) Text("No clear effect so far.", style = AppType.subhead, color = c.secondaryLabel)
+                    else FlowRow(horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                        top.forEach { e ->
+                            val m = e["metric"].str().orEmpty()
+                            val d = e["delta"].num() ?: 0.0
+                            val col = effectColor(m, d)
+                            Text(
+                                "${METRIC[m]?.first ?: m} ${metricDelta(m, d, e["pct"].num())}",
+                                style = AppType.footnote.copy(fontWeight = FontWeight.SemiBold), color = col,
+                                modifier = Modifier.clip(RoundedCornerShape(50)).background(col.copy(alpha = 0.14f)).padding(horizontal = 10.dp, vertical = 4.dp),
+                            )
+                        }
+                    }
+                    AnimatedVisibility(open) {
+                        Column(verticalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
+                            (k["all"] as? JsonArray)?.mapNotNull { e -> e.obj()?.let { sentence(kind, it) } }?.forEach { Text(it, style = AppType.subhead) }
+                            Text("Averages from your own nights. Other things may play a part.", style = AppType.footnote, color = c.secondaryLabel)
+                        }
+                    }
+                }
+            }
         }
     }
 }

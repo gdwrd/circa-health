@@ -51,6 +51,7 @@ object Api {
     suspend fun trends(ctx: Context, metric: String, days: Int) = get(ctx, "/trends?metric=$metric&days=$days")
     suspend fun hr(ctx: Context, hours: Int) = get(ctx, "/hr?hours=$hours")
     suspend fun journal(ctx: Context, days: Int) = get(ctx, "/journal?days=$days")
+    suspend fun insights(ctx: Context) = get(ctx, "/journal/insights")
     suspend fun settings(ctx: Context) = get(ctx, "/settings") as? JsonObject
     suspend fun notifications(ctx: Context) = get(ctx, "/notifications/pending")
 

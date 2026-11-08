@@ -29,6 +29,11 @@ def test_effect() -> None:
     assert insights.effect([1, 2], [1, 2, 3]) is None
 
 
+def test_bed_start_floor_not_strong() -> None:
+    e = insights.effect([-28.0] * 3, [-30.0] * 5, insights.FLOORS["bed_start"])
+    assert e["delta"] == 2.0 and not e["strong"]
+
+
 def test_night_kind_pairs_with_next_night_and_learning() -> None:
     alc = [TODAY - timedelta(i) for i in (3, 6, 9)]
     rows = [row(TODAY - timedelta(i), hrv=30 if TODAY - timedelta(i + 1) in alc else 50,

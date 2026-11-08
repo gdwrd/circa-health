@@ -71,9 +71,21 @@ import java.util.Locale
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.roundToInt
+import android.graphics.Paint
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.text.font.FontWeight
+import com.patrykandpatrick.vico.core.cartesian.CartesianDrawingContext
+import com.patrykandpatrick.vico.core.cartesian.decoration.Decoration
+import kotlinx.serialization.json.contentOrNull
+import java.time.LocalTime
 
 private fun JsonElement?.obj() = this as? JsonObject
 private fun JsonElement?.num() = (this as? JsonPrimitive)?.doubleOrNull
+private fun JsonElement?.str() = (this as? JsonPrimitive)?.contentOrNull
 
 private const val SLOT_S = 300.0
 
@@ -95,12 +107,35 @@ fun HeartScreen(backend: Boolean?) {
     var rhr by remember { mutableStateOf<Trend?>(null) }
     var hrv by remember { mutableStateOf<Trend?>(null) }
     var loaded by remember { mutableStateOf(false) }
+    var doses by remember { mutableStateOf<List<Long>>(emptyList()) }
+    var windowH by remember { mutableStateOf(6.0) }
+    var medStarted by remember { mutableStateOf<String?>(null) }
+    var med by remember { mutableStateOf<JsonObject?>(null) }
+    var rhr90 by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
+    var bp by remember { mutableStateOf<List<Triple<LocalDate, Int, Int>>>(emptyList()) }
     LaunchedEffect(Unit) {
         hr = (Api.hr(ctx, 24).obj()?.get("points") as? JsonArray)
             ?.mapNotNull { o -> o.obj()?.let { p -> p["t"].num()?.let { t -> p["bpm"].num()?.let { t to it } } } }
             ?.sortedBy { it.first }
         rhr = trend(Api.trends(ctx, "rhr", 30))
         hrv = trend(Api.trends(ctx, "hrv", 30))
+        Api.settings(ctx)?.let { s ->
+            s["medication_window_h"].num()?.let { windowH = it }
+            medStarted = s["medication_started"].str()?.takeIf { it.isNotBlank() }
+        }
+        val es = (Api.journal(ctx, 30).obj()?.get("entries") as? JsonArray)?.mapNotNull { it.obj() }.orEmpty().reversed() // oldest first
+        doses = es.filter { it["kind"].str() == "medication" }.mapNotNull {
+            runCatching { LocalDate.parse(it["date"].str()).atTime(LocalTime.parse(it["value"].str())).atZone(ZoneId.systemDefault()).toEpochSecond() }.getOrNull()
+        }
+        // One point per day (the last reading): a line series needs distinct x values.
+        bp = es.filter { it["kind"].str() == "bp" }.mapNotNull { e ->
+            val v = e["value"].str()?.split("/")?.mapNotNull { it.toIntOrNull() }
+            if (v?.size == 2) Triple(LocalDate.parse(e["date"].str()), v[0], v[1]) else null
+        }.associateBy { it.first }.values.toList()
+        if (medStarted != null) {
+            med = Api.insights(ctx).obj()?.get("kinds").obj()?.get("medication").obj()
+            rhr90 = (Api.trends(ctx, "rhr", 90).obj()?.get("points") as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
+        }
         loaded = true
     }
 
@@ -129,14 +164,29 @@ fun HeartScreen(backend: Boolean?) {
                         .let { z -> generateSequence(z.plusHours(1)) { it.plusHours(1) }.first { it.hour % 6 == 0 } }
                     val offset = ceil((boundary.toEpochSecond() - t0) / SLOT_S).toInt()
                     val fmt = SimpleDateFormat("h a", Locale.getDefault())
+                    // Doses whose active window reaches into the chart, in chart x (5 min slots).
+                    val now = System.currentTimeMillis() / 1000
+                    val shown = doses.filter { it <= now && it + windowH * 3600 > t0 }
+                    val windows = shown.map { (it - t0) / SLOT_S to (it + windowH * 3600 - t0) / SLOT_S }
                     Chart(
                         listOf(pts.map { (it.first - t0) / SLOT_S to it.second }), c.heart, true, 72, offset,
+                        decorations = if (windows.isEmpty()) emptyList() else listOf(DoseWindows(windows, c.heart.toArgb())),
                     ) { x -> fmt.format(Date(((t0 + x * SLOT_S) * 1000).toLong())) }
+                    val hm = DateTimeFormatter.ofPattern("HH:mm")
+                    shown.forEach { t ->
+                        val z = { s: Double -> Instant.ofEpochSecond(s.toLong()).atZone(ZoneId.systemDefault()).format(hm) }
+                        Text(
+                            "Dose ${z(t.toDouble())} · active until ~${z(t + windowH * 3600)}", style = AppType.footnote, color = c.secondaryLabel,
+                            modifier = Modifier.padding(start = AppSpace.l, bottom = AppSpace.s),
+                        )
+                    }
                 }
             }
         }
         item { TrendCard("Resting heart rate · 30 days", rhr, "bpm", c.heart) }
         item { TrendCard("Heart rate variability · 30 days", hrv, "ms", c.hrv) }
+        medStarted?.let { st -> item { MedicationCard(med, st, rhr90) } }
+        if (bp.isNotEmpty()) item { BloodPressureCard(bp) }
     }
 }
 
@@ -245,7 +295,8 @@ private fun Value(v: Double, unit: String, color: Color) {
 /** [series] 0 is the main line with a light area fill; series 1 (optional) is a wide translucent band. */
 @Composable
 private fun Chart(
-    series: List<List<Pair<Double, Double>>>, color: Color, area: Boolean, spacing: Int, offset: Int, label: (Double) -> String,
+    series: List<List<Pair<Double, Double>>>, color: Color, area: Boolean, spacing: Int, offset: Int,
+    second: Color? = null, decorations: List<Decoration> = emptyList(), label: (Double) -> String,
 ) {
     val c = AppTheme.colors
     val producer = remember { CartesianChartModelProducer() }
@@ -259,7 +310,9 @@ private fun Chart(
         areaFill = if (area) LineCartesianLayer.AreaFill.single(fill(color.copy(alpha = 0.15f))) else null,
         pointConnector = LineCartesianLayer.PointConnector.cubic(),
     )
-    val band = LineCartesianLayer.rememberLine(
+    val band = if (second != null) LineCartesianLayer.rememberLine(
+        fill = LineCartesianLayer.LineFill.single(fill(second)), pointConnector = LineCartesianLayer.PointConnector.cubic(),
+    ) else LineCartesianLayer.rememberLine(
         fill = LineCartesianLayer.LineFill.single(fill(color.copy(alpha = 0.18f))),
         stroke = LineCartesianLayer.LineStroke.Continuous(thicknessDp = 22f),
     )
@@ -286,9 +339,122 @@ private fun Chart(
                 valueFormatter = CartesianValueFormatter { _, x, _ -> label(x) },
                 itemPlacer = HorizontalAxis.ItemPlacer.aligned({ spacing }, { offset }),
             ),
+            decorations = decorations,
         ),
         producer,
         Modifier.fillMaxWidth().height(180.dp).padding(AppSpace.l),
         zoomState = rememberVicoZoomState(zoomEnabled = false, initialZoom = remember { Zoom.Content }),
     )
+}
+
+/** Active windows shaded in the heart colour at 8 % with a line at each dose; [windows] are (dose, end) in chart x. */
+private class DoseWindows(private val windows: List<Pair<Double, Double>>, private val color: Int) : Decoration {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    override fun drawUnderLayers(context: CartesianDrawingContext) = with(context) {
+        val b = layerBounds
+        fun px(x: Double) = b.left + layerDimensions.startPadding + ((x - ranges.minX) / ranges.xStep).toFloat() * layerDimensions.xSpacing - scroll
+        windows.forEach { (dose, end) ->
+            paint.color = color
+            paint.alpha = 20
+            canvas.drawRect(px(dose).coerceIn(b.left, b.right), b.top, px(end).coerceIn(b.left, b.right), b.bottom, paint)
+            if (dose >= ranges.minX && dose <= ranges.maxX) {
+                paint.alpha = 200
+                paint.strokeWidth = dpToPx(1.5f)
+                canvas.drawLine(px(dose), b.top, px(dose), b.bottom, paint)
+            }
+        }
+    }
+}
+
+private val MED_ROWS = listOf("day_hr", "rhr", "hrv", "bed_start", "total_min")
+
+@Composable
+private fun MedicationCard(med: JsonObject?, started: String, rhr: List<JsonObject>) {
+    val c = AppTheme.colors
+    val since = runCatching { LocalDate.parse(started).format(DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())) }.getOrDefault(started)
+    val all = (med?.get("all") as? JsonArray)?.mapNotNull { it.obj() }?.associateBy { it["metric"].str() }.orEmpty()
+    val nWith = med?.get("n_with").num()?.roundToInt() ?: 0
+    val nWithout = med?.get("n_without").num()?.roundToInt() ?: 0
+    Section("Medication") {
+        Column(Modifier.fillMaxWidth().padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+            if (med?.get("status").str() == "ok" && all.isNotEmpty()) {
+                Text("Days with medication vs without", style = AppType.headline)
+                Row {
+                    Spacer(Modifier.weight(1f))
+                    listOf("With", "Without", "Change").forEach {
+                        Text(it, style = AppType.footnote, color = c.secondaryLabel, textAlign = TextAlign.End, modifier = Modifier.width(64.dp))
+                    }
+                }
+                MED_ROWS.forEach { m ->
+                    val e = all[m] ?: return@forEach
+                    val d = e["delta"].num() ?: 0.0
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(METRIC[m]?.first ?: m, style = AppType.subhead, modifier = Modifier.weight(1f))
+                        Text(e["with"].num()?.let { metricValue(m, it) } ?: "—", style = AppType.subhead, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.End, modifier = Modifier.width(64.dp))
+                        Text(e["without"].num()?.let { metricValue(m, it) } ?: "—", style = AppType.subhead, color = c.secondaryLabel, textAlign = TextAlign.End, modifier = Modifier.width(64.dp))
+                        Text(metricDelta(m, d, null), style = AppType.subhead, color = effectColor(m, d), textAlign = TextAlign.End, modifier = Modifier.width(64.dp))
+                    }
+                }
+                Text("$nWith days with a dose, $nWithout without, since $since.", style = AppType.footnote, color = c.secondaryLabel)
+                val bt = med?.get("by_time").obj()
+                val later = (bt?.get("all") as? JsonArray)?.mapNotNull { it.obj() }?.firstOrNull { it["metric"].str() == "bed_start" }?.get("delta").num()
+                if (bt?.get("status").str() == "ok" && later != null && kotlin.math.abs(later) >= 5) Text(
+                    "Doses after ${bt?.get("split").str()}: you tended to fall asleep ${kotlin.math.abs(later).roundToInt()} min ${if (later > 0) "later" else "earlier"}.",
+                    style = AppType.subhead,
+                )
+            } else {
+                val before = rhr.lastOrNull { (it["date"].str() ?: "") < started && it["baseline"].num() != null }?.get("baseline").num()
+                val after = rhr.lastOrNull { it["baseline"].num() != null }?.takeIf { (it["date"].str() ?: "") >= started }?.get("baseline").num()
+                Text(
+                    if (before != null && after != null) "Since you started ($since): resting HR ${before.roundToInt()} → ${after.roundToInt()} bpm" else "Since you started ($since)",
+                    style = AppType.headline,
+                )
+                Text(
+                    "Days with and without a dose are compared once there are 3 of each. So far: $nWith with, $nWithout without.",
+                    style = AppType.subhead, color = c.secondaryLabel,
+                )
+            }
+            Text("Averages from your own data. Other things may play a part. Not medical advice.", style = AppType.footnote, color = c.secondaryLabel)
+        }
+    }
+}
+
+@Composable
+private fun BloodPressureCard(pts: List<Triple<LocalDate, Int, Int>>) {
+    val c = AppTheme.colors
+    val last = pts.last()
+    val fmt = DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
+    Section("Blood pressure · 30 days") {
+        Text(
+            "Latest · ${last.first.format(fmt)}", style = AppType.footnote, color = c.secondaryLabel,
+            modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.l),
+        )
+        Text(
+            buildAnnotatedString {
+                append("${last.second}/${last.third}")
+                withStyle(SpanStyle(fontSize = 17.sp, color = c.secondaryLabel)) { append(" mmHg") }
+            },
+            style = AppType.largeTitle, modifier = Modifier.padding(start = AppSpace.l),
+        )
+        Row(Modifier.padding(start = AppSpace.l), horizontalArrangement = Arrangement.spacedBy(AppSpace.m), verticalAlignment = Alignment.CenterVertically) {
+            listOf("Systolic" to c.heart, "Diastolic" to c.hrv).forEach { (name, col) ->
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
+                    Box(Modifier.size(8.dp).clip(CircleShape).background(col))
+                    Text(name, style = AppType.footnote, color = c.secondaryLabel)
+                }
+            }
+        }
+        val first = pts.first().first
+        if (pts.size < 2) Text("Log another reading to see the trend.", style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(AppSpace.l))
+        else Chart(
+            listOf(pts.map { (it.first.toEpochDay() - first.toEpochDay()).toDouble() to it.second.toDouble() },
+                pts.map { (it.first.toEpochDay() - first.toEpochDay()).toDouble() to it.third.toDouble() }),
+            c.heart, false, 7, 0, second = c.hrv,
+        ) { x -> first.plusDays(x.toLong()).format(fmt) }
+        Text(
+            "From the cuff readings in your journal.", style = AppType.footnote, color = c.secondaryLabel,
+            modifier = Modifier.padding(start = AppSpace.l, end = AppSpace.l, bottom = AppSpace.l),
+        )
+    }
 }

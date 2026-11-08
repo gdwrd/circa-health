@@ -10,7 +10,9 @@ NIGHT = ("sleep_score", "deep_min", "rem_min", "hrv", "rhr", "total_min", "awake
 MED = ("day_hr", "rhr", "hrv", "bed_start", "total_min", "sleep_score")
 UNITS = {"sleep_score": "pts", "deep_min": "min", "rem_min": "min", "total_min": "min", "awake_min": "min",
          "bed_start": "min", "hrv": "ms", "rhr": "bpm", "day_hr": "bpm", "strain": "pts"}
-FLOORS = {"rhr": 1.5, "day_hr": 1.5, "hrv": 5.0, "awake_min": 10.0}  # same floors as scoring.FLOORS
+FLOORS = {"rhr": 1.5, "day_hr": 1.5, "hrv": 5.0, "awake_min": 10.0,  # same floors as scoring.FLOORS
+          # minimum spreads so near-identical values (5 min grid bed times) are never "strong"
+          "bed_start": 15.0, "total_min": 15.0, "deep_min": 5.0, "rem_min": 5.0, "sleep_score": 3.0, "strain": 5.0}
 
 
 def effect(with_: list[float], without: list[float], floor: float = 0.0) -> dict | None:
