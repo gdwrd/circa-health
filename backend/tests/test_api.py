@@ -77,6 +77,34 @@ def test_hr_drops_nonpositive_and_clamps_hours(monkeypatch) -> None:
         assert c.get("/hr").status_code == 401
 
 
+def test_day_history_routes(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "h.db"))
+    db.init()
+    seen: list[tuple[datetime, datetime]] = []
+
+    def fake(expr: str, start: datetime, end: datetime, step: str) -> list[dict]:
+        seen.append((start, end))
+        t = start.timestamp()
+        return [{"metric": {}, "values": [[t, "0"], [t + 1800, "61"]]}]
+
+    monkeypatch.setattr(vm, "query_range", fake)
+    d = date(2026, 11, 3)
+    db.save_day(d, (81, 72, 65), {"inputs": {"rhr": 52.0, "hrv": 48.0}}, {})
+    with TestClient(app) as c:
+        assert [x["bpm"] for x in c.get("/hr?date=2026-11-03&hours=1", headers=H).json()["points"]] == [61.0]
+        assert seen[-1] == (vm.midnight(d), vm.midnight(d + timedelta(1)))
+        c.get(f"/hr?date={date.today() + timedelta(1)}", headers=H)  # future day: capped at now
+        assert seen[-1][1] <= datetime.now(vm.tz()) and seen[-1][1] < vm.midnight(date.today() + timedelta(2))
+        assert c.get("/hr?date=bogus", headers=H).status_code == 422
+        st = c.get("/stress?date=2026-11-03", headers=H).json()
+        assert st["date"] == "2026-11-03" and [p["v"] for p in st["points"]] == [61.0]
+        assert c.get("/stress?date=bogus", headers=H).status_code == 422
+        j = c.get("/today?date=2026-11-03", headers=H).json()
+        assert j["date"] == "2026-11-03" and j["sleep"]["score"] == 81 and j["readiness"]["score"] == 72
+        assert j["inputs"] == {"rhr": 52.0, "hrv": 48.0}
+        assert c.get("/today?date=bogus", headers=H).status_code == 422
+
+
 def test_night_without_end_ts(monkeypatch) -> None:
     """Sessions pushed by app v1.0 carry only *_min series; the night still resolves."""
     d = date.today()

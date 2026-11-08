@@ -207,12 +207,19 @@ def _vitals() -> dict:
     return out
 
 
+def _day(day: str | None) -> date:
+    try:
+        return date.fromisoformat(day) if day else _today()
+    except ValueError:
+        raise HTTPException(422, "bad date")
+
+
 @api.get("/today")
-def today() -> dict:
-    d = _today()
+def today(day: str | None = Query(None, alias="date")) -> dict:
+    d = _day(day)
     rows = db.days(d - timedelta(13), d)
     n = sum(1 for r in rows if r["inputs"].get("sleep_min") is not None)
-    row = next((r for r in rows if r["date"] == d), None) or {"c": {}}
+    row = next((r for r in rows if r["date"] == d), None) or {"c": {}, "inputs": {}}
     sig = row["c"].get("signals") or {"index": None, "level": None, "flags": {}, "streak": 0, "reason": "baseline"}
     return {
         "status": "ok" if n >= 5 else "learning", "date": d.isoformat(), "baseline_days": f"{n}/14",
@@ -222,7 +229,8 @@ def today() -> dict:
                                          [r["readiness_score"] for r in rows]),
         "vitals": _vitals(),
         "wear": row["c"].get("wear"),
-        "signals": {**sig, "status": "learning" if sig["reason"] else "ok", "explain": notify.explain(d)},
+        "signals": {**sig, "status": "learning" if sig["reason"] else "ok", "explain": notify.explain(_today())},
+        "inputs": row["inputs"],
     }
 
 
@@ -298,10 +306,21 @@ def week(end: str | None = None) -> dict:
 
 
 @api.get("/hr")
-def hr(hours: int = 24) -> dict:
+def hr(hours: int = 24, day: str | None = Query(None, alias="date")) -> dict:
     now = datetime.now(vm.tz())
-    s = vm.series("biometric_hr_bpm", now - timedelta(hours=min(max(hours, 1), 48)), now, "5m")
+    if day:
+        d = _day(day)
+        s = vm.series("biometric_hr_bpm", vm.midnight(d), min(vm.midnight(d + timedelta(1)), now), "5m")
+    else:
+        s = vm.series("biometric_hr_bpm", now - timedelta(hours=min(max(hours, 1), 48)), now, "5m")
     return {"points": [{"t": t, "bpm": v} for t, v in s.items() if v > 0]}
+
+
+@api.get("/stress")
+def stress(day: str | None = Query(None, alias="date")) -> dict:
+    d = _day(day)
+    s = vm.series("biometric_stress", vm.midnight(d), min(vm.midnight(d + timedelta(1)), datetime.now(vm.tz())), "30m")
+    return {"date": d.isoformat(), "points": [{"t": t, "v": v} for t, v in s.items() if v > 0]}
 
 
 HHMM = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
