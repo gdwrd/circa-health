@@ -445,3 +445,79 @@ def test_tonight_across_midnight_fires_once(monkeypatch) -> None:
     at(monkeypatch, 0, 5, day=D + timedelta(1))
     notify.evaluate(set())
     assert bed() == [("bedtime_soon", "Time for bed", "Lights out by 00:25 — 7 h 35 min before your 08:00 alarm.")]
+
+
+def screen(h: int, m: int, v: float = 1.0, day: date = D) -> None:
+    load({"biometric_screen_on": {datetime(day.year, day.month, day.day, h, m).timestamp(): v}})
+
+
+def up() -> list[tuple[str, str]]:
+    return [(n["title"], n["body"]) for n in notify.pending() if n["kind"] == "stillup"]
+
+
+def test_stillup_fires_once_fallback_body(monkeypatch) -> None:
+    """Wake 07:00 → in bed by 23:15, window opens 23:35."""
+    db.set_settings({"wake_weekday": "07:00"})
+    screen(23, 25)
+    at(monkeypatch, 23, 30)  # before in_bed_by + 20 min
+    notify.evaluate(set())
+    assert up() == []
+    screen(23, 40)
+    at(monkeypatch, 23, 45)
+    notify.evaluate(set())
+    at(monkeypatch, 23, 55)
+    notify.evaluate(set())
+    assert up() == [("Still up", "Put the phone down for a better night.")]
+
+
+def test_stillup_window_ends_at_three(monkeypatch) -> None:
+    db.set_settings({"wake_weekday": "07:00"})
+    n = D + timedelta(1)
+    screen(2, 50, day=n)
+    at(monkeypatch, 3, 0, day=n)
+    notify.evaluate(set())
+    assert up() == []
+    at(monkeypatch, 2, 55, day=n)
+    notify.evaluate(set())
+    assert len(up()) == 1
+
+
+def test_stillup_needs_recent_screen_on(monkeypatch) -> None:
+    db.set_settings({"wake_weekday": "07:00"})
+    screen(23, 40, 0.0)
+    at(monkeypatch, 23, 45)
+    notify.evaluate(set())
+    assert up() == []
+    screen(23, 20, 1.0)  # older than 20 min at 23:45
+    notify.evaluate(set())
+    assert up() == []
+
+
+def test_stillup_not_when_asleep(monkeypatch) -> None:
+    db.set_settings({"wake_weekday": "07:00"})
+    s = datetime(2026, 11, 9, 23, 30).timestamp()
+    db.save_day(D + timedelta(1), (None, None, None), {"session": {"start": s, "end": s + 600}}, {})
+    screen(23, 40)
+    at(monkeypatch, 23, 45)
+    notify.evaluate(set())
+    assert up() == []
+
+
+def test_stillup_insight_body_and_muted(monkeypatch) -> None:
+    db.set_settings({"wake_weekday": "07:00"})
+    for i in range(1, 8):  # evenings D-7..D-1; phone in bed on 3 of them → bed 00:30 vs 23:00
+        e, w = D - timedelta(i), D - timedelta(i - 1)
+        late = i <= 3
+        if late:
+            db.add_journal(e.isoformat(), "phone_in_bed", "30", None, 1)
+        s = datetime(w.year, w.month, w.day, 0, 30) if late else datetime(e.year, e.month, e.day, 23, 0)
+        db.save_day(w, (None, None, None), {"session": {"start": s.timestamp(), "end": s.timestamp() + 28800, "deep_min": 60,
+                    "rem_min": 90, "total_min": 450, "awake_min": 20}}, {})
+    screen(23, 40)
+    at(monkeypatch, 23, 45)
+    db.set_settings({"muted": "stillup"})
+    notify.evaluate(set())
+    assert up() == []
+    db.set_settings({"muted": ""})
+    notify.evaluate(set())
+    assert up() == [("Still up", "Nights with 20+ min of phone in bed: asleep 90 min later.")]

@@ -4,7 +4,7 @@ from contextlib import closing
 from datetime import date, datetime, timedelta
 from statistics import mean, median
 
-from . import cardio, db, samples, scoring
+from . import cardio, db, insights, samples, scoring
 
 log = logging.getLogger("ring")
 
@@ -129,6 +129,29 @@ def _bedtime(now: datetime, dates: set[date]) -> None:
         title, body = "Bedtime soon", f"Your usual bedtime is {target:%H:%M}."
     if target - timedelta(minutes=30) <= now < target:
         _add("bedtime", title, body, now)
+
+
+def _stillup(now: datetime, dates: set[date]) -> None:
+    """In bed by + 20 min until 03:00, phone screen on within 20 min, no session yet; once per evening."""
+    noon = samples.midnight(now.date()) + timedelta(hours=12)
+    if now < noon:
+        noon -= timedelta(1)
+    p = tonight(noon.date())
+    if not p or not noon + timedelta(minutes=p["in_bed_by_min"] + 20) <= now < noon + timedelta(hours=15):
+        return
+    scr = list(samples.raw("biometric_screen_on", now - timedelta(minutes=20), now).values())
+    if not scr or scr[-1] != 1.0 or _fired("stillup", now, noon):
+        return
+    if any(r["c"].get("session") and r["c"]["session"]["start"] >= noon.timestamp()
+           for r in db.days(noon.date(), noon.date() + timedelta(1))):
+        return
+    start = noon.date() - timedelta(90)
+    ins = insights.kinds(db.days(start, noon.date()), db.journal(start.isoformat()), noon.date(), {},
+                         db.settings()["medication_started"], db.breaths(start, noon.date()))["phone_in_bed"]
+    later = next((e["delta"] for e in ins.get("all", []) if e["metric"] == "bed_start"), 0)
+    body = (f"Nights with 20+ min of phone in bed: asleep {round(later)} min later." if round(later) > 0
+            else "Put the phone down for a better night.")
+    _add("stillup", "Still up", body, now)
 
 
 def _inactivity(now: datetime, dates: set[date]) -> None:
@@ -257,7 +280,7 @@ def _strain(now: datetime, dates: set[date]) -> None:
     _add("strain", "Your body may be under strain", body, now)
 
 
-KINDS = ("readiness", "bedtime", "bedtime_soon", "inactivity", "strain", "checkin", "weekly", "morning", "monthly")
+KINDS = ("readiness", "bedtime", "bedtime_soon", "inactivity", "strain", "checkin", "weekly", "morning", "monthly", "stillup")
 
 
 def evaluate(dates: set[date]) -> None:
@@ -265,7 +288,7 @@ def evaluate(dates: set[date]) -> None:
     muted = set(db.settings()["muted"].split(","))
     for rule, kind in ((_readiness, "readiness"), (_bedtime, "bedtime"), (_inactivity, "inactivity"),
                        (_weekly, "weekly"), (_strain, "strain"), (_checkin, "checkin"), (_morning, "morning"),
-                       (_monthly, "monthly")):
+                       (_monthly, "monthly"), (_stillup, "stillup")):
         if kind in muted:
             continue
         try:

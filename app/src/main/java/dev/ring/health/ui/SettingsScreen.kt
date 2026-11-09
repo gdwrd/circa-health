@@ -472,7 +472,7 @@ private fun lowStepLabel(k: String?) = if (k == "ride") "Rides" else "Workouts"
 
 /** Backend notification kinds (`/settings.muted`) in Settings order. */
 private val NOTIFY_KINDS = listOf(
-    "morning" to "Morning sleep", "readiness" to "Readiness", "bedtime" to "Wind down", "inactivity" to "Time to move",
+    "morning" to "Morning sleep", "readiness" to "Readiness", "bedtime" to "Wind down", "stillup" to "Still up", "inactivity" to "Time to move",
     "strain" to "Body signals", "checkin" to "Journal check-in", "weekly" to "Your week", "monthly" to "Your month",
 )
 
