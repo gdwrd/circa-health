@@ -1,58 +1,40 @@
+import time
 from datetime import date, datetime, timedelta
 
-import httpx
 from fastapi.testclient import TestClient
 
-from app import cardio, db, main, scoring, vm
+from app import cardio, db, main, scoring, samples
 from app.main import app
+from conftest import load
 
 H = {"Authorization": "Bearer secret"}
-STEP = {"5m": 300, "30m": 1800, "1h": 3600}
 
 
 def test_ingest_rescores_and_today_has_sleep_score(monkeypatch) -> None:
     monkeypatch.delenv("TZ", raising=False)
     d = date.today()
-    ss = (vm.midnight(d) - timedelta(minutes=30)).timestamp()  # 23:30 yesterday
-    es = (vm.midnight(d) + timedelta(hours=7)).timestamp()
-
-    def fake(expr: str, start: datetime, end: datetime, step: str, lookback: str | None = None) -> list[dict]:
-        out, t = [], start.timestamp()
-        while t <= end.timestamp():
-            hour = datetime.fromtimestamp(t).hour
-            first = ss <= t < ss + 300
-            v = {
-                "biometric_sleep_end_ts": es if first else None,
-                "biometric_sleep_total_min": 420 if first else None,
-                "biometric_sleep_awake_min": 30 if first else None,
-                "biometric_sleep_rem_min": 90 if first else None,
-                "biometric_sleep_deep_min": 80 if first else None,
-                "last_over_time(biometric_sleep_stage[3h])": 2 if first else None,
-                "biometric_hr_bpm": 54 if ss <= t <= es else 70,
-                "biometric_hrv_rmssd": 45,
-                "biometric_stress": 80 if hour < 10 else 30,
-                "biometric_steps": 500 if 8 <= hour <= 20 else None,
-                "biometric_calories": 90 if 8 <= hour <= 20 else None,
-                "biometric_spo2_pct": 97,
-                "ring_battery_pct": 80,
-            }[expr]
-            if v is not None:
-                out.append([t, str(v)])
-            t += STEP[step]
-        return [{"metric": {}, "values": out}] if out else []
-
-    sent: list[bytes] = []
-    monkeypatch.setattr(vm, "query_range", fake)
-    monkeypatch.setattr(vm, "forward_import", lambda b: sent.append(b) or httpx.Response(204))
+    m = samples.midnight(d).timestamp()
+    ss, es, now = m - 1800, m + 7 * 3600, time.time()  # night 23:30 yesterday - 07:00
+    hr = {t: 54.0 if t <= es else 70.0 for t in range(int(ss), int(now), 300)}
+    load({
+        "biometric_sleep_end_ts": {ss: es}, "biometric_sleep_total_min": {ss: 420.0},
+        "biometric_sleep_awake_min": {ss: 30.0}, "biometric_sleep_rem_min": {ss: 90.0},
+        "biometric_sleep_deep_min": {ss: 80.0}, "biometric_sleep_stage": {ss: 2.0},
+        "biometric_hr_bpm": hr, "biometric_hrv_rmssd": {ss + 1800 * i: 45.0 for i in range(60)},
+        "biometric_stress": {m + 1800 * i: 80.0 if i < 20 else 30.0 for i in range(48)},
+        "biometric_steps": {m + 3600 * h: 500.0 for h in range(8, 21)},
+        "biometric_calories": {m + 3600 * h: 90.0 for h in range(8, 21)},
+        "biometric_spo2_pct": {ss + 3600: 97.0}, "ring_battery_pct": {now - 60: 80.0}})
     with TestClient(app) as c:
-        body = f"biometric_steps 5 {int(datetime.now().timestamp() * 1000)}\n"
+        body = f'biometric_steps{{device="colmi_r02"}} 5 {int(now * 1000)}\n'
         assert c.post("/api/v1/import/prometheus", content=body, headers=H).status_code == 204
+        for bad in (b"", b"garbage\n", b"biometric_steps NaN 1\n", b"biometric_steps abc 1\n"):
+            assert c.post("/api/v1/import/prometheus", content=bad, headers=H).status_code == 400, bad
+        assert c.post("/api/v1/import/prometheus", content=body).status_code == 401
         j = c.get("/today", headers=H).json()
-        print(j)
         assert j["sleep"]["score"] is not None and j["status"] == "learning" and j["baseline_days"] == "1/14"
-        asleep_now = ss <= datetime.now().timestamp() <= es  # latest fake sample is "now"
-        assert j["activity"]["score"] is not None and j["vitals"]["hr"] == (54 if asleep_now else 70)
-        assert not any(b"score_sleep" in b for b in sent)  # scores live in ring.db only
+        assert j["activity"]["score"] is not None and j["vitals"]["hr"] == (54 if max(hr) <= es else 70)
+        assert j["vitals"]["battery"] == 80
         s = c.get("/sleep", headers=H).json()
         assert s["session"]["total_min"] == 420 and s["stages"]
         t = c.get("/trends?metric=sleep&days=7", headers=H).json()
@@ -61,41 +43,24 @@ def test_ingest_rescores_and_today_has_sleep_score(monkeypatch) -> None:
         assert db.days(d, d)
 
 
-def test_hr_drops_nonpositive_and_clamps_hours(monkeypatch) -> None:
-    seen: list[float] = []
-
-    def fake(expr: str, start: datetime, end: datetime, step: str, lookback: str | None = None) -> list[dict]:
-        seen.append((end - start).total_seconds() / 3600)
-        t = start.timestamp()
-        return [{"metric": {}, "values": [[t, "0"], [t + 300, "61"]]}]
-
-    monkeypatch.setattr(vm, "query_range", fake)
+def test_hr_drops_nonpositive_and_clamps_hours() -> None:
+    now = time.time()
+    load({"biometric_hr_bpm": {now - 3600: 0.0, now - 1800: 61.0, now - 47 * 3600: 62.0, now - 50 * 3600: 63.0}})
     with TestClient(app) as c:
-        p = c.get("/hr?hours=24", headers=H).json()["points"]
-        assert [x["bpm"] for x in p] == [61.0]
-        c.get("/hr?hours=999", headers=H)
-        assert seen[-1] == 48
+        assert [x["bpm"] for x in c.get("/hr?hours=24", headers=H).json()["points"]] == [61.0]
+        assert [x["bpm"] for x in c.get("/hr?hours=999", headers=H).json()["points"]] == [62.0, 61.0]  # clamped to 48 h
         assert c.get("/hr").status_code == 401
 
 
-def test_day_history_routes(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("DB_PATH", str(tmp_path / "h.db"))
-    db.init()
-    seen: list[tuple[datetime, datetime]] = []
-
-    def fake(expr: str, start: datetime, end: datetime, step: str, lookback: str | None = None) -> list[dict]:
-        seen.append((start, end))
-        t = start.timestamp()
-        return [{"metric": {}, "values": [[t, "0"], [t + 1800, "61"]]}]
-
-    monkeypatch.setattr(vm, "query_range", fake)
+def test_day_history_routes() -> None:
     d = date(2026, 11, 3)
+    m = samples.midnight(d).timestamp()
+    nxt = samples.midnight(date.today() + timedelta(1)).timestamp() + 3600
+    load({"biometric_hr_bpm": {m: 0.0, m + 1800: 61.0, nxt: 77.0}, "biometric_stress": {m: 0.0, m + 1800: 61.0}})
     db.save_day(d, (81, 72, 65), {"inputs": {"rhr": 52.0, "hrv": 48.0}}, {})
     with TestClient(app) as c:
         assert [x["bpm"] for x in c.get("/hr?date=2026-11-03&hours=1", headers=H).json()["points"]] == [61.0]
-        assert seen[-1] == (vm.midnight(d), vm.midnight(d + timedelta(1)))
-        c.get(f"/hr?date={date.today() + timedelta(1)}", headers=H)  # future day: capped at now
-        assert seen[-1][1] <= datetime.now(vm.tz()) and seen[-1][1] < vm.midnight(date.today() + timedelta(2))
+        assert c.get(f"/hr?date={date.today() + timedelta(1)}", headers=H).json()["points"] == []  # future day: capped at now
         assert c.get("/hr?date=bogus", headers=H).status_code == 422
         st = c.get("/stress?date=2026-11-03", headers=H).json()
         assert st["date"] == "2026-11-03" and [p["v"] for p in st["points"]] == [61.0]
@@ -109,57 +74,36 @@ def test_day_history_routes(tmp_path, monkeypatch) -> None:
 def test_activity_hours(monkeypatch) -> None:
     monkeypatch.delenv("TZ", raising=False)
     d = date(2026, 11, 3)
-    t9 = (vm.midnight(d) + timedelta(hours=9)).timestamp()
-    data = {"biometric_steps": {t9: 1200.0}, "biometric_calories": {t9: 80.0},
-            "biometric_distance_meters": {t9: 900.0}, "biometric_hr_bpm": {t9 - 3600: 0.0, t9 + 600: 72.0}}
-    lookbacks: dict[str, str | None] = {}
-
-    def series(e: str, s: datetime, en: datetime, st: str, lb: str | None = None) -> dict:
-        lookbacks[e] = lb
-        return {t: v for t, v in data.get(e, {}).items() if s.timestamp() <= t <= en.timestamp()}
-    monkeypatch.setattr(vm, "series", series)
+    t9 = (samples.midnight(d) + timedelta(hours=9)).timestamp()
+    load({"biometric_steps": {t9: 1200.0, t9 + 7200: 50.0}, "biometric_calories": {t9: 80.0},
+          "biometric_distance_meters": {t9: 900.0}, "biometric_hr_bpm": {t9 - 3600: 0.0, t9 + 600: 72.0}})
     with TestClient(app) as c:
         h = c.get("/activity?date=2026-11-03", headers=H).json()
-        assert lookbacks["biometric_steps"] == "59m"  # an empty hour must not repeat the hour before
         assert h["date"] == "2026-11-03" and len(h["hours"]) == 24
         assert h["hours"][9] == {"h": 9, "steps": 1200.0, "calories": 0.8, "distance_m": 900.0, "worn": True}  # raw / 100 = kcal
         assert h["hours"][8] == {"h": 8, "steps": 0.0, "calories": 0.0, "distance_m": 0.0, "worn": False}
+        assert h["hours"][10]["steps"] == 0.0 and h["hours"][11]["steps"] == 50.0  # an empty hour does not repeat the one before
         assert [x["h"] for x in h["hours"] if x["worn"]] == [9]
         assert c.get("/activity?date=bad", headers=H).status_code == 422
 
 
-def test_query_range_sends_max_lookback(monkeypatch) -> None:
-    sent: list[dict] = []
-
-    class R:
-        def raise_for_status(self) -> None: ...
-        def json(self) -> dict: return {"data": {"result": []}}
-    monkeypatch.setattr(httpx, "get", lambda url, params, timeout: sent.append(params) or R())
-    t = datetime(2026, 11, 9)
-    vm.query_range("biometric_steps", t, t, "1h", "59m")
-    vm.query_range("biometric_hr_bpm", t, t, "5m")
-    assert sent[0]["max_lookback"] == "59m" and "max_lookback" not in sent[1]
-
-
 def test_night_without_end_ts(monkeypatch) -> None:
     """Sessions pushed by app v1.0 carry only *_min series; the night still resolves."""
-    db.init()  # _sessions reads sleep_override
     d = date.today()
-    t0 = (vm.midnight(d) - timedelta(minutes=30)).timestamp()
-    monkeypatch.setattr(vm, "series", lambda expr, s, e, step, lb=None: {t0: 420.0} if expr == "biometric_sleep_total_min" else {})
+    t0 = (samples.midnight(d) - timedelta(minutes=30)).timestamp()
+    load({"biometric_sleep_total_min": {t0: 420.0}})
     n = main._sessions(d)[0]
-    assert n is not None and n["end"] == t0 + 420 * 60 and n["total_min"] == 420
+    assert n is not None and n["end"] == t0 + 420 * 60 and n["total_min"] == 420 and n["start"] == t0
 
 
 def _strain_day(monkeypatch, d: date, calm: bool = False) -> None:
     """Score d from a faked night: strained = HR falling late to 75, HRV 20 ms, 60 min awake; calm = usual values."""
-    t0 = (vm.midnight(d) - timedelta(hours=1)).timestamp()
+    t0 = (samples.midnight(d) - timedelta(hours=1)).timestamp()
     hr = [55.0] * 4 if calm else [90.0, 85.0, 80.0, 75.0]
     night = {"biometric_sleep_total_min": {t0: 420.0}, "biometric_sleep_awake_min": {t0: 20.0 if calm else 60.0},
              "biometric_hr_bpm": {t0 + i * 300: v for i, v in enumerate(hr)},
              "biometric_hrv_rmssd": {t0: 50.0 if calm else 20.0}}
-    monkeypatch.setattr(vm, "series", lambda e, s, en, st, lb=None: night.get(e, {}))
-    monkeypatch.setattr(vm, "forward_import", lambda b: httpx.Response(204))
+    load(night)
     main._score_day(d)
 
 
@@ -225,10 +169,10 @@ def test_sleep_depth_naps_regularity_spo2_wear(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("TZ", raising=False)
     db.init()
     d = date.today() - timedelta(1)
-    m = vm.midnight(d).timestamp()
+    m = samples.midnight(d).timestamp()
     t0, nap, short = m - 3600, m + 13 * 3600, m + 16 * 3600
     for i in range(1, 6):  # same 23:00-06:20 nights; 400 min + 30 min naps
-        ps = vm.midnight(d - timedelta(i)).timestamp() - 3600
+        ps = samples.midnight(d - timedelta(i)).timestamp() - 3600
         db.save_day(d - timedelta(i), (None, None, None), {"inputs": {"sleep_min": 400.0, "nap_min": 30.0},
                     "session": {"start": ps, "end": ps + 440 * 60}}, {})
     dup, ndup = t0 + 600, nap + 300
@@ -241,9 +185,7 @@ def test_sleep_depth_naps_regularity_spo2_wear(tmp_path, monkeypatch) -> None:
                                  m + 9 * 3600: 70.0, m + 10 * 3600: 0.0},
             "biometric_spo2_pct": {t0 + 300: 95.0, t0 + 3600: 88.0, t0 + 7200: 0.0, m + 10 * 3600: 99.0},
             "biometric_steps": {m + 8 * 3600: 300.0, m + 9 * 3600: 10.0, m + 12 * 3600: 0.0}}
-    monkeypatch.setattr(vm, "series", lambda e, s, en, st, lb=None: {t: v for t, v in data.get(e, {}).items()
-                                                            if s.timestamp() <= t <= en.timestamp()})
-    monkeypatch.setattr(vm, "forward_import", lambda b: httpx.Response(204))
+    load(data)
     main._score_day(d)
     c = db.days(d, d)[0]["c"]
     i, x = c["inputs"], c["sleep_extra"]
@@ -271,10 +213,8 @@ def test_spo2_null_without_samples(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DB_PATH", str(tmp_path / "o2.db"))
     db.init()
     d = date.today() - timedelta(1)
-    t0 = vm.midnight(d).timestamp() - 3600
-    monkeypatch.setattr(vm, "series", lambda e, s, en, st, lb=None: {t0: 420.0} if e == "biometric_sleep_total_min" else
-                        {t0: 0.0} if e == "biometric_spo2_pct" else {})
-    monkeypatch.setattr(vm, "forward_import", lambda b: httpx.Response(204))
+    t0 = samples.midnight(d).timestamp() - 3600
+    load({"biometric_sleep_total_min": {t0: 420.0}, "biometric_spo2_pct": {t0: 0.0}})
     main._score_day(d)
     c = db.days(d, d)[0]["c"]
     assert c["sleep_extra"]["spo2"] is None and c["inputs"]["spo2"] is None and c["sleep_extra"]["regularity"]["sd_min"] is None
@@ -315,13 +255,11 @@ def test_cardio_settings_today_and_workout_relabel(tmp_path, monkeypatch) -> Non
     monkeypatch.delenv("TZ", raising=False)
     db.init()
     d = date.today() - timedelta(1)
-    m = vm.midnight(d).timestamp()
+    m = samples.midnight(d).timestamp()
     w0 = m + 10 * 3600
     data = {"biometric_hr_bpm": {m + i * 300: 150.0 if w0 <= m + i * 300 < w0 + 1800 else 54.0 for i in range(288)},
             "biometric_steps": {w0: 200.0}}
-    monkeypatch.setattr(vm, "series", lambda e, s, en, st, lb=None: {t: v for t, v in data.get(e, {}).items()
-                                                            if s.timestamp() <= t <= en.timestamp()})
-    monkeypatch.setattr(vm, "forward_import", lambda b: httpx.Response(204))
+    load(data)
     monkeypatch.setattr(main, "_vitals", lambda: {})
 
     def prior(load: float | None) -> None:
@@ -374,13 +312,12 @@ def test_sleep_debt_and_bedtime_fields(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DB_PATH", str(tmp_path / "f2.db"))
     monkeypatch.delenv("TZ", raising=False)
     db.init()
-    monkeypatch.setattr(vm, "series", lambda e, s, en, st, lb=None: {})
     monkeypatch.setattr(main, "_vitals", lambda: {})
     d = date.today()
     asleep = {0: (400.0, 0.0), 1: (420.0, 30.0), 2: (470.0, None)}
     for i in range(14):
         q = 90.0 if i % 2 == 0 else 60.0
-        s = (vm.midnight(d - timedelta(i + 1)) + timedelta(hours=22, minutes=0 if i % 2 == 0 else 90)).timestamp()
+        s = (samples.midnight(d - timedelta(i + 1)) + timedelta(hours=22, minutes=0 if i % 2 == 0 else 90)).timestamp()
         sm, nap = asleep.get(i, (None, None))
         db.save_day(d - timedelta(i), (None, None, None),
                     {"sleep": {k: q for k in ("total", "efficiency", "restfulness", "rem", "deep")},
@@ -405,7 +342,7 @@ def test_month_shape_means_best_week_workouts_effects(tmp_path, monkeypatch) -> 
     first = date(2026, 10, 1)
     for i in range(31):  # October: sleep 70/90 alternating with alcohol nights, readiness rising, one workout a day
         d = first + timedelta(i)
-        s = vm.midnight(d - timedelta(1)) + timedelta(hours=23)
+        s = samples.midnight(d - timedelta(1)) + timedelta(hours=23)
         bad = i % 2 == 1  # night after an alcohol day (logged on even days)
         c = {"inputs": {"steps": 1000.0, "sleep_min": 420.0, "restorative_min": 30.0, "cardio_load": 5.0},
              "session": {"start": s.timestamp(), "end": s.timestamp() + 8 * 3600, "deep_min": 60.0, "rem_min": 90.0,
@@ -441,32 +378,26 @@ def test_sleep_override_edit_rescore_delete(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("TZ", raising=False)
     db.init()
     d = date.today() - timedelta(1)
-    m = int(vm.midnight(d).timestamp())
+    m = int(samples.midnight(d).timestamp())
     t0 = m - 3600
     data = {"biometric_sleep_end_ts": {t0: t0 + 440 * 60}, "biometric_sleep_total_min": {t0: 420.0},
             "biometric_sleep_awake_min": {t0: 20.0}, "biometric_sleep_rem_min": {t0: 90.0},
             "biometric_sleep_deep_min": {t0: 80.0}, "biometric_hr_bpm": {t0 + i * 300: 55.0 for i in range(80)}}
-    stages = {t0 + 300: 1.0, m - 900: 2.0, m + 6 * 3600: 3.0}  # before / inside / after the edited span
+    stages = {t0 + 300: 1.0, m - 900: 2.0, m + 6 * 3600: 3.0}  # a stage carries on the 5 min grid for up to 3 h
 
-    def series(e: str, s: datetime, en: datetime, st: str, lb: str | None = None) -> dict:
-        if e.startswith("last_over_time"):
-            return stages  # unfiltered, so /sleep has to clip both ends
-        return {t: v for t, v in data.get(e, {}).items() if s.timestamp() <= t <= en.timestamp()}
-
-    monkeypatch.setattr(vm, "series", series)
-    monkeypatch.setattr(vm, "forward_import", lambda b: httpx.Response(204))
+    load({**data, "biometric_sleep_stage": stages})
     monkeypatch.setattr(main, "_vitals", lambda: {})
     main._score_day(d)
     with TestClient(app) as c:
         ring = c.get(f"/sleep?date={d}", headers=H).json()
         assert ring["edited"] is False and ring["session"]["total_min"] == 420
-        assert [p["t"] for p in ring["stages"]] == [t0 + 300, m - 900, m + 6 * 3600]
+        assert ring["stages"][0] == {"t": t0 + 300, "stage": 1} and {p["stage"] for p in ring["stages"]} == {1, 2, 3}
         start, end = m - 1800, m + 5 * 3600
         s = c.patch("/sleep", json={"date": d.isoformat(), "start": start, "end": end}, headers=H).json()
         n = s["session"]
         assert s["edited"] is True and (n["start"], n["end"]) == (start, end)
         assert (n["total_min"], n["awake_min"], n["rem_min"], n["deep_min"]) == (310, 20, 90, 80)
-        assert s["score"] != ring["score"] and [p["t"] for p in s["stages"]] == [m - 900]
+        assert s["score"] != ring["score"] and {p["stage"] for p in s["stages"]} == {1, 2} and all(start <= p["t"] < end for p in s["stages"])
         assert db.days(d, d)[0]["inputs"]["sleep_min"] == 310
         body = f"biometric_steps 5 {(m + 12 * 3600) * 1000}\n"  # a re-ingest rescores d; the edit holds
         assert c.post("/api/v1/import/prometheus", content=body, headers=H).status_code == 204
@@ -477,7 +408,7 @@ def test_sleep_override_edit_rescore_delete(tmp_path, monkeypatch) -> None:
         assert back["edited"] is False and back["session"] == ring["session"] and back["score"] == ring["score"]
 
         p = d - timedelta(1)  # no ring night: the edit is the whole session
-        pm = int(vm.midnight(p).timestamp())
+        pm = int(samples.midnight(p).timestamp())
         e = c.patch("/sleep", json={"date": p.isoformat(), "start": pm - 3600, "end": pm + 6 * 3600}, headers=H).json()
         assert e["edited"] is True and e["score"] is not None
         assert [e["session"][k] for k in ("total_min", "awake_min", "rem_min", "deep_min")] == [420, 0, 0, 0]
@@ -503,21 +434,13 @@ def test_breathe_sessions_journal_hr_today(tmp_path, monkeypatch) -> None:
                           " note TEXT, ts INTEGER); CREATE UNIQUE INDEX journal_day_kind ON journal(date, kind)"
                           " WHERE kind != 'medication';")
 
-    def fake(expr: str, start: datetime, end: datetime, step: str, lookback: str | None = None) -> list[dict]:
-        t0, t1 = start.timestamp(), end.timestamp()
-        v = {"biometric_breath_hr_bpm": [[t0, "70"], [t1, "62"]],
-             "biometric_stress": [[t0 + 600, "60"], [t1 - 600, "40"]]}.get(expr, [])
-        return [{"metric": {}, "values": v}] if v else []
-
-    sent: list[bytes] = []
-    monkeypatch.setattr(vm, "query_range", fake)
-    monkeypatch.setattr(vm, "forward_import", lambda b: sent.append(b) or httpx.Response(204))
     d = date.today() - timedelta(1)
-    s1 = int((vm.midnight(d) + timedelta(hours=10)).timestamp())
+    s1 = int((samples.midnight(d) + timedelta(hours=10)).timestamp())
     s2 = s1 + 4 * 3600
     body = {"start": s1, "end": s1 + 600, "rounds": 4, "feel_before": 2, "feel_after": None,
             "samples": [[s1 + 10, 72], [s1 + 20, 65], [s1 + 30, 68]]}
     with TestClient(app) as c:
+        load({"biometric_stress": {s1 - 3000: 60.0, s1 + 3600: 40.0}})  # 50 min before / 60 min after the session
         assert "breathe" not in c.get(f"/today?date={d}", headers=H).json()  # never a session yet
         for bad in ({"end": s1 + 3601}, {"end": s1}, {"rounds": 0}, {"feel_after": 6}, {"samples": [[s1 + 10, 300]]},
                     {"samples": [[s1 - 10, 70]]}, {"start": "x"}):
@@ -527,15 +450,14 @@ def test_breathe_sessions_journal_hr_today(tmp_path, monkeypatch) -> None:
         b = r.json()
         assert (b["hr_start"], b["hr_end"], b["hr_min"], b["rounds"], b["feel_before"]) == (72, 68, 65, 4, 2)
         assert (b["stress_before"], b["stress_after"]) == (60, 40)
-        assert b["points"] == [{"t": s1, "bpm": 70.0}, {"t": s1 + 600, "bpm": 62.0}]
-        assert f'biometric_breath_hr_bpm{{device="colmi_r02"}} 72 {(s1 + 10) * 1000}\n'.encode() in sent[0]
+        assert b["points"] == [{"t": s1 + 10, "bpm": 72.0}, {"t": s1 + 20, "bpm": 65.0}, {"t": s1 + 30, "bpm": 68.0}]
         c.post("/breathe", json=body, headers=H)  # re-sent: still one journal row
         c.post("/breathe", json={**body, "start": s2, "end": s2 + 600, "samples": []}, headers=H)
         j = [e for e in c.get("/journal", headers=H).json()["entries"] if e["kind"] == "breathe"]
         assert [(e["date"], e["value"]) for e in j] == [(d.isoformat(), "14:00"), (d.isoformat(), "10:00")]
         assert c.post("/journal", json={"date": d.isoformat(), "kind": "breathe"}, headers=H).status_code == 422
         br = c.get(f"/hr?date={d}", headers=H).json()["breaths"]
-        assert [x["start"] for x in br] == [s1, s2] and br[1]["hr_start"] is None and br[1]["points"]
+        assert [x["start"] for x in br] == [s1, s2] and br[1]["hr_start"] is None and br[1]["points"] == []
         t = c.get(f"/today?date={d}", headers=H).json()
         assert t["breathe"] == {"today_min": 20.0, "week_min": 20.0, "sessions": 2} and t["inputs"]["breath_min"] == 20.0
         assert c.get("/today", headers=H).json()["breathe"]["today_min"] == 0.0

@@ -5,8 +5,9 @@ from datetime import date, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from app import db, notify, vm
+from app import db, notify, samples
 from app.main import app
+from conftest import load
 
 H = {"Authorization": "Bearer secret"}
 D = date(2026, 11, 9)
@@ -14,15 +15,15 @@ CHECKIN = notify._checkin
 
 
 @pytest.fixture(autouse=True)
-def env(tmp_path, monkeypatch) -> dict:
-    """Fresh DB per test; returns the {expr: {ts: value}} map served by the fake vm.series."""
-    monkeypatch.setenv("DB_PATH", str(tmp_path / "ring.db"))
+def env(monkeypatch) -> None:
     monkeypatch.delenv("TZ", raising=False)
-    db.init()
-    series: dict = {}
-    monkeypatch.setattr(vm, "series", lambda e, s, en, st, lb=None: series.get(e, {}))
     monkeypatch.setattr(notify, "_checkin", lambda now, dates: None)  # 08-11 rule; on only in its own tests
-    return series
+
+
+def walk() -> None:
+    """Steps every hour around D, so the inactivity rule stays quiet."""
+    m = samples.midnight(D - timedelta(1)).timestamp()
+    load({"biometric_steps": {m + 3600 * h: 100.0 for h in range(96)}})
 
 
 def at(mp: pytest.MonkeyPatch, h: int, m: int = 0, day: date = D) -> datetime:
@@ -33,7 +34,7 @@ def at(mp: pytest.MonkeyPatch, h: int, m: int = 0, day: date = D) -> datetime:
 
 def seed(d: date, ready: int | None = None, contrib: dict | None = None) -> None:
     """Night 23:00 (d-1) to 07:00 (d)."""
-    s, e = vm.midnight(d - timedelta(1)) + timedelta(hours=23), vm.midnight(d) + timedelta(hours=7)
+    s, e = samples.midnight(d - timedelta(1)) + timedelta(hours=23), samples.midnight(d) + timedelta(hours=7)
     db.save_day(d, (None, ready, None), {"readiness": contrib, "session": {"start": s.timestamp(), "end": e.timestamp()}}, {})
 
 
@@ -64,8 +65,8 @@ def test_readiness_appends_cardio_target(monkeypatch) -> None:
     assert n["body"] == "Lowest factor: resting heart rate (90). Cardio target 8–11."
 
 
-def test_bedtime_window_and_dedup(monkeypatch, env) -> None:
-    env["biometric_steps"] = {1.0: 100.0}
+def test_bedtime_window_and_dedup(monkeypatch) -> None:
+    walk()
     for i in range(14):
         seed(D - timedelta(i))
     at(monkeypatch, 22, 20)
@@ -77,8 +78,8 @@ def test_bedtime_window_and_dedup(monkeypatch, env) -> None:
     assert kinds() == ["bedtime"] and "23:00" in notify.pending()[0]["body"]
 
 
-def test_bedtime_needs_five_nights(monkeypatch, env) -> None:
-    env["biometric_steps"] = {1.0: 100.0}
+def test_bedtime_needs_five_nights(monkeypatch) -> None:
+    walk()
     for i in range(4):
         seed(D - timedelta(i))
     at(monkeypatch, 22, 40)
@@ -86,13 +87,14 @@ def test_bedtime_needs_five_nights(monkeypatch, env) -> None:
     assert kinds() == []
 
 
-def test_inactivity(monkeypatch, env) -> None:
+def test_inactivity(monkeypatch) -> None:
     seed(D)
-    env["biometric_steps"] = {1.0: 50.0}
+    walk()
     at(monkeypatch, 12, 30)
     notify.evaluate(set())
     assert kinds() == []
-    env["biometric_steps"] = {}
+    with closing(db.connect()) as con, con:
+        con.execute("DELETE FROM samples")  # temp db
     notify.evaluate(set())
     notify.evaluate(set())
     assert kinds() == ["inactivity"]
@@ -107,7 +109,7 @@ def test_inactivity_skips_night_and_late_hours(monkeypatch) -> None:
     assert kinds() == []
 
 
-def test_pending_and_ack_routes(monkeypatch, env) -> None:
+def test_pending_and_ack_routes(monkeypatch) -> None:
     notify._add("checkin", "How was yesterday?", "Takes ten seconds.", at(monkeypatch, 12))
     with TestClient(app) as c:
         (n,) = c.get("/notifications/pending", headers=H).json()
@@ -122,8 +124,8 @@ def seed_week(n: int, sleep: int = 80) -> None:
         db.save_day(D - timedelta(i), (sleep + i, 70, 60), {}, {})
 
 
-def test_weekly_fires_monday_once(monkeypatch, env) -> None:
-    env["biometric_steps"] = {1.0: 100.0}
+def test_weekly_fires_monday_once(monkeypatch) -> None:
+    walk()
     seed_week(7)
     at(monkeypatch, 9)
     notify.evaluate(set())
@@ -136,8 +138,8 @@ def test_weekly_fires_monday_once(monkeypatch, env) -> None:
     assert kinds() == ["weekly"]
 
 
-def test_weekly_not_tuesday_or_outside_window(monkeypatch, env) -> None:
-    env["biometric_steps"] = {1.0: 100.0}
+def test_weekly_not_tuesday_or_outside_window(monkeypatch) -> None:
+    walk()
     seed_week(7)
     at(monkeypatch, 9, day=D + timedelta(1))
     notify.evaluate(set())
@@ -146,8 +148,8 @@ def test_weekly_not_tuesday_or_outside_window(monkeypatch, env) -> None:
     assert kinds() == []
 
 
-def test_weekly_needs_three_days(monkeypatch, env) -> None:
-    env["biometric_steps"] = {1.0: 100.0}
+def test_weekly_needs_three_days(monkeypatch) -> None:
+    walk()
     seed_week(2)
     at(monkeypatch, 9)
     notify.evaluate(set())
@@ -198,9 +200,9 @@ def test_strain_once_per_three_days_and_explain(monkeypatch) -> None:
     assert kinds() == ["strain", "strain"]
 
 
-def test_checkin_window_once_and_extra(monkeypatch, env) -> None:
+def test_checkin_window_once_and_extra(monkeypatch) -> None:
     monkeypatch.setattr(notify, "_checkin", CHECKIN)
-    env["biometric_steps"] = {1.0: 100.0}
+    walk()
     for h in (7, 11):
         at(monkeypatch, h, 30 if h == 7 else 0)
         notify.evaluate(set())
@@ -217,9 +219,9 @@ def test_checkin_window_once_and_extra(monkeypatch, env) -> None:
     assert n["extra"] == {"open": "journal", "date": "2026-11-08"}
 
 
-def test_checkin_skipped_when_yesterday_logged(monkeypatch, env) -> None:
+def test_checkin_skipped_when_yesterday_logged(monkeypatch) -> None:
     monkeypatch.setattr(notify, "_checkin", CHECKIN)
-    env["biometric_steps"] = {1.0: 100.0}
+    walk()
     db.add_journal(D.isoformat(), "workout", None, None, 1)  # today's entry does not count
     db.add_journal((D - timedelta(1)).isoformat(), "note", None, "fine", 2)
     at(monkeypatch, 9)
@@ -289,12 +291,12 @@ def test_morning_waits_for_scored_night(monkeypatch) -> None:
     assert "morning" in kinds()
 
 
-def test_bedtime_uses_best_window(monkeypatch, env) -> None:
+def test_bedtime_uses_best_window(monkeypatch) -> None:
     """14 scored nights: even days in bed 22:00 (quality 90), odd days 23:30 (60) → window 22:00-23:00."""
-    env["biometric_steps"] = {1.0: 100.0}
+    walk()
     for i in range(14):
         d, q = D - timedelta(i), 90.0 if i % 2 == 0 else 60.0
-        s = vm.midnight(d - timedelta(1)) + timedelta(hours=22, minutes=0 if i % 2 == 0 else 30 * 3)
+        s = samples.midnight(d - timedelta(1)) + timedelta(hours=22, minutes=0 if i % 2 == 0 else 30 * 3)
         c = {k: q for k in ("total", "efficiency", "restfulness", "rem", "deep")} | {"timing": 0.0, "regularity": 0.0}
         db.save_day(d, (None, None, None), {"sleep": c, "session": {"start": s.timestamp(), "end": s.timestamp() + 8 * 3600}}, {})
     assert notify.bedtime_window(D)["start_min"] == 600
@@ -379,7 +381,7 @@ def test_tonight_weekday_vs_weekend() -> None:
     assert notify.tonight(thu) is None and notify.tonight(fri) is not None
 
 
-def test_tonight_two_notifications_and_dedup(monkeypatch, env) -> None:
+def test_tonight_two_notifications_and_dedup(monkeypatch) -> None:
     """Wake 07:00, need 450, no debt: asleep-by 23:30, in bed 23:15 → wind down 22:15-22:45, bed 22:45-23:30."""
     db.set_settings({"wake_weekday": "07:00"})
     at(monkeypatch, 22, 10)
@@ -400,7 +402,7 @@ def test_tonight_two_notifications_and_dedup(monkeypatch, env) -> None:
     assert len(bed()) == 2
 
 
-def test_tonight_catch_up_and_late_sync(monkeypatch, env) -> None:
+def test_tonight_catch_up_and_late_sync(monkeypatch) -> None:
     """3 nights of 410 min → debt 120, suggest 40: asleep-by 22:50, in bed 22:35."""
     for i in range(3):
         db.save_day(D - timedelta(i), (None, None, None), {"inputs": {"sleep_min": 410.0}}, {})
@@ -415,8 +417,8 @@ def test_tonight_catch_up_and_late_sync(monkeypatch, env) -> None:
     assert bed() == [("bedtime_soon", "Time for bed", "Lights out by 22:50 — 8 h 10 min before your 07:00 alarm.")]
 
 
-def test_tonight_unset_keeps_old_rule(monkeypatch, env) -> None:
-    env["biometric_steps"] = {1.0: 100.0}
+def test_tonight_unset_keeps_old_rule(monkeypatch) -> None:
+    walk()
     for i in range(14):
         seed(D - timedelta(i))
     db.set_settings({"wake_weekend": "07:00"})  # Monday evening uses the weekday time, which is unset
@@ -435,7 +437,7 @@ def test_wake_settings_patch() -> None:
         assert c.patch("/settings", json={"wake_weekend": ""}, headers=H).json()["wake_weekend"] == ""
 
 
-def test_tonight_across_midnight_fires_once(monkeypatch, env) -> None:
+def test_tonight_across_midnight_fires_once(monkeypatch) -> None:
     """Wake 08:00, need 455: asleep-by 00:25, in bed 00:10 → "Time for bed" window 23:40-00:25 spans midnight."""
     db.set_settings({"wake_weekday": "08:00", "sleep_need_min": "455"})
     at(monkeypatch, 23, 45)

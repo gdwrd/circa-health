@@ -4,7 +4,7 @@ import sqlite3
 from contextlib import closing
 from datetime import date, datetime, timedelta
 
-from . import vm
+from . import samples
 
 # several medication doses and breathing sessions a day; other kinds once
 INDEX = ("CREATE UNIQUE INDEX IF NOT EXISTS journal_day_kind ON journal(date, kind) "
@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS journal(id INTEGER PRIMARY KEY AUTOINCREMENT, date TE
 {INDEX};
 CREATE TABLE IF NOT EXISTS notifications(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, title TEXT,
   body TEXT, created_at TEXT, acked_at TEXT, extra TEXT);
+CREATE TABLE IF NOT EXISTS samples(metric TEXT, ts INTEGER, value REAL, PRIMARY KEY(metric, ts)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 INSERT OR IGNORE INTO settings VALUES('step_goal','8000'),('sleep_need_min','450'),('medication_started',''),
   ('medication_time','08:00'),('medication_window_h','8'),('birth_year',''),('low_step_kind','workout'),('muted',''),
@@ -57,7 +58,7 @@ def _migrate_tags(con: sqlite3.Connection) -> None:
         return
     rows: dict[tuple[str, str], list] = {}
     for ts, tag, note in con.execute("SELECT ts, tag, note FROM tags ORDER BY ts"):
-        d = datetime.fromtimestamp(ts, vm.tz()).date().isoformat()
+        d = datetime.fromtimestamp(ts, samples.tz()).date().isoformat()
         k = (tag or "").strip().lower().replace(" ", "_").replace("-", "_")
         k = TAG_ALIASES.get(k, k)
         if k in KINDS and k not in ("medication", "bp", "note"):
@@ -154,7 +155,7 @@ def delete_sleep_override(d: date) -> None:
 
 def add_breath(row: dict) -> None:
     """Session row + its journal row; a re-sent session (same start) replaces the row and keeps one journal entry."""
-    t = datetime.fromtimestamp(row["start"], vm.tz())
+    t = datetime.fromtimestamp(row["start"], samples.tz())
     with closing(connect()) as con, con:
         con.execute("INSERT OR REPLACE INTO breath_session VALUES(:start, :end, :rounds, :hr_start, :hr_end, :hr_min, "
                     ":feel_before, :feel_after, :stress_before, :stress_after)", row)
@@ -165,7 +166,7 @@ def add_breath(row: dict) -> None:
 
 def breaths(start: date, end: date) -> list[dict]:
     """Sessions starting on local dates [start, end], ascending."""
-    lo, hi = vm.midnight(start).timestamp(), vm.midnight(end + timedelta(1)).timestamp()
+    lo, hi = samples.midnight(start).timestamp(), samples.midnight(end + timedelta(1)).timestamp()
     return [dict(r) for r in query("SELECT * FROM breath_session WHERE start >= ? AND start < ? ORDER BY start", (lo, hi))]
 
 

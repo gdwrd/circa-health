@@ -2,7 +2,7 @@
 from datetime import date, datetime, timedelta
 from statistics import mean, median
 
-from . import vm
+from . import samples
 
 DAYS, MIN_N = 90, 3
 NIGHT_KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "stress", "travel", "breathe")
@@ -35,7 +35,7 @@ def nights(rows: list[dict]) -> dict[date, dict]:
         s = r["c"].get("session")
         if not s:
             continue
-        st = datetime.fromtimestamp(s["start"], vm.tz())
+        st = datetime.fromtimestamp(s["start"], samples.tz())
         out[r["date"]] = {"sleep_score": r["sleep_score"], "readiness_score": r.get("readiness_score"),
                           "rhr": r["inputs"].get("rhr"), "hrv": r["inputs"].get("hrv"),
                           **{k: s[k] for k in ("deep_min", "rem_min", "total_min", "awake_min")},

@@ -11,7 +11,7 @@ from statistics import mean, median
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from . import cardio, db, insights, notify, scoring, vm
+from . import cardio, db, insights, notify, samples, scoring
 from .notify import debt
 
 log = logging.getLogger("ring")
@@ -26,27 +26,27 @@ def auth(cred: HTTPAuthorizationCredentials | None = Depends(bearer)) -> None:
 
 
 def _hourly(metric: str, d: date) -> dict[int, float]:
-    end = vm.midnight(d + timedelta(1)) - timedelta(seconds=1)  # exclude next midnight's lookback
-    # max_lookback 59m: an hour with no sample stays empty instead of repeating the previous hour's value.
-    return {datetime.fromtimestamp(t, vm.tz()).hour: v for t, v in vm.series(metric, vm.midnight(d), end, "1h", "59m").items()}
+    end = samples.midnight(d + timedelta(1)) - timedelta(seconds=1)  # exclude next midnight's lookback
+    # 59m lookback: an hour with no sample stays empty instead of repeating the previous hour's value.
+    return {datetime.fromtimestamp(t, samples.tz()).hour: v for t, v in samples.grid(metric, samples.midnight(d), end, 3600, 3540).items()}
 
 
 def _after_noon(ts: float) -> int:
     """Local minutes after noon (as notify._bedtime): no wrap at midnight."""
-    t = datetime.fromtimestamp(ts, vm.tz())
+    t = datetime.fromtimestamp(ts, samples.tz())
     return (t.hour * 60 + t.minute - 720) % 1440
 
 
 def _sessions(d: date) -> list[dict]:
-    """Sessions ending on d, longest (main) first. shortcut: start is the 5 min query grid point, upgrade if timing matters."""
-    lo, hi = vm.midnight(d) - timedelta(hours=12), vm.midnight(d + timedelta(1))
-    ends = vm.series("biometric_sleep_end_ts", lo, hi, "5m")
-    parts = {k: vm.series(f"biometric_sleep_{k}_min", lo, hi, "5m") for k in ("total", "awake", "rem", "deep")}
+    """Sessions ending on d, longest (main) first."""
+    lo, hi = samples.midnight(d) - timedelta(hours=12), samples.midnight(d + timedelta(1))
+    ends = samples.raw("biometric_sleep_end_ts", lo, hi)
+    parts = {k: samples.raw(f"biometric_sleep_{k}_min", lo, hi) for k in ("total", "awake", "rem", "deep")}
     for t, total in parts["total"].items():  # sessions pushed before app v1.1 have no end_ts
         ends.setdefault(t, t + (total + parts["awake"].get(t, 0.0)) * 60)
     out = []
     for end in set(ends.values()):
-        if datetime.fromtimestamp(end, vm.tz()).date() != d:
+        if datetime.fromtimestamp(end, samples.tz()).date() != d:
             continue
         start = min(t for t, v in ends.items() if v == end)
         out.append({"start": start, "end": end, **{f"{k}_min": parts[k].get(start, 0.0) for k in parts}})
@@ -63,7 +63,7 @@ def _sessions(d: date) -> list[dict]:
 
 
 def _dt(ts: float) -> datetime:
-    return datetime.fromtimestamp(ts, vm.tz())
+    return datetime.fromtimestamp(ts, samples.tz())
 
 
 def _score_day(d: date) -> None:
@@ -76,7 +76,7 @@ def _score_day(d: date) -> None:
     base = {k: scoring.baseline([val(p["inputs"], k) for p in prior])
             for k in ("rhr", "hrv", "sleep_min", "steps", "cardio_load")}
     week = [p["inputs"] for p in prior if p["date"] >= d - timedelta(7)]
-    now = datetime.now(vm.tz())
+    now = datetime.now(samples.tz())
     ss = _sessions(d)
     n = ss[0] if ss else None
     naps = [{k: x[k] for k in ("start", "end", "total_min")} for x in ss[1:] if x["total_min"] >= 20]
@@ -88,20 +88,19 @@ def _score_day(d: date) -> None:
     extra: dict = {"naps": naps, "regularity": None, "spo2": None, "hr_low_t": None}
     sleep = ready = None
     if n:
-        s, e = datetime.fromtimestamp(n["start"], vm.tz()), datetime.fromtimestamp(n["end"], vm.tz())
-        mid = datetime.fromtimestamp((n["start"] + n["end"]) / 2, vm.tz())
+        s, e = datetime.fromtimestamp(n["start"], samples.tz()), datetime.fromtimestamp(n["end"], samples.tz())
+        mid = datetime.fromtimestamp((n["start"] + n["end"]) / 2, samples.tz())
         week_n = [p["c"]["session"] for p in prior if p["date"] >= d - timedelta(6) and p["c"].get("session")] + [n]
         sd = scoring.regularity([_after_noon((x["start"] + x["end"]) / 2) for x in week_n])
         extra["regularity"] = {"sd_min": sd, "nights": len(week_n),
                                "bed_start_median": median(_after_noon(x["start"]) for x in week_n),
                                "bed_end_median": median(_after_noon(x["end"]) for x in week_n)}
         sleep = scoring.sleep_score({**n, "midpoint_h": mid.hour + mid.minute / 60, "regularity_sd": sd}, need)
-        hrs = {t: v for t, v in vm.series("biometric_hr_bpm", s, e, "5m").items() if v > 0}
+        hrs = {t: v for t, v in samples.raw("biometric_hr_bpm", s, e).items() if v > 0}
         hr = list(hrs.values())
         low = scoring.low_index(hr) if hr else None
-        hrv = [v for v in vm.series("biometric_hrv_rmssd", s, e, "30m").values() if v > 0]
-        # shortcut: 1 h step assumes periodic SpO2 is 30-60 min apart, upgrade if the ring samples faster
-        sp = [v for v in vm.series("biometric_spo2_pct", s, e, "1h").values() if v > 0]
+        hrv = [v for v in samples.raw("biometric_hrv_rmssd", s, e).values() if v > 0]
+        sp = [v for v in samples.raw("biometric_spo2_pct", s, e).values() if v > 0]
         extra["spo2"] = {"mean": mean(sp), "min": min(sp), "low_count": sum(v < 90 for v in sp), "n": len(sp)} if sp else None
         extra["hr_low_t"] = list(hrs)[low] if hr else None
         night = {"sleep_score": sleep["score"], "need_min": need,
@@ -114,11 +113,11 @@ def _score_day(d: date) -> None:
         y = _hourly("biometric_steps", d - timedelta(1))
         ready = scoring.readiness_score(night, base, sum(y.values()) if y else None, goal)
 
-    end = vm.midnight(d + timedelta(1)) - timedelta(seconds=1)
-    raw = vm.series("biometric_hr_bpm", vm.midnight(d), end, "5m")
-    worn = {datetime.fromtimestamp(t, vm.tz()).hour for t, v in raw.items() if v > 0 and t <= now.timestamp()}
+    end = samples.midnight(d + timedelta(1)) - timedelta(seconds=1)
+    raw = samples.raw("biometric_hr_bpm", samples.midnight(d), end)
+    worn = {datetime.fromtimestamp(t, samples.tz()).hour for t, v in raw.items() if v > 0 and t <= now.timestamp()}
     day_hr = {t: v for t, v in raw.items() if v > 0 and awake(t)}
-    awake_h = [h for h in range(24) if awake((vm.midnight(d) + timedelta(hours=h)).timestamp())]
+    awake_h = [h for h in range(24) if awake((samples.midnight(d) + timedelta(hours=h)).timestamp())]
     inputs["worn_hours"] = len(worn)
     wear = {"worn_hours": sum(h in worn for h in awake_h), "awake_hours": len(awake_h)}  # both over awake hours
 
@@ -133,12 +132,12 @@ def _score_day(d: date) -> None:
         activity = scoring.activity_score({"steps": inputs["steps"], "calories": inputs["calories"],
                                            "awake_hourly_steps": hours}, goal,
                                           scoring.baseline([w.get("calories") for w in week]), goal_days)
-    st = [v for t, v in vm.series("biometric_stress", vm.midnight(d), end, "30m").items() if v > 0 and awake(t)]
+    st = [v for t, v in samples.raw("biometric_stress", samples.midnight(d), end).items() if v > 0 and awake(t)]
     zones = scoring.stress_zones(st) if st else None
     inputs["stress_load"] = zones and zones["stressed_hours"]
     br = db.breaths(d, d)
     for b in br:  # 1m step + 1m lookback = each raw stress sample once; "after" fills in on a later sync
-        sw = vm.series("biometric_stress", _dt(b["start"] - 3600), _dt(b["end"] + 3600), "1m", "1m")
+        sw = samples.raw("biometric_stress", _dt(b["start"] - 3600), _dt(b["end"] + 3600))
         sides = [[v for t, v in sw.items() if v > 0 and ok(t)] for ok in
                  (lambda t: t < b["start"], lambda t: b["end"] < t <= b["end"] + 3600)]
         db.set_breath_stress(b["start"], *(mean(x) if x else None for x in sides))
@@ -147,7 +146,7 @@ def _score_day(d: date) -> None:
     cfg = db.settings()
     mh = cardio.max_hr(int(cfg["birth_year"]), d) if cfg["birth_year"] else None
     bounds = cardio.zones(mh, base["rhr"]) if mh and base["rhr"] else None
-    steps_h = {int(vm.midnight(d).timestamp()) + 3600 * h: v for h, v in steps.items()}  # cardio keys by hour start
+    steps_h = {int(samples.midnight(d).timestamp()) + 3600 * h: v for h, v in steps.items()}  # cardio keys by hour start
     load = cardio.load(list(day_hr.values()), bounds) | {"bounds": bounds} if bounds else None
     workouts = cardio.workouts(day_hr, steps_h, bounds, awake, cfg["low_step_kind"]) if bounds else []
     for start, kind in db.workout_kinds(d).items():  # the user's label beats the guess, across rescores
@@ -194,7 +193,7 @@ async def lifespan(_: FastAPI):
     db.init()
     # Score history pushed before the backend existed (or before a rule change); ingest only rescores pushed dates.
     days = int(os.environ.get("BACKFILL_DAYS", "14"))
-    today = datetime.now(vm.tz()).date()
+    today = datetime.now(samples.tz()).date()
     if days > 0:
         threading.Thread(target=rescore, args=({today - timedelta(i) for i in range(days)},), daemon=True).start()
     yield
@@ -212,22 +211,24 @@ def health() -> dict:
 @api.post("/api/v1/import/prometheus")
 async def ingest(request: Request, tasks: BackgroundTasks) -> Response:
     body = await request.body()
-    r = vm.forward_import(body)
-    if r.is_success:
-        tasks.add_task(rescore, vm.dates_in_body(body))
-    return Response(r.content, r.status_code)
+    rows = samples.parse(body)
+    if not rows:
+        raise HTTPException(400, "no samples")
+    samples.put(rows)
+    tasks.add_task(rescore, samples.dates_in_body(body))
+    return Response(status_code=204)
 
 
 def _today() -> date:
-    return datetime.now(vm.tz()).date()
+    return datetime.now(samples.tz()).date()
 
 
 def _vitals() -> dict:
-    now, out = datetime.now(vm.tz()), {}
+    now, out = datetime.now(samples.tz()), {}
     for k, expr in (("hr", "biometric_hr_bpm"), ("hrv", "biometric_hrv_rmssd"),
                     ("spo2", "biometric_spo2_pct"), ("battery", "ring_battery_pct")):
         try:
-            s = vm.series(expr, now - timedelta(hours=24), now, "5m")
+            s = samples.raw(expr, now - timedelta(hours=24), now)
         except Exception:
             log.exception("vitals %s failed", k)
             s = {}
@@ -281,9 +282,9 @@ def sleep(day: str | None = Query(None, alias="date")) -> dict:
     stages: list[dict] = []
     hr: list[dict] = []
     if n:
-        s, e = (datetime.fromtimestamp(n[k], vm.tz()) for k in ("start", "end"))
-        stages = [{"t": t, "stage": int(v)} for t, v in vm.series("last_over_time(biometric_sleep_stage[3h])", s, e, "5m").items() if n["start"] <= t < n["end"]]
-        hr = [{"t": t, "bpm": v} for t, v in vm.series("biometric_hr_bpm", s, e, "5m").items() if v > 0]  # as _score_day
+        s, e = (datetime.fromtimestamp(n[k], samples.tz()) for k in ("start", "end"))
+        stages = [{"t": t, "stage": int(v)} for t, v in samples.grid("biometric_sleep_stage", s, e, 300, 10800).items() if n["start"] <= t < n["end"]]
+        hr = [{"t": t, "bpm": v} for t, v in samples.raw("biometric_hr_bpm", s, e).items() if v > 0]  # as _score_day
     return {"date": d.isoformat(), "status": "ok" if n else "learning", "score": row.get("sleep_score"),
             "contributors": row["c"].get("sleep"), "session": n, "stages": stages,
             "naps": (row["c"].get("sleep_extra") or {}).get("naps", []), "hr": hr, "sleep_extra": row["c"].get("sleep_extra"),
@@ -297,7 +298,7 @@ def patch_sleep(body: dict = Body(...)) -> dict:
     d, start, end = _day(str(body.get("date"))), body.get("start"), body.get("end")
     if not all(isinstance(v, int) and not isinstance(v, bool) for v in (start, end)) or not 0 < end - start <= 16 * 3600:
         raise HTTPException(422, "bad start or end")
-    if datetime.fromtimestamp(end, vm.tz()).date() != d:  # the night belongs to the day it ends on, as _sessions
+    if datetime.fromtimestamp(end, samples.tz()).date() != d:  # the night belongs to the day it ends on, as _sessions
         raise HTTPException(422, "end not on date")
     db.set_sleep_override(d, start, end)
     _score_day(d)
@@ -435,18 +436,18 @@ def month(m: str | None = Query(None, alias="month")) -> dict:
 
 @api.get("/hr")
 def hr(hours: int = 24, day: str | None = Query(None, alias="date")) -> dict:
-    now = datetime.now(vm.tz())
+    now = datetime.now(samples.tz())
     if day:
         d = _day(day)
-        s = vm.series("biometric_hr_bpm", vm.midnight(d), min(vm.midnight(d + timedelta(1)), now), "5m")
+        s = samples.raw("biometric_hr_bpm", samples.midnight(d), min(samples.midnight(d + timedelta(1)), now))
     else:
-        s = vm.series("biometric_hr_bpm", now - timedelta(hours=min(max(hours, 1), 48)), now, "5m")
+        s = samples.raw("biometric_hr_bpm", now - timedelta(hours=min(max(hours, 1), 48)), now)
     return {"points": [{"t": t, "bpm": v} for t, v in s.items() if v > 0], **({"breaths": _breaths(d)} if day else {})}
 
 
 def _breaths(d: date) -> list[dict]:
     return [{**b, "points": [{"t": t, "bpm": v} for t, v in
-                             vm.series("biometric_breath_hr_bpm", _dt(b["start"]), _dt(b["end"]), "5s").items()]}
+                             samples.raw("biometric_breath_hr_bpm", _dt(b["start"]), _dt(b["end"])).items()]}
             for b in db.breaths(d, d)]
 
 
@@ -456,21 +457,20 @@ def _int(v: object, lo: int, hi: int) -> bool:
 
 @api.post("/breathe")
 def breathe(body: dict = Body(...)) -> dict:
-    start, end, rounds, samples = body.get("start"), body.get("end"), body.get("rounds"), body.get("samples", [])
+    start, end, rounds, pts = body.get("start"), body.get("end"), body.get("rounds"), body.get("samples", [])
     feel = body.get("feel_before"), body.get("feel_after")
     if (not _int(start, 0, 2**40) or not _int(end, start + 1, start + 3600) or not _int(rounds, 1, 30)
             or not all(f is None or _int(f, 1, 5) for f in feel)):
         raise HTTPException(422, "bad session")
-    if not isinstance(samples, list) or len(samples) > 1200 or not all(
-            isinstance(p, list) and len(p) == 2 and _num(p[0], start, end) and _num(p[1], 30, 220) for p in samples):
+    if not isinstance(pts, list) or len(pts) > 1200 or not all(
+            isinstance(p, list) and len(p) == 2 and _num(p[0], start, end) and _num(p[1], 30, 220) for p in pts):
         raise HTTPException(422, "bad samples")
-    bpm = [p[1] for p in sorted(samples)]
+    bpm = [p[1] for p in sorted(pts)]
     db.add_breath({"start": start, "end": end, "rounds": rounds, "hr_start": bpm[0] if bpm else None,
                    "hr_end": bpm[-1] if bpm else None, "hr_min": min(bpm, default=None), "feel_before": feel[0],
                    "feel_after": feel[1], "stress_before": None, "stress_after": None})
-    if samples:
-        vm.forward_import("".join(f'biometric_breath_hr_bpm{{device="colmi_r02"}} {b} {int(t * 1000)}\n'
-                                  for t, b in samples).encode())
+    if pts:
+        samples.put([("biometric_breath_hr_bpm", int(t * 1000), b) for t, b in pts])
     d = _dt(start).date()
     rescore({d})
     return next(b for b in _breaths(d) if b["start"] == start)
@@ -478,11 +478,11 @@ def breathe(body: dict = Body(...)) -> dict:
 
 @api.get("/activity")
 def activity(day: str | None = Query(None, alias="date")) -> dict:
-    d, now = _day(day), datetime.now(vm.tz())
+    d, now = _day(day), datetime.now(samples.tz())
     n = 24 if d < now.date() else now.hour + 1 if d == now.date() else 0
     m = {k: _hourly(f"biometric_{k}", d) for k in ("steps", "calories", "distance_meters")}
-    raw = vm.series("biometric_hr_bpm", vm.midnight(d), vm.midnight(d + timedelta(1)) - timedelta(seconds=1), "5m")
-    worn = {datetime.fromtimestamp(t, vm.tz()).hour for t, v in raw.items() if v > 0}
+    raw = samples.raw("biometric_hr_bpm", samples.midnight(d), samples.midnight(d + timedelta(1)) - timedelta(seconds=1))
+    worn = {datetime.fromtimestamp(t, samples.tz()).hour for t, v in raw.items() if v > 0}
     # biometric_calories is raw ring units (tens of small calories on current firmware): / 100 = kcal.
     # shortcut: old firmware (no new-calorie flag in the 0xf0 header) sends small calories, / 1000; read the flag if that ring shows up.
     return {"date": d.isoformat(), "hours": [{"h": h, "steps": m["steps"].get(h, 0.0), "calories": m["calories"].get(h, 0.0) / 100,
@@ -493,7 +493,7 @@ def activity(day: str | None = Query(None, alias="date")) -> dict:
 @api.get("/stress")
 def stress(day: str | None = Query(None, alias="date")) -> dict:
     d = _day(day)
-    s = vm.series("biometric_stress", vm.midnight(d), min(vm.midnight(d + timedelta(1)), datetime.now(vm.tz())), "30m")
+    s = samples.raw("biometric_stress", samples.midnight(d), min(samples.midnight(d + timedelta(1)), datetime.now(samples.tz())))
     return {"date": d.isoformat(), "points": [{"t": t, "v": v} for t, v in s.items() if v > 0]}
 
 
@@ -535,17 +535,17 @@ def add_journal(body: dict = Body(...)) -> dict:
 
 
 def _day_hr(rows: list[dict], start: date, end: date) -> dict[date, float]:
-    """Mean awake HR per day; one range query. shortcut: 30 min samples, upgrade if day_hr needs finer detail."""
+    """Mean awake HR per day; one range query."""
     sess = [(r["c"]["session"]["start"], r["c"]["session"]["end"]) for r in rows if r["c"].get("session")]
     try:
-        s = vm.series("biometric_hr_bpm", vm.midnight(start), vm.midnight(end + timedelta(1)), "30m")
+        s = samples.raw("biometric_hr_bpm", samples.midnight(start), samples.midnight(end + timedelta(1)))
     except Exception:
         log.exception("day_hr failed")
         return {}
     by: dict[date, list[float]] = {}
     for t, v in s.items():
         if v > 0 and not any(a <= t < b for a, b in sess):
-            by.setdefault(datetime.fromtimestamp(t, vm.tz()).date(), []).append(v)
+            by.setdefault(datetime.fromtimestamp(t, samples.tz()).date(), []).append(v)
     return {d: mean(v) for d, v in by.items()}
 
 

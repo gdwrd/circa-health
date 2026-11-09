@@ -2,7 +2,7 @@ from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
 
-from app import db, insights, main, vm
+from app import db, insights, main, samples
 from app.main import app
 
 H = {"Authorization": "Bearer secret"}
@@ -11,7 +11,7 @@ TODAY = date(2026, 11, 8)
 
 def row(d: date, hrv: float = 50, deep: float = 80, strain: int | None = 10, bed_min: int = -30,
         total: float = 420) -> dict:
-    start = (vm.midnight(d) + timedelta(minutes=bed_min)).timestamp()
+    start = (samples.midnight(d) + timedelta(minutes=bed_min)).timestamp()
     return {"date": d, "sleep_score": 80, "inputs": {"rhr": 55, "hrv": hrv},
             "c": {"session": {"start": start, "end": start + 8 * 3600, "total_min": total, "awake_min": 30,
                               "rem_min": 90, "deep_min": deep}, "signals": {"index": strain}}}
@@ -80,7 +80,6 @@ def test_medication_dose_vs_none_and_dose_time() -> None:
 
 def test_routes(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DB_PATH", str(tmp_path / "i.db"))
-    monkeypatch.setattr(vm, "series", lambda *a: {})
     with TestClient(app) as c:
         d = main._today()
         for i in range(10):

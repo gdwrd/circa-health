@@ -4,7 +4,7 @@ from contextlib import closing
 from datetime import date, datetime, timedelta
 from statistics import mean, median
 
-from . import cardio, db, scoring, vm
+from . import cardio, db, samples, scoring
 
 log = logging.getLogger("ring")
 
@@ -20,7 +20,7 @@ LOGGED = {"alcohol": "alcohol", "workout": "a workout", "sick": "feeling unwell"
 
 
 def _now() -> datetime:
-    return datetime.now(vm.tz())
+    return datetime.now(samples.tz())
 
 
 def _add(kind: str, title: str, body: str, now: datetime, extra: dict[str, str] | None = None) -> None:
@@ -60,7 +60,7 @@ def _readiness(now: datetime, dates: set[date]) -> None:
 
 
 def _after_noon(ts: float) -> int:
-    t = datetime.fromtimestamp(ts, vm.tz())
+    t = datetime.fromtimestamp(ts, samples.tz())
     return (t.hour * 60 + t.minute - 720) % 1440  # minutes after noon: no wrap at midnight
 
 
@@ -100,7 +100,7 @@ def tonight(d: date) -> dict | None:
 
 def _bedtime(now: datetime, dates: set[date]) -> None:
     d = now.date()
-    noon = vm.midnight(d) + timedelta(hours=12)
+    noon = samples.midnight(d) + timedelta(hours=12)
     if now < noon:
         noon -= timedelta(1)
     p = tonight(noon.date())
@@ -141,7 +141,7 @@ def _inactivity(now: datetime, dates: set[date]) -> None:
         s = r["c"].get("session")
         if s and s["start"] < end.timestamp() and s["end"] > start.timestamp():
             return
-    if sum(vm.series("biometric_steps", start, end - timedelta(seconds=1), "1h", "59m").values()) == 0:
+    if sum(samples.grid("biometric_steps", start, end - timedelta(seconds=1), 3600, 3540).values()) == 0:
         _add("inactivity", "Time to move", "No steps in the last 2 hours.", now)
 
 
