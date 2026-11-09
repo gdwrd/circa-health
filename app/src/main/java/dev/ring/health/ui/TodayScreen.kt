@@ -20,6 +20,10 @@ import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
@@ -230,6 +234,22 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
         item {
             InsetCard { SmallRings(d, open?.takeIf { it == "sleep" || it == "activity" }, { open = it }, medStarted) }
         }
+        d["cardio"].obj()?.let { item { CardioLoad(it) } }
+        val tonight = d["tonight"].obj()
+        if (LocalTime.now().hour >= 18 && tonight != null) {
+            val b = tonight["bedtime"].obj()?.takeIf { it["status"].str() == "ok" }
+            val start = b?.get("start_min").num()
+            val end = b?.get("end_min").num()
+            val debt = tonight["debt"].obj()?.get("debt_min").num()?.roundToInt()
+            // start/end are minutes after noon (600 = 22:00).
+            val parts = listOfNotNull(
+                if (start != null && end != null) "bed ${clock(LocalTime.NOON.plusMinutes(start.toLong()))}–${clock(LocalTime.NOON.plusMinutes(end.toLong()))} suits you" else null,
+                debt?.let { if (it < 30) "sleep debt cleared" else "${duration(it)} sleep debt" },
+            )
+            if (parts.isNotEmpty()) item {
+                Text("Tonight: " + parts.joinToString(" · "), style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.xs))
+            }
+        }
         d["signals"].obj()?.let { item { BodySignals(it, medStarted) } }
         item {
             val v = d["vitals"].obj()
@@ -366,6 +386,75 @@ private fun ScoreDetails(key: String, name: String, color: Color, d: JsonObject,
                 Hairline(Modifier.padding(start = AppSpace.l))
                 Text(
                     "Resting HR is compared with your 14-day baseline, which now includes days on medication; it settles after about two weeks.",
+                    style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l, vertical = AppSpace.m),
+                )
+            }
+        }
+    }
+}
+
+private val ZONES = listOf("Easy", "Light", "Moderate", "Hard", "Max")
+private val COACH = mapOf(
+    "recovered" to "Recovered — room for a bigger day.",
+    "steady" to "Steady — a normal day keeps you balanced.",
+    "easy" to "Take it easy — recovery first.",
+)
+
+/** `/today.cardio`: load against today's target, zone minutes; tap → five zone rows. */
+@Composable
+private fun CardioLoad(cd: JsonObject) {
+    val c = AppTheme.colors
+    var open by remember { mutableStateOf(false) }
+    val status = cd["status"].str()
+    val load = cd["load"].num()
+    val t = cd["target"].obj()
+    val lo = t?.get("lo").num()
+    val hi = t?.get("hi").num()
+    val minutes = (cd["minutes"] as? JsonArray)?.map { it.num()?.roundToInt() ?: 0 }
+    InsetCard {
+        Column(
+            Modifier.fillMaxWidth().clickable(enabled = status != "needs_age" && minutes != null) { open = !open }.padding(AppSpace.l),
+            verticalArrangement = Arrangement.spacedBy(AppSpace.s),
+        ) {
+            Text("Cardio load", style = AppType.footnote, color = c.secondaryLabel)
+            if (status == "needs_age") {
+                Text("Set your birth year in Settings to get heart-rate zones.", style = AppType.footnote, color = c.secondaryLabel)
+                return@Column
+            }
+            Row(verticalAlignment = Alignment.Bottom) {
+                if (load != null) CountUp(load.roundToInt(), AppType.title) else Text("—", style = AppType.title)
+                if (lo != null && hi != null) Text(" of ${lo.roundToInt()}–${hi.roundToInt()}", style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(bottom = 3.dp))
+            }
+            if (status == "learning") Text("Learning your usual load · ${cd["days"].num()?.roundToInt() ?: 0}/5 days", style = AppType.subhead, color = c.secondaryLabel)
+            if (lo != null && hi != null) {
+                val now = load ?: 0.0
+                val scale = maxOf(hi * 1.4, now * 1.1, 10.0)
+                Canvas(Modifier.fillMaxWidth().height(8.dp)) {
+                    val r = CornerRadius(size.height / 2)
+                    fun x(v: Double) = (size.width * v / scale).toFloat()
+                    drawRoundRect(c.secondaryLabel.copy(alpha = 0.12f), cornerRadius = r)
+                    drawRoundRect(c.activity.copy(alpha = 0.35f), Offset(x(lo), 0f), Size(x(hi) - x(lo), size.height), r)
+                    if (now > 0) drawRoundRect(Brush.horizontalGradient(listOf(c.activity, c.light(c.activity)), endX = x(now)), size = Size(x(now), size.height), cornerRadius = r)
+                    // Ticks keep the target visible where the fill covers the band.
+                    listOf(lo, hi).filter { it < now }.forEach { drawLine(c.label, Offset(x(it), 0f), Offset(x(it), size.height), 2.dp.toPx()) }
+                }
+                COACH[t?.get("band").str()]?.let { Text(it + if (now > hi) " You're past today's target." else "", style = AppType.subhead) }
+            }
+            if (minutes != null) Text("${minutes.sum()} min in heart-rate zones", style = AppType.footnote, color = c.secondaryLabel)
+        }
+        AnimatedVisibility(open && minutes != null) {
+            Column {
+                minutes.orEmpty().forEachIndexed { i, m ->
+                    Hairline(Modifier.padding(start = AppSpace.l))
+                    Row(Modifier.fillMaxWidth().padding(horizontal = AppSpace.l, vertical = AppSpace.m), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(10.dp).clip(CircleShape).background(c.activity.copy(alpha = 0.35f + 0.1625f * i)))
+                        Text("Zone ${i + 1} · ${ZONES[i]}", style = AppType.body, modifier = Modifier.padding(start = AppSpace.s).weight(1f))
+                        Text(duration(m), style = AppType.body, color = c.secondaryLabel)
+                    }
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                Text(
+                    "Zones are estimated from your age and resting heart rate. Each 5 minutes adds half its zone number to the load.",
                     style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l, vertical = AppSpace.m),
                 )
             }
