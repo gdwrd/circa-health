@@ -5,9 +5,15 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
+import android.content.ClipData
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.Intent
+import android.graphics.Paint
+import android.graphics.Typeface
+import android.graphics.pdf.PdfDocument
+import androidx.core.content.FileProvider
+import java.io.File
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
@@ -193,6 +199,31 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var storedTick by remember { mutableIntStateOf(0) }
     LaunchedEffect(storedTick) { stored = withContext(Dispatchers.IO) { SampleStore.get(ctx).stats() } }
 
+    // "Share report" / "Export CSV": the last 90 days into cacheDir/share/, then the system share sheet.
+    var sharing by remember { mutableStateOf(false) }
+    fun share(pdf: Boolean) {
+        haptic.tick()
+        sharing = true
+        activity.lifecycleScope.launch {
+            val uri = Api.exportCsv(ctx)?.let { csv ->
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        val file = File(File(ctx.cacheDir, "share").apply { mkdirs() }, if (pdf) "circa-report.pdf" else "circa-export.csv")
+                        if (pdf) writeReport(ctx, csv, file) else file.writeText(csv)
+                        FileProvider.getUriForFile(ctx, ctx.packageName + ".share", file)
+                    }.onFailure { Log.w("Settings", "Share failed", it) }.getOrNull()
+                }
+            }
+            sharing = false
+            if (uri == null) Toast.makeText(ctx, "Could not load your data", Toast.LENGTH_SHORT).show()
+            else ctx.startActivity(Intent.createChooser(
+                Intent(Intent.ACTION_SEND).setType(if (pdf) "application/pdf" else "text/csv").putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    .apply { clipData = ClipData.newRawUri(null, uri) }, // the grant travels with the chooser only through ClipData
+                null,
+            ))
+        }
+    }
+
     if (showLog) return SyncLogScreen { showLog = false }
 
     LargeTitleScaffold(
@@ -309,6 +340,13 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                     }
                 }
                 SwitchRow("Ring battery", ctx.batteryAlerts, enabled = notifyGranted) { ctx.batteryAlerts = it }
+            }
+        }
+        if (med != null) item {
+            Section("Data", "The last 90 days as a one-page PDF or a spreadsheet file. Estimates from a consumer ring, not medical measurements.") {
+                ButtonRow("Share report", enabled = !sharing) { share(pdf = true) }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ButtonRow("Export CSV", enabled = !sharing) { share(pdf = false) }
             }
         }
         item {
@@ -482,6 +520,79 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             dismissButton = { TextButton({ scanResults = null }) { Text("Cancel") } },
         )
     }
+}
+
+/** One A4 page from the `/export.csv` body: period, average scores, four small charts. Fixed light colours: it is paper, not UI. */
+private fun writeReport(ctx: Context, csv: String, out: File) {
+    val lines = csv.trim().lines()
+    val col = lines.first().split(',').withIndex().associate { it.value to it.index }
+    // Days before the first ring data are dropped. The journal is the last column, so a plain split is safe for the rest.
+    val rows = lines.drop(1).map { it.split(',') }.dropWhile { r -> r.drop(1).dropLast(1).all(String::isEmpty) }
+    fun series(name: String) = rows.map { it.getOrNull(col[name] ?: -1)?.toFloatOrNull() }
+    fun day(r: List<String>?) = r?.let { runCatching { LocalDate.parse(it[0]).format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())) }.getOrNull() } ?: "—"
+
+    val ink = 0xFF1C1C1E.toInt(); val grey = 0xFF8E8E93.toInt(); val rule = 0xFFE5E5EA.toInt()
+    val indigo = 0xFF5E5CE6.toInt(); val green = 0xFF30D158.toInt(); val pink = 0xFFFF375F.toInt(); val red = 0xFFFF2D55.toInt(); val blue = 0xFF0A84FF.toInt()
+    val nunito = ctx.resources.getFont(R.font.nunito_extrabold)
+    val text = Paint(Paint.ANTI_ALIAS_FLAG)
+    val mark = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeCap = Paint.Cap.ROUND }
+    val doc = PdfDocument()
+    val page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, 1).create()) // A4 in points
+    val cv = page.canvas
+    fun put(s: String, x: Float, y: Float, size: Float, color: Int = ink, title: Boolean = false, align: Paint.Align = Paint.Align.LEFT) {
+        text.textSize = size; text.color = color; text.typeface = if (title) nunito else Typeface.DEFAULT; text.textAlign = align
+        cv.drawText(s, x, y, text)
+    }
+
+    // The Circa mark: an open ring.
+    mark.style = Paint.Style.STROKE; mark.strokeWidth = 5f; mark.color = ink
+    cv.drawArc(50f, 46f, 76f, 72f, -50f, 290f, false, mark)
+    mark.style = Paint.Style.FILL; mark.strokeWidth = 1.5f
+    put("Circa report", 90f, 68f, 24f, title = true)
+    put("${day(rows.firstOrNull())} – ${day(rows.lastOrNull())} · averages over ${rows.size} days", 48f, 100f, 11f, grey)
+    listOf(Triple("Sleep", "sleep_score", indigo), Triple("Readiness", "readiness_score", green), Triple("Activity", "activity_score", pink)).forEachIndexed { i, (name, key, color) ->
+        val x = 48f + i * 166f
+        put("$name score", x, 140f, 10f, grey)
+        put(series(key).filterNotNull().takeIf { it.isNotEmpty() }?.average()?.let { "%.0f".format(it) } ?: "—", x, 178f, 34f, color, title = true)
+    }
+    mark.color = rule; cv.drawLine(48f, 200f, 547f, 200f, mark)
+
+    // The one chart helper: title, average, min / max rules, then a line per series (neighbouring days joined, every day a dot).
+    fun chart(i: Int, title: String, unit: String, digits: Int, per: Float, vararg keys: Pair<String, Int>) {
+        val x = 48f + (i % 2) * 261.5f; val y = 224f + (i / 2) * 270f; val w = 237.5f
+        val top = y + 34f; val bottom = y + 230f; val left = x + 30f
+        val ss = keys.map { k -> series(k.first).map { it?.div(per) } }
+        val all = ss.flatten().filterNotNull()
+        put(title, x, y + 12f, 12f, title = true)
+        if (all.isEmpty()) return put("No data", x, y + 34f, 10f, grey)
+        fun f(v: Float) = "%.${digits}f".format(v)
+        put(ss.joinToString(" / ") { s -> f(s.filterNotNull().average().toFloat()) } + " $unit average", x + w, y + 12f, 10f, grey, align = Paint.Align.RIGHT)
+        val lo = all.min(); val hi = maxOf(all.max(), lo + 1f)
+        mark.color = rule; cv.drawLine(left, top, x + w, top, mark); cv.drawLine(left, bottom, x + w, bottom, mark)
+        put(f(hi), left - 6f, top + 3f, 8f, grey, align = Paint.Align.RIGHT); put(f(lo), left - 6f, bottom + 3f, 8f, grey, align = Paint.Align.RIGHT)
+        ss.forEachIndexed { k, s ->
+            mark.color = keys[k].second
+            var px = 0f; var py = 0f; var joined = false
+            s.forEachIndexed { d, v ->
+                if (v != null) {
+                    val nx = left + 4f + (x + w - left - 8f) * d / maxOf(s.size - 1, 1); val ny = bottom - 6f - (bottom - top - 12f) * (v - lo) / (hi - lo)
+                    if (joined) cv.drawLine(px, py, nx, ny, mark)
+                    cv.drawCircle(nx, ny, 1.6f, mark)
+                    px = nx; py = ny
+                }
+                joined = v != null
+            }
+        }
+    }
+    chart(0, "Resting heart rate", "bpm", 0, 1f, "rhr" to red)
+    chart(1, "Heart rate variability", "ms", 0, 1f, "hrv" to blue)
+    chart(2, "Time asleep", "h", 1, 60f, "sleep_min" to indigo)
+    chart(3, "Blood pressure", "mmHg", 0, 1f, "bp_sys" to red, "bp_dia" to ink)
+    put("Estimates from a consumer ring, not medical measurements.", 297.5f, 806f, 9f, grey, align = Paint.Align.CENTER)
+
+    doc.finishPage(page)
+    out.outputStream().use(doc::writeTo)
+    doc.close()
 }
 
 private val INTERVALS = listOf(5, 15, 30, 60, 0)

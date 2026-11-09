@@ -54,6 +54,17 @@
                 android:resource="@xml/ring_widget_info" />
         </receiver>
 
+        <!-- Share report / Export CSV: read-only grants on cacheDir/share/ only -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.share"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/share_paths" />
+        </provider>
+
         <!-- WorkManager foreground service -->
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"

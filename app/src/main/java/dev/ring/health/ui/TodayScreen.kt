@@ -287,7 +287,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
         d["cardio"].obj()?.let { item { CardioLoad(it) } }
         val tonight = d["tonight"].obj()
         val plan = tonight?.get("plan").obj()
-        if (LocalTime.now().hour >= 18 && tonight != null && plan != null) item { TonightCard(plan, tonight["bedtime"].obj(), tonight["wind_down_usual"].num()) }
+        if (LocalTime.now().hour >= 18 && tonight != null && plan != null) item { TonightCard(plan, tonight["bedtime"].obj(), tonight["wind_down_usual"].num(), tonight["what_if"].obj()) }
         else if (LocalTime.now().hour >= 18 && tonight != null) {
             val b = tonight["bedtime"].obj()?.takeIf { it["status"].str() == "ok" }
             val start = b?.get("start_min").num()
@@ -940,7 +940,7 @@ internal fun iosSwitchColors(): SwitchColors {
 
 /** Tonight's bedtime plan (backend `tonight.plan`; times are minutes after noon). Tap opens the Sleep tab. */
 @Composable
-private fun TonightCard(p: JsonObject, bedtime: JsonObject?, settle: Double?) {
+private fun TonightCard(p: JsonObject, bedtime: JsonObject?, settle: Double?, whatIf: JsonObject?) {
     val c = AppTheme.colors
     val ctx = LocalContext.current
     fun noon(m: Double?) = clock(LocalTime.NOON.plusMinutes((m ?: 0.0).roundToInt().toLong()))
@@ -966,8 +966,48 @@ private fun TonightCard(p: JsonObject, bedtime: JsonObject?, settle: Double?) {
                 style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.xs),
             )
             if (settle != null) Text("Your body usually starts to settle around ${noon(settle)}.", style = AppType.subhead, modifier = Modifier.padding(top = AppSpace.s))
+            // What-if (backend `tonight.what_if`): next-day readiness after rest / hard days in the user's own history.
+            val rest = whatIf?.get("rest").obj()
+            val train = whatIf?.get("train").obj()
+            val rf = rest?.get("full").obj()
+            val tf = train?.get("full").obj()
+            if (rf != null && tf != null) {
+                Row(Modifier.fillMaxWidth().padding(top = AppSpace.l)) {
+                    WhatIfRing("Rest", rf, Modifier.weight(1f))
+                    WhatIfRing("Train", tf, Modifier.weight(1f))
+                }
+                Text(
+                    "Tomorrow's readiness after ${rf["n"].num()?.roundToInt()} rest days and ${tf["n"].num()?.roundToInt()} hard days like this.",
+                    style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s),
+                )
+                val short = listOfNotNull(
+                    rest?.get("short").obj()?.get("median").num()?.let { "${it.roundToInt()} on rest days" },
+                    train?.get("short").obj()?.get("median").num()?.let { "${it.roundToInt()} on hard days" },
+                )
+                if (short.isNotEmpty()) Text("After a short night it is usually ${join(short)}.", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.xs))
+            }
             if (foot != null) Text(foot, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s))
         }
+    }
+}
+
+/** One what-if bucket (`{median, lo, hi, n}`): the median as a ring, the usual range as a faint outer arc. */
+@Composable
+private fun WhatIfRing(name: String, b: JsonObject, modifier: Modifier) {
+    val c = AppTheme.colors
+    val median = b["median"].num()?.roundToInt() ?: 0
+    val lo = b["lo"].num()?.roundToInt() ?: median
+    val hi = b["hi"].num()?.roundToInt() ?: median
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(Modifier.size(72.dp), contentAlignment = Alignment.Center) {
+            Canvas(Modifier.fillMaxSize().semantics { contentDescription = "$name: readiness $median, usually $lo to $hi." }) {
+                val w = 3.dp.toPx()
+                drawArc(c.readinessLight, -90f + 3.6f * lo, (3.6f * (hi - lo)).coerceAtLeast(1f), false, Offset(w / 2, w / 2), Size(size.width - w, size.height - w), style = Stroke(w, cap = StrokeCap.Round))
+            }
+            ScoreRing(median / 100f, c.readiness, Modifier.size(60.dp), stroke = 6.dp, animate = !LocalReduceMotion.current) { CountUp(median, AppType.title) }
+        }
+        Text(name, style = AppType.subhead, modifier = Modifier.padding(top = AppSpace.xs))
+        Text("usually $lo–$hi", style = AppType.footnote, color = c.secondaryLabel)
     }
 }
 

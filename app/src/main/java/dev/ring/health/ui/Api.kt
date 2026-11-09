@@ -84,6 +84,12 @@ object Api {
     suspend fun settings(ctx: Context) = get(ctx, "/settings") as? JsonObject
     suspend fun notifications(ctx: Context) = get(ctx, "/notifications/pending")
 
+    /** GET /export.csv: the last 90 days as CSV text on 2xx, else null. Never cached: a share must be current. */
+    suspend fun exportCsv(ctx: Context): String? = withContext(Dispatchers.IO) {
+        val req = request(ctx, "/export.csv?days=90") ?: return@withContext null
+        runCatching { client.newCall(req).execute().use { r -> if (r.isSuccessful) r.body!!.string() else null } }.getOrNull()
+    }
+
     suspend fun ack(ctx: Context, id: Int): Boolean = call(ctx, "/notifications/$id/ack", "POST") != null
 
     /** Returns the new entry id, or null on failure. */
