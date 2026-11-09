@@ -9,6 +9,7 @@ import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseInOut
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -282,7 +283,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
         d["cardio"].obj()?.let { item { CardioLoad(it) } }
         val tonight = d["tonight"].obj()
         val plan = tonight?.get("plan").obj()
-        if (LocalTime.now().hour >= 18 && tonight != null && plan != null) item { TonightCard(plan, tonight["bedtime"].obj()) }
+        if (LocalTime.now().hour >= 18 && tonight != null && plan != null) item { TonightCard(plan, tonight["bedtime"].obj(), tonight["wind_down_usual"].num()) }
         else if (LocalTime.now().hour >= 18 && tonight != null) {
             val b = tonight["bedtime"].obj()?.takeIf { it["status"].str() == "ok" }
             val start = b?.get("start_min").num()
@@ -884,7 +885,7 @@ internal fun iosSwitchColors(): SwitchColors {
 
 /** Tonight's bedtime plan (backend `tonight.plan`; times are minutes after noon). Tap opens the Sleep tab. */
 @Composable
-private fun TonightCard(p: JsonObject, bedtime: JsonObject?) {
+private fun TonightCard(p: JsonObject, bedtime: JsonObject?, settle: Double?) {
     val c = AppTheme.colors
     val ctx = LocalContext.current
     fun noon(m: Double?) = clock(LocalTime.NOON.plusMinutes((m ?: 0.0).roundToInt().toLong()))
@@ -909,6 +910,7 @@ private fun TonightCard(p: JsonObject, bedtime: JsonObject?) {
                 if (extra > 0) "$base + ${duration(extra)} catch-up before your $alarm alarm" else "$base before your $alarm alarm",
                 style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.xs),
             )
+            if (settle != null) Text("Your body usually starts to settle around ${noon(settle)}.", style = AppType.subhead, modifier = Modifier.padding(top = AppSpace.s))
             if (foot != null) Text(foot, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s))
         }
     }
@@ -1051,11 +1053,11 @@ internal val METRIC = mapOf(
     "sleep_score" to ("Sleep score" to "sleep score"), "deep_min" to ("Deep" to "deep sleep"), "rem_min" to ("REM" to "REM sleep"),
     "hrv" to ("HRV" to "HRV"), "rhr" to ("Resting HR" to "resting heart rate"), "total_min" to ("Time asleep" to "time asleep"),
     "awake_min" to ("Awake" to "time awake"), "bed_start" to ("Bedtime" to "bedtime"), "strain" to ("Strain" to "strain index"),
-    "day_hr" to ("Daytime HR" to "daytime heart rate"),
+    "day_hr" to ("Daytime HR" to "daytime heart rate"), "wind_down" to ("Settling" to "settling time"),
 )
 
-// 1 = higher is better, -1 = lower is better; bedtime is neither.
-private val BETTER = mapOf("sleep_score" to 1, "deep_min" to 1, "rem_min" to 1, "hrv" to 1, "total_min" to 1, "rhr" to -1, "awake_min" to -1, "strain" to -1, "day_hr" to -1, "stress" to -1)
+// 1 = higher is better, -1 = lower is better (wind_down: later is worse); bedtime is neither.
+private val BETTER = mapOf("sleep_score" to 1, "deep_min" to 1, "rem_min" to 1, "hrv" to 1, "total_min" to 1, "rhr" to -1, "awake_min" to -1, "strain" to -1, "day_hr" to -1, "stress" to -1, "wind_down" to -1)
 
 /** Pill / change colour: good, bad or neutral for this metric. */
 @Composable
@@ -1065,12 +1067,12 @@ internal fun effectColor(metric: String, delta: Double): Color {
     return if (dir > 0) c.goodText else if (dir < 0) c.badText else c.secondaryLabel
 }
 
-/** bed_start is minutes from midnight (23:30 = -30). */
+/** bed_start and wind_down are minutes from midnight (23:30 = -30). */
 internal fun bedClock(m: Double): String = clock(LocalTime.MIDNIGHT.plusMinutes(m.roundToInt().toLong()))
 
 /** A value in its unit: "52 min", "7 h 12 min", "11:40 PM", "58 bpm", "78". */
 internal fun metricValue(metric: String, v: Double): String = when (metric) {
-    "bed_start" -> bedClock(v)
+    "bed_start", "wind_down" -> bedClock(v)
     "total_min" -> duration(v.roundToInt())
     "strain" -> "%.1f".format(v)
     "sleep_score" -> v.roundToInt().toString()
@@ -1086,7 +1088,7 @@ internal fun metricDelta(metric: String, d: Double, pct: Double?): String {
         metric == "hrv" && pct != null -> "${kotlin.math.abs(pct).roundToInt()} %"
         metric == "strain" -> "%.1f".format(a)
         metric == "sleep_score" -> "${a.roundToInt()} pts"
-        metric == "bed_start" || metric == "total_min" -> "${a.roundToInt()} min"
+        metric == "bed_start" || metric == "wind_down" || metric == "total_min" -> "${a.roundToInt()} min"
         else -> metricValue(metric, a)
     }
     return if (body.startsWith("0 ") || body == "0.0") body else (if (d < 0) "−" else "+") + body // no "−0 ms"
@@ -1099,6 +1101,7 @@ private fun sentence(kind: String, e: JsonObject): String? {
     if (kind == "sick") return "Around days you logged feeling unwell, your strain index averaged ${metricValue(m, w)} vs ${metricValue(m, wo)} on other nights."
     val on = "On nights ${AFTER[kind]}"
     return if (m == "bed_start") "$on you tended to fall asleep at ${bedClock(w)} vs ${bedClock(wo)}."
+    else if (m == "wind_down") "$on your body started to settle at ${bedClock(w)} vs ${bedClock(wo)}."
     else "$on your ${METRIC[m]?.second ?: m} averaged ${metricValue(m, w)} vs ${metricValue(m, wo)}."
 }
 
@@ -1124,7 +1127,12 @@ private fun WhatAffectsYou(kinds: List<Pair<String, JsonObject>>, onTest: (() ->
                         style = AppType.subhead, color = effectColor("stress", d),
                     )
                 } } }
-                Column(Modifier.fillMaxWidth().clickable(enabled = ok) { open = !open }.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                // Sick only: days the strain index was already raised before the logged day (median over episodes).
+                val lead = k["lead"].obj()?.get("days").num()?.roundToInt()?.takeIf { it > 0 }?.coerceAtMost(7)?.let { n -> @Composable {
+                    LeadStrip(n)
+                    Text("Your body signals rose about $n ${if (n == 1) "day" else "days"} before you felt sick.", style = AppType.subhead)
+                } }
+                Column(Modifier.fillMaxWidth().clickable(enabled = ok) { haptic.tick(); open = !open }.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
                     if (!ok) {
                         val need = 3 - nWith
                         val wo = 3 - (k["n_without"].num()?.roundToInt() ?: 0)
@@ -1133,6 +1141,7 @@ private fun WhatAffectsYou(kinds: List<Pair<String, JsonObject>>, onTest: (() ->
                             style = AppType.subhead, color = c.secondaryLabel,
                         )
                         stress?.invoke()
+                        lead?.invoke()
                         return@Column
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1141,6 +1150,7 @@ private fun WhatAffectsYou(kinds: List<Pair<String, JsonObject>>, onTest: (() ->
                         Text(if (open) "Less" else "More", style = AppType.footnote, color = c.tint)
                     }
                     stress?.invoke()
+                    lead?.invoke()
                     val top = (k["top"] as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
                     if (top.isEmpty()) Text("No clear effect so far.", style = AppType.subhead, color = c.secondaryLabel)
                     else FlowRow(horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
@@ -1282,6 +1292,28 @@ private fun ExperimentCard(x: JsonObject, onAgain: () -> Unit, onDone: () -> Uni
                 TintButton("Run again", Modifier.weight(1f)) { haptic.tick(); onAgain() }
                 TintButton("Done", Modifier.weight(1f)) { haptic.tick(); onDone() }
             }
+        }
+    }
+}
+
+/** The week before a "sick" day as dots: calm on the line, the last [days] walking up to the day itself. */
+@Composable
+private fun LeadStrip(days: Int) {
+    val c = AppTheme.colors
+    val reduce = LocalReduceMotion.current
+    val rise = remember { Animatable(if (reduce) 1f else 0f) }
+    LaunchedEffect(rise) { rise.animateTo(1f, tween(600)) }
+    Canvas(
+        Modifier.fillMaxWidth().height(36.dp)
+            .semantics { contentDescription = "Seven days before feeling sick: signals raised on the last $days." },
+    ) {
+        val slot = size.width / 8
+        val r = minOf(slot * 0.3f, 5.dp.toPx())
+        val base = size.height - r * 1.4f
+        for (i in 0..7) {
+            val step = (i - 6 + days).coerceAtLeast(0) // 0 = calm, days + 1 = the sick day
+            val o = Offset(slot * (i + 0.5f), base - (base - r * 1.4f) * rise.value * step / (days + 1))
+            drawCircle(if (i == 7) c.signalHigh else if (step > 0) c.signalElevated else c.signalCalm, if (i == 7) r * 1.4f else r, o)
         }
     }
 }

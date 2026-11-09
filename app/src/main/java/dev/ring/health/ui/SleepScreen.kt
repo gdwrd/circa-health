@@ -1,6 +1,8 @@
 package dev.ring.health.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -36,10 +38,14 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.drawText
@@ -271,6 +277,7 @@ fun SleepScreen(backend: Boolean?) {
             d["bedtime"].obj()?.let { b -> item { Bedtime(b, week, d["plan"].obj()) } }
             if (d.containsKey("sleep_extra")) item { BloodOxygen(d["sleep_extra"].obj()?.get("spo2").obj(), date != LocalDate.now()) }
         }
+        d["jetlag"].obj()?.let { j -> item { BodyClock(j) } }
         val t = trend ?: return@LargeTitleScaffold
         item {
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
@@ -562,6 +569,78 @@ private fun Bedtime(b: JsonObject, week: List<Pair<LocalDate, JsonObject?>>, pla
                 }
                 Text(line, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = if (ok) AppSpace.s else AppSpace.xs))
             }
+        }
+    }
+}
+
+// Time-zone simile by whole hours of shift (1 to 5 or more).
+private val CITIES = listOf("Athens", "Istanbul", "Dubai", "Delhi", "Bangkok")
+
+/** `/sleep.jetlag` (28 days): weekday and weekend sleep midpoints (minutes after noon) as two dots on a night band, the shift as a flight arc. */
+@Composable
+private fun BodyClock(j: JsonObject) {
+    val c = AppTheme.colors
+    val wd = j["weekday_min"].num() ?: return
+    val we = j["weekend_min"].num() ?: return
+    val delta = j["delta_min"].num()?.roundToInt() ?: return
+    val shift = abs(delta)
+    val steady = shift < 30
+    val city = CITIES[(shift / 60.0).roundToInt().coerceIn(1, 5) - 1]
+    val reduce = LocalReduceMotion.current
+    // One 600 ms ease: the weekend dot flies the arc while the number counts up.
+    val fly = remember(wd, we) { Animatable(if (reduce) 1f else 0f) }
+    LaunchedEffect(fly) { fly.animateTo(1f, tween(600)) }
+    val measurer = rememberTextMeasurer()
+    val label = AppType.footnote.copy(color = c.secondaryLabel)
+    val fs = LocalDensity.current.fontScale
+    Section("Body clock") {
+        Column(Modifier.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+            if (steady) Text("Your clock is steady.", style = AppType.headline)
+            else Text(duration((shift * fly.value).roundToInt()), style = AppType.title)
+            // Two footnote lines (flight label, hours) scale with the system font; the band and the arc do not.
+            Canvas(
+                Modifier.fillMaxWidth().height((if (steady) 18 * fs + 32 else 36 * fs + 42).dp)
+                    .semantics { contentDescription = "Middle of your sleep: ${noonClock(wd)} on weekdays, ${noonClock(we)} on weekends." },
+            ) {
+                val lo = floor((minOf(wd, we) - 90) / 60) * 60
+                val hi = ceil((maxOf(wd, we) + 90) / 60) * 60
+                fun x(m: Double) = ((m - lo) / (hi - lo) * size.width).toFloat()
+                val bandH = 20.dp.toPx()
+                val hours = listOf(lo, (lo + hi) / 2, hi).map { measurer.measure(noonClock(it).replace(":00 ", " "), label) }
+                val cy = size.height - hours[0].size.height - 4.dp.toPx() - bandH / 2
+                drawRoundRect(c.nightTop, Offset(0f, cy - bandH / 2), Size(size.width, bandH), CornerRadius(bandH / 2))
+                hours.forEachIndexed { i, m ->
+                    drawText(m, topLeft = Offset(listOf(0f, (size.width - m.size.width) / 2f, size.width - m.size.width)[i], size.height - m.size.height))
+                }
+                val a = Offset(x(wd), cy)
+                val b = Offset(x(we), cy)
+                var head = b
+                if (!steady) {
+                    val to = measurer.measure("to $city", label)
+                    val top = Offset((a.x + b.x) / 2, 2 * (to.size.height + 4.dp.toPx()) - cy) // control point: the arc peaks just under the label
+                    fun at(t: Float) = a * ((1 - t) * (1 - t)) + top * (2 * (1 - t) * t) + b * (t * t)
+                    head = at(fly.value)
+                    val arc = Path().apply { moveTo(a.x, a.y); for (i in 1..24) at(fly.value * i / 24).let { lineTo(it.x, it.y) } }
+                    drawPath(arc, c.sleepLight, style = Stroke(1.5.dp.toPx(), cap = StrokeCap.Round, pathEffect = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx()))))
+                    drawText(to, topLeft = Offset((top.x - to.size.width / 2f).coerceIn(0f, size.width - to.size.width), 0f), alpha = fly.value)
+                }
+                listOf(a to c.sleep, head to c.sleepLight).forEach { (o, col) ->
+                    drawCircle(c.card, 7.dp.toPx(), o)
+                    drawCircle(col, 5.dp.toPx(), o)
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.m)) {
+                listOf("Weekdays" to c.sleep, "Weekends" to c.sleepLight).forEach { (name, col) ->
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
+                        Box(Modifier.size(8.dp).background(col, CircleShape))
+                        Text(name, style = AppType.footnote, color = c.secondaryLabel)
+                    }
+                }
+            }
+            if (!steady) Text(
+                "Your weekends run ${duration(shift)} ${if (delta > 0) "later" else "earlier"}, like flying to $city every Friday.",
+                style = AppType.subhead,
+            )
         }
     }
 }

@@ -104,6 +104,7 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
     var rhr90 by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
     var date by remember { mutableStateOf(LocalDate.now()) }
     var day by remember { mutableStateOf<JsonObject?>(null) }
+    var nextInputs by remember { mutableStateOf<JsonObject?>(null) } // the night that starts on [date] belongs to the next wake date
     var workouts by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
     var breaths by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
     var bp by remember { mutableStateOf<List<Triple<LocalDate, Int, Int>>>(emptyList()) }
@@ -120,6 +121,7 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
             day = d
             workouts = (d["workouts"] as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
         }
+        if (date < LocalDate.now()) nextInputs = Api.today(ctx, date.plusDays(1)).obj()?.get("inputs").obj()
     }
     suspend fun load() {
         trend(Api.trends(ctx, "rhr", 30))?.let { rhr = it }
@@ -146,7 +148,7 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
         loaded = true
     }
     LaunchedEffect(Unit) { load() }
-    LaunchedEffect(date) { hr = null; breaths = emptyList(); day = null; workouts = emptyList(); loadDay() }
+    LaunchedEffect(date) { hr = null; breaths = emptyList(); day = null; nextInputs = null; workouts = emptyList(); loadDay() }
 
     val c = AppTheme.colors
     val inputs = day?.get("inputs").obj()
@@ -181,9 +183,14 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
                     val byX = xy.toMap()
                     val spans = workouts.mapNotNull { w -> w["start"].num()?.let { s -> w["end"].num()?.let { e -> (s - t0) / SLOT_S to (e - t0) / SLOT_S } } }
                     val breathSpans = breaths.mapNotNull { w -> w["start"].num()?.let { s -> w["end"].num()?.let { e -> (s - t0) / SLOT_S to (e - t0) / SLOT_S } } }
+                    // "Settling" to asleep; inputs are minutes after noon of the evening before the wake date (noon = slot 144).
+                    val settling = listOf(inputs to -144.0, nextInputs to 144.0).mapNotNull { (n, off) ->
+                        n?.get("wind_down").num()?.let { w -> n?.get("bed_start").num()?.takeIf { it > w }?.let { b -> off + w / 5 to off + b / 5 } }
+                    }.filter { it.second > 0 && it.first < 288 }
                     Chart(
                         listOf(xy), c.heart, true, 72, 0, x = 0.0..287.0,
                         decorations = listOfNotNull(
+                            settling.takeIf { it.isNotEmpty() }?.let { DoseWindows(it, c.sleepBand.toArgb(), alpha = (c.sleepBand.alpha * 255).roundToInt(), line = false) },
                             spans.takeIf { it.isNotEmpty() }?.let { DoseWindows(it, c.heart.toArgb(), alpha = 31, line = false) },
                             // A 2-min session is under 1 px wide on the 24 h axis: the start line makes it visible.
                             breathSpans.takeIf { it.isNotEmpty() }?.let { DoseWindows(it, c.breathe.toArgb(), alpha = 31) },
@@ -191,6 +198,12 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
                         ),
                         marker = { x -> "${byX[x]?.roundToInt()} bpm · ${clock(t0 + x * SLOT_S)}" },
                     ) { x -> clock(t0 + x * SLOT_S).replace(":00 ", " ") }
+                    settling.forEach { (a, b) ->
+                        Text(
+                            "Settling ${clock(t0 + a * SLOT_S)} · asleep ${clock(t0 + b * SLOT_S)}", style = AppType.footnote, color = c.secondaryLabel,
+                            modifier = Modifier.padding(start = AppSpace.l, bottom = AppSpace.s),
+                        )
+                    }
                     shown.forEach { t ->
                         Text(
                             "Dose ${clock(t.toDouble())} · active until ~${clock(t + windowH * 3600.0)}", style = AppType.footnote, color = c.secondaryLabel,
