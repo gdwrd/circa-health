@@ -78,7 +78,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         }
         val vmUrl = applicationContext.vmUrl
         if (vmUrl.isBlank()) {
-            Log.w(TAG, "No VictoriaMetrics URL configured")
+            Log.w(TAG, "No server URL configured")
             log("Skipped: no server URL in Settings")
             return Result.failure()
         }

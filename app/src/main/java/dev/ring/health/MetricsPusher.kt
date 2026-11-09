@@ -27,8 +27,8 @@ class MetricsPusher(private val baseUrl: String, private val token: String = "")
         .writeTimeout(10, TimeUnit.SECONDS)
         .build()
 
-    // Push metrics in Prometheus text format to VictoriaMetrics /api/v1/import/prometheus.
-    // Timestamps in the exposition format are in milliseconds (VM accepts both ms and s).
+    // Push metrics in Prometheus text format to the backend's /api/v1/import/prometheus.
+    // Timestamps in the exposition format are in milliseconds.
     fun push(metrics: List<Metric>): Boolean {
         if (metrics.isEmpty()) return true
 

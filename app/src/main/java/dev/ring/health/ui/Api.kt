@@ -112,7 +112,7 @@ object Api {
         return cache?.takeIf { it.first == key(ctx) }?.second
     }
 
-    /** `/today` answers 200 on the backend; plain VictoriaMetrics answers 404. */
+    /** `/today` answers 200 when the URL points at the backend. */
     suspend fun hasBackend(ctx: Context): Boolean {
         cached(ctx)?.let { return it }
         val k = key(ctx)
