@@ -276,3 +276,22 @@ def test_morning_waits_for_scored_night(monkeypatch) -> None:
     seed_morning()
     notify.evaluate(set())
     assert "morning" in kinds()
+
+
+def test_bedtime_uses_best_window(monkeypatch, env) -> None:
+    """14 scored nights: even days in bed 22:00 (quality 90), odd days 23:30 (60) → window 22:00-23:00."""
+    env["biometric_steps"] = {1.0: 100.0}
+    for i in range(14):
+        d, q = D - timedelta(i), 90.0 if i % 2 == 0 else 60.0
+        s = vm.midnight(d - timedelta(1)) + timedelta(hours=22, minutes=0 if i % 2 == 0 else 30 * 3)
+        c = {k: q for k in ("total", "efficiency", "restfulness", "rem", "deep")} | {"timing": 0.0, "regularity": 0.0}
+        db.save_day(d, (None, None, None), {"sleep": c, "session": {"start": s.timestamp(), "end": s.timestamp() + 8 * 3600}}, {})
+    assert notify.bedtime_window(D)["start_min"] == 600
+    at(monkeypatch, 21, 20)
+    notify.evaluate(set())
+    assert kinds() == []  # before 21:30
+    at(monkeypatch, 21, 40)
+    notify.evaluate(set())
+    notify.evaluate(set())
+    (n,) = notify.pending()
+    assert (n["title"], n["body"]) == ("Wind down", "Your best nights start around 22:00.")

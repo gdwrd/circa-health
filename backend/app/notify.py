@@ -2,7 +2,7 @@ import json
 import logging
 from contextlib import closing
 from datetime import date, datetime, timedelta
-from statistics import median
+from statistics import mean, median
 
 from . import cardio, db, scoring, vm
 
@@ -57,19 +57,40 @@ def _readiness(now: datetime, dates: set[date]) -> None:
     _add("readiness", f"Readiness {row['readiness_score']}", body, now)
 
 
+def _after_noon(ts: float) -> int:
+    t = datetime.fromtimestamp(ts, vm.tz())
+    return (t.hour * 60 + t.minute - 720) % 1440  # minutes after noon: no wrap at midnight
+
+
+QUALITY = ("total", "efficiency", "restfulness", "rem", "deep")  # timing/regularity left out on purpose
+
+
+def bedtime_window(d: date) -> dict:
+    """scoring.bedtime_window over the last 60 days' scored nights (shared by /sleep, /today and _bedtime)."""
+    nights = [(_after_noon(r["c"]["session"]["start"]), mean(r["c"]["sleep"][k] for k in QUALITY))
+              for r in db.days(d - timedelta(59), d) if r["c"].get("session") and r["c"].get("sleep")]
+    return scoring.bedtime_window(nights)
+
+
 def _bedtime(now: datetime, dates: set[date]) -> None:
     d = now.date()
-    starts = [datetime.fromtimestamp(r["c"]["session"]["start"], vm.tz())
-              for r in db.days(d - timedelta(13), d) if r["c"].get("session")]
-    if len(starts) < 5 or _fired("bedtime", now):
+    if _fired("bedtime", now):
         return
-    med = median((s.hour * 60 + s.minute - 720) % 1440 for s in starts)  # minutes after noon: no wrap at midnight
     noon = vm.midnight(d) + timedelta(hours=12)
     if now < noon:
         noon -= timedelta(1)
-    target = noon + timedelta(minutes=med)
+    w = bedtime_window(d)
+    if w["status"] == "ok":
+        target = noon + timedelta(minutes=w["start_min"])
+        title, body = "Wind down", f"Your best nights start around {target:%H:%M}."
+    else:
+        starts = [r["c"]["session"]["start"] for r in db.days(d - timedelta(13), d) if r["c"].get("session")]
+        if len(starts) < 5:
+            return
+        target = noon + timedelta(minutes=median(_after_noon(s) for s in starts))
+        title, body = "Bedtime soon", f"Your usual bedtime is {target:%H:%M}."
     if target - timedelta(minutes=30) <= now < target:
-        _add("bedtime", "Bedtime soon", f"Your usual bedtime is {target:%H:%M}.", now)
+        _add("bedtime", title, body, now)
 
 
 def _inactivity(now: datetime, dates: set[date]) -> None:

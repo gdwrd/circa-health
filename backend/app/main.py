@@ -230,6 +230,13 @@ def _day(day: str | None) -> date:
         raise HTTPException(422, "bad date")
 
 
+def _debt(end: date) -> dict | None:
+    """Sleep debt over the 7 nights ending at end (sleep + naps, as sleep balance)."""
+    ins = [r["inputs"] for r in db.days(end - timedelta(6), end)]
+    return scoring.sleep_debt([None if i.get("sleep_min") is None else i["sleep_min"] + (i.get("nap_min") or 0)
+                               for i in ins], db.setting("sleep_need_min"))
+
+
 @api.get("/today")
 def today(day: str | None = Query(None, alias="date")) -> dict:
     d = _day(day)
@@ -253,6 +260,7 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
                    "minutes": (row["c"].get("cardio") or {}).get("minutes"), "days": days,
                    "target": cardio.target(row.get("readiness_score"), m) if status == "ok" else None},
         "workouts": row["c"].get("workouts", []),
+        "tonight": {"bedtime": notify.bedtime_window(_today()), "debt": _debt(_today())},
     }
 
 
@@ -273,7 +281,8 @@ def sleep(day: str | None = Query(None, alias="date")) -> dict:
     return {"date": d.isoformat(), "status": "ok" if n else "learning", "score": row.get("sleep_score"),
             "contributors": row["c"].get("sleep"), "session": n, "stages": stages,
             "naps": (row["c"].get("sleep_extra") or {}).get("naps", []), "hr": hr, "sleep_extra": row["c"].get("sleep_extra"),
-            "hr_low": hr[scoring.low_index([p["bpm"] for p in hr])] if hr else None}
+            "hr_low": hr[scoring.low_index([p["bpm"] for p in hr])] if hr else None,
+            "debt": _debt(d), "bedtime": notify.bedtime_window(_today())}
 
 
 SCORES = {"sleep": "sleep_score", "readiness": "readiness_score", "activity": "activity_score"}

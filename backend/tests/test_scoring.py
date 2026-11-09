@@ -3,8 +3,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.scoring import (activity_score, baseline, low_index, readiness_score, regularity, resilience, robust,
-                         sleep_score, strain, stress_zones)
+from app.scoring import (activity_score, baseline, bedtime_window, low_index, readiness_score, regularity, resilience,
+                         robust, sleep_debt, sleep_score, strain, stress_zones)
 
 GOOD = {"total_min": 480, "awake_min": 8, "rem_min": 100, "deep_min": 100, "midpoint_h": 2.0, "regularity_sd": 20}
 SHORT = {"total_min": 240, "awake_min": 20, "rem_min": 40, "deep_min": 30, "midpoint_h": 1.0}
@@ -113,3 +113,21 @@ def test_regularity_curve_and_learning():
 
 def test_low_index_first_near_minimum():
     assert low_index([60, 58, 52, 50, 51]) == 2  # 52 <= 50 x 1.05
+
+
+def test_sleep_debt_offsets_learning_and_cap():
+    assert sleep_debt([450, 450, None], 450) is None  # under 3 nights
+    assert sleep_debt([400, 420, 500, None], 450) == {"debt_min": 30, "nights": 3, "suggest_min": 10}  # 50+30-50
+    assert sleep_debt([500, 500, 500], 450) == {"debt_min": 0, "nights": 3, "suggest_min": 0}  # surplus is not credit
+    assert sleep_debt([445, 445, 445], 450)["suggest_min"] == 0  # debt 15 < 30
+    assert sleep_debt([300] * 7, 450) == {"debt_min": 1050, "nights": 7, "suggest_min": 60}
+
+
+def test_bedtime_window_learning_flat_ok():
+    assert bedtime_window([(600, 80)] * 13) == {"status": "learning", "nights": 13}
+    assert bedtime_window([(600 + 10 * i, 80) for i in range(14)]) == {"status": "flat", "nights": 14}
+    # 22:00 x6 q90, 23:00 x5 q70, 00:00 x5 q60, 01:20 x2 q100 (too few nights to be a window)
+    n = [(600, 90)] * 6 + [(660, 70)] * 5 + [(720, 60)] * 5 + [(800, 100)] * 2
+    assert bedtime_window(n) == {"status": "ok", "start_min": 600, "end_min": 660, "score_in": 90,
+                                 "score_out": 71, "nights": 18, "nights_in": 6}  # (350+300+200)/12
+    assert bedtime_window([(600, 81)] * 7 + [(700, 79)] * 7)["status"] == "flat"  # 2 apart < 3

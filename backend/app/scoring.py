@@ -49,6 +49,33 @@ def regularity(midpoints_min: list[float]) -> float | None:
     return pstdev(m) if len(m) >= 4 else None
 
 
+def sleep_debt(asleep_7: list[float | None], need_min: float) -> dict | None:
+    """asleep_7: sleep + naps per night (None = no night); surplus nights offset shortfalls. None under 3 nights."""
+    v = [a for a in asleep_7 if a is not None]
+    if len(v) < 3:
+        return None
+    debt = max(0.0, sum(need_min - a for a in v))
+    return {"debt_min": round(debt), "nights": len(v),
+            "suggest_min": 0 if debt < 30 else min(60, round(debt / 3 / 5) * 5)}
+
+
+def bedtime_window(nights: list[tuple[float, float]]) -> dict:
+    """nights: (bed_start minutes after noon, quality). Best 60-min span (30-min grid, >= 5 nights) vs the rest."""
+    if len(nights) < 14:
+        return {"status": "learning", "nights": len(nights)}
+    beds = [b for b, _ in nights]
+    best = None
+    for start in range(int(min(beds)) // 30 * 30, int(max(beds)) + 1, 30):
+        q = [x for b, x in nights if start <= b < start + 60]
+        if len(q) >= 5 and (best is None or mean(q) > best[1]):
+            best = (start, mean(q), len(q))
+    out = best and [x for b, x in nights if not best[0] <= b < best[0] + 60]
+    if not out or best[1] - mean(out) < 3:  # no candidate with 5 nights counts as flat too
+        return {"status": "flat", "nights": len(nights)}
+    return {"status": "ok", "start_min": best[0], "end_min": best[0] + 60, "score_in": round(best[1]),
+            "score_out": round(mean(out)), "nights": len(nights), "nights_in": best[2]}
+
+
 def low_index(hr: list[float]) -> int:
     """Index of the first sample within 5 % of the minimum (night HR near its low)."""
     return next(i for i, v in enumerate(hr) if v <= min(hr) * 1.05)

@@ -331,3 +331,29 @@ def test_cardio_settings_today_and_workout_relabel(tmp_path, monkeypatch) -> Non
                     {"start": int(w0), "kind": "walk"}, {"date": d.isoformat(), "start": "x", "kind": "walk"}):
             assert c.patch("/workouts", json=bad, headers=H).status_code == 422, bad
         assert c.patch("/settings", json={"birth_year": ""}, headers=H).json()["birth_year"] == ""
+
+
+def test_sleep_debt_and_bedtime_fields(tmp_path, monkeypatch) -> None:
+    """14 nights to today: even days 22:00 (quality 90), odd days 23:30 (60); last 3 nights 400 / 420+30 nap / 470."""
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "f2.db"))
+    monkeypatch.delenv("TZ", raising=False)
+    db.init()
+    monkeypatch.setattr(vm, "series", lambda e, s, en, st: {})
+    monkeypatch.setattr(main, "_vitals", lambda: {})
+    d = date.today()
+    asleep = {0: (400.0, 0.0), 1: (420.0, 30.0), 2: (470.0, None)}
+    for i in range(14):
+        q = 90.0 if i % 2 == 0 else 60.0
+        s = (vm.midnight(d - timedelta(i + 1)) + timedelta(hours=22, minutes=0 if i % 2 == 0 else 90)).timestamp()
+        sm, nap = asleep.get(i, (None, None))
+        db.save_day(d - timedelta(i), (None, None, None),
+                    {"sleep": {k: q for k in ("total", "efficiency", "restfulness", "rem", "deep")},
+                     "session": {"start": s, "end": s + 8 * 3600}, "inputs": {"sleep_min": sm, "nap_min": nap}}, {})
+    window = {"status": "ok", "start_min": 600, "end_min": 660, "score_in": 90, "score_out": 60, "nights": 14,
+              "nights_in": 7}
+    debt = {"debt_min": 30, "nights": 3, "suggest_min": 10}  # 450 need: 50 + 0 - 20 (nap counts); nights 3-6 have no sleep_min
+    with TestClient(app) as c:
+        s = c.get(f"/sleep?date={d}", headers=H).json()
+        assert s["debt"] == debt and s["bedtime"] == window
+        assert c.get(f"/sleep?date={d - timedelta(10)}", headers=H).json()["debt"] is None  # no sleep_min that week
+        assert c.get("/today", headers=H).json()["tonight"] == {"bedtime": window, "debt": debt}
