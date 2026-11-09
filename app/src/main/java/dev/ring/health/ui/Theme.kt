@@ -148,6 +148,8 @@ data class AppColors(
     val hrv: Color,
     /** Breathe screen (iOS system mint). */
     val breathe: Color,
+    /** Lighter gradient partner of [breathe] (orb centre, ring head, phase bar end). */
+    val breatheLight: Color,
     val zoneRestored: Color,
     val zoneRelaxed: Color,
     val zoneEngaged: Color,
@@ -183,6 +185,7 @@ data class AppColors(
         readiness -> readinessLight
         activity -> activityLight
         heart -> heartLight
+        breathe -> breatheLight
         else -> c
     }
 }
@@ -211,7 +214,7 @@ private val LightColors = AppColors(
     tabBar = Color(0xE6F9F9F9),
     sleep = SleepIndigo, readiness = ReadinessGreen, activity = ActivityPink,
     stageAwake = StageAwake, stageRem = StageRem, stageCore = StageCore, stageDeep = SleepIndigo,
-    heart = HeartRed, hrv = HrvCyan, breathe = Color(0xFF00C7BE),
+    heart = HeartRed, hrv = HrvCyan, breathe = Color(0xFF00C7BE), breatheLight = Color(0xFF5CE1DA),
     zoneRestored = ReadinessGreen, zoneRelaxed = StageRem, zoneEngaged = ZoneEngaged, zoneStressed = StageAwake,
     cardStroke = Color(0x0A000000),
     goodText = Color(0xFF1F7A35), badText = Color(0xFFC93400),
@@ -227,7 +230,7 @@ private val DarkColors = AppColors(
     tabBar = Color(0xE6161618),
     sleep = SleepIndigo, readiness = ReadinessGreen, activity = ActivityPink,
     stageAwake = StageAwake, stageRem = StageRem, stageCore = StageCore, stageDeep = SleepIndigo,
-    heart = HeartRed, hrv = HrvCyan, breathe = Color(0xFF63E6E2),
+    heart = HeartRed, hrv = HrvCyan, breathe = Color(0xFF63E6E2), breatheLight = Color(0xFFB0F5F2),
     zoneRestored = ReadinessGreen, zoneRelaxed = StageRem, zoneEngaged = ZoneEngaged, zoneStressed = StageAwake,
     cardStroke = Color(0x0FFFFFFF),
     nightBottom = Color(0x1F000000),
@@ -382,8 +385,9 @@ fun ScoreRing(
                     }
                     canvas.nativeCanvas.drawArc(topLeft.x, topLeft.y, topLeft.x + arc.width, topLeft.y + arc.height, 0f, sweep, false, glow)
                 }
-                // Gradient returns to the base colour after the head so the start cap does not pick up the light end.
-                val stops = if (v < 0.999f) arrayOf(0f to color, v to light, 1f to color) else arrayOf(0f to color, 1f to light)
+                // Gradient returns to the base colour after the head so the start cap does not pick up the light end;
+                // a full ring peaks halfway and ends on the base colour so 12 o'clock has no seam.
+                val stops = if (v < 0.999f) arrayOf(0f to color, v to light, 1f to color) else arrayOf(0f to color, 0.5f to light, 1f to color)
                 drawArc(Brush.sweepGradient(*stops, center = center), 0f, sweep, false, topLeft, arc, style = Stroke(w, cap = StrokeCap.Round))
             }
         }
