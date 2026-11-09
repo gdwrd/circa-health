@@ -54,6 +54,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import java.time.LocalDate
 import java.time.LocalTime
+import kotlin.math.floor
 import kotlin.math.ceil
 import kotlin.math.roundToInt
 
@@ -309,7 +310,7 @@ private fun WorkoutHr(w: JsonObject, hr: List<Pair<Double, Double>>, onRelabel: 
     val c = AppTheme.colors
     val s = w["start"].num() ?: return
     val e = w["end"].num() ?: return
-    val xy = hr.filter { it.first in s..e && it.second > 0 }.map { (it.first - s) / SLOT_S to it.second }
+    val xy = hr.filter { it.first in s..e && it.second > 0 }.associate { floor((it.first - s) / SLOT_S) to it.second }.toList() // snapped: see HeartScreen
     val name = (KINDS.firstOrNull { it.first == w["kind"].str() }?.second ?: "Workout").lowercase()
     Column(Modifier.padding(bottom = AppSpace.l)) {
         Text(

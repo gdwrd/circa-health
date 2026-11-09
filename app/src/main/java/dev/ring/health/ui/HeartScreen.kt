@@ -179,8 +179,9 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
                     val now = System.currentTimeMillis() / 1000
                     val shown = doses.filter { it <= now && it < t0 + 86400 && it + windowH * 3600 > t0 }
                     val windows = shown.map { (it - t0) / SLOT_S to (it + windowH * 3600 - t0) / SLOT_S }
-                    val xy = pts.map { (it.first - t0) / SLOT_S to it.second }
-                    val byX = xy.toMap()
+                    // Snapped to the slot (last reading wins): a live reading lands off the 5 min grid and Vico rejects x finer than 4 decimals.
+                    val byX = pts.associate { floor((it.first - t0) / SLOT_S) to it.second }
+                    val xy = byX.toList()
                     val spans = workouts.mapNotNull { w -> w["start"].num()?.let { s -> w["end"].num()?.let { e -> (s - t0) / SLOT_S to (e - t0) / SLOT_S } } }
                     val breathSpans = breaths.mapNotNull { w -> w["start"].num()?.let { s -> w["end"].num()?.let { e -> (s - t0) / SLOT_S to (e - t0) / SLOT_S } } }
                     // "Settling" to asleep; inputs are minutes after noon of the evening before the wake date (noon = slot 144).
