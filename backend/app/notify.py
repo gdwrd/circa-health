@@ -280,7 +280,27 @@ def _strain(now: datetime, dates: set[date]) -> None:
     _add("strain", "Your body may be under strain", body, now)
 
 
-KINDS = ("readiness", "bedtime", "bedtime_soon", "inactivity", "strain", "checkin", "weekly", "morning", "monthly", "stillup")
+EXPERIMENT = {"alcohol": ("alcohol", "no alcohol"), "caffeine_late": ("late coffee", "no late coffee"),  # (on, off)
+              "late_meal": ("a late meal", "no late meal"), "workout": ("a workout", "no workout"),
+              "breathe": ("a breathing session", "no breathing session"),
+              "phone_in_bed": ("phone in bed", "no phone in bed")}
+
+
+def _experiment(now: datetime, dates: set[date]) -> None:
+    """07-12 local, once per day: today's assignment while running; "done" on the day after the last night."""
+    e = next((r for r in db.experiments() if r["ended"] is None), None)
+    if not e or not 7 <= now.hour < 12 or _fired("experiment", now):
+        return
+    i = (now.date() - date.fromisoformat(e["start"])).days
+    if i == e["days"]:
+        _add("experiment", "Your experiment is done", "Open Today to see what it showed.", now, {"open": "today"})
+    elif 0 <= i < e["days"]:
+        _add("experiment", f"Experiment day {i + 1} of {e['days']}",
+             f"Today: {EXPERIMENT[e['kind']][e['plan'][i] == '0']}.", now)
+
+
+KINDS = ("readiness", "bedtime", "bedtime_soon", "inactivity", "strain", "checkin", "weekly", "morning", "monthly", "stillup",
+         "experiment")
 
 
 def evaluate(dates: set[date]) -> None:
@@ -288,7 +308,7 @@ def evaluate(dates: set[date]) -> None:
     muted = set(db.settings()["muted"].split(","))
     for rule, kind in ((_readiness, "readiness"), (_bedtime, "bedtime"), (_inactivity, "inactivity"),
                        (_weekly, "weekly"), (_strain, "strain"), (_checkin, "checkin"), (_morning, "morning"),
-                       (_monthly, "monthly"), (_stillup, "stillup")):
+                       (_monthly, "monthly"), (_stillup, "stillup"), (_experiment, "experiment")):
         if kind in muted:
             continue
         try:

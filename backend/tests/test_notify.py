@@ -521,3 +521,40 @@ def test_stillup_insight_body_and_muted(monkeypatch) -> None:
     db.set_settings({"muted": ""})
     notify.evaluate(set())
     assert up() == [("Still up", "Nights with 20+ min of phone in bed: asleep 90 min later.")]
+
+
+def test_experiment_daily_line_done_and_muted(monkeypatch) -> None:
+    walk()
+    db.add_experiment("caffeine_late", "deep_min", (D - timedelta(4)).isoformat(), 10, "1010010110")
+    for h, m in ((6, 59), (12, 0)):
+        at(monkeypatch, h, m)
+        notify.evaluate(set())
+    db.set_settings({"muted": "experiment"})
+    at(monkeypatch, 8)
+    notify.evaluate(set())
+    assert kinds() == []  # outside 07:00-12:00, then muted
+    db.set_settings({"muted": ""})
+    notify.evaluate(set())
+    notify.evaluate(set())
+    (n,) = notify.pending()
+    assert (n["kind"], n["title"], n["body"], n["extra"]) == ("experiment", "Experiment day 5 of 10", "Today: no late coffee.", None)
+    at(monkeypatch, 8, day=D + timedelta(1))
+    notify.evaluate(set())
+    assert notify.pending()[-1]["body"] == "Today: late coffee."
+    at(monkeypatch, 8, day=D + timedelta(6))  # the day after the last night
+    notify.evaluate(set())
+    notify.evaluate(set())
+    at(monkeypatch, 8, day=D + timedelta(7))
+    notify.evaluate(set())
+    assert kinds() == ["experiment"] * 3
+    assert (notify.pending()[-1]["title"], notify.pending()[-1]["extra"]) == ("Your experiment is done", {"open": "today"})
+    with TestClient(app) as c:
+        assert c.patch("/settings", json={"muted": "experiment"}, headers=H).json()["muted"] == "experiment"
+
+
+def test_experiment_ended_is_quiet(monkeypatch) -> None:
+    db.add_experiment("workout", "hrv", D.isoformat(), 10, "1010101010")
+    db.end_experiment(db.experiments()[0]["id"], D.isoformat())
+    at(monkeypatch, 8)
+    notify.evaluate(set())
+    assert kinds() == []

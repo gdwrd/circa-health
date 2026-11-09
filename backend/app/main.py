@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import re
 import secrets
 import threading
@@ -603,6 +604,41 @@ def journal_bp(days: int = 30) -> dict:
 def delete_journal(id: int) -> dict:
     db.delete_journal(id)
     return {"status": "ok"}
+
+
+def _experiments() -> dict:
+    out = []
+    for r in db.experiments():
+        start = date.fromisoformat(r["start"])
+        logged = {date.fromisoformat(e["date"]) for e in db.journal(r["start"]) if e["kind"] == r["kind"]
+                  and (e["kind"] != "phone_in_bed" or int(e["value"] or 0) >= 20)}  # as insights.kinds
+        nt = insights.nights(db.days(start, start + timedelta(r["days"])))
+        asof = date.fromisoformat(r["ended"]) if r["ended"] else _today()  # an ended one is judged as of its end
+        out.append({**r, **insights.experiment(r["plan"], start, nt, logged, asof, r["metric"])})
+    return {"active": next((e for e in out if e["ended"] is None), None), "past": [e for e in out if e["ended"]]}
+
+
+@api.get("/experiments")
+def list_experiments() -> dict:
+    return _experiments()
+
+
+@api.post("/experiments")
+def add_experiment(body: dict = Body(...)) -> dict:
+    kind, metric, days = body.get("kind"), body.get("metric"), body.get("days", 14)
+    if kind not in insights.EXPERIMENT_KINDS or metric not in insights.NIGHT or not _int(days, 10, 28) or days % 2:
+        raise HTTPException(422, "bad kind, metric or days")
+    a = _experiments()["active"]
+    if a and a["status"] == "running":
+        raise HTTPException(409, "an experiment is already running")
+    db.add_experiment(kind, metric, _today().isoformat(), days, insights.plan(days, random.Random()))
+    return _experiments()
+
+
+@api.delete("/experiments/{id}")
+def end_experiment(id: int) -> dict:
+    db.end_experiment(id, _today().isoformat())
+    return _experiments()
 
 
 def _settings_out() -> dict:

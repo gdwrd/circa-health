@@ -462,3 +462,28 @@ def test_breathe_sessions_journal_hr_today(tmp_path, monkeypatch) -> None:
         assert t["breathe"] == {"today_min": 20.0, "week_min": 20.0, "sessions": 2} and t["inputs"]["breath_min"] == 20.0
         assert c.get("/today", headers=H).json()["breathe"]["today_min"] == 0.0
         assert c.get("/trends?metric=breath_min", headers=H).status_code == 200
+
+
+def test_experiments_start_422_409_stop() -> None:
+    with TestClient(app) as c:
+        today = main._today().isoformat()
+        assert c.get("/experiments").status_code == 401
+        assert c.get("/experiments", headers=H).json() == {"active": None, "past": []}
+        for bad in ({"kind": "sick"}, {"kind": None}, {"metric": "steps"}, {"days": 13}, {"days": 8}, {"days": 30},
+                    {"days": "14"}):
+            r = c.post("/experiments", json={"kind": "alcohol", "metric": "deep_min", **bad}, headers=H)
+            assert r.status_code == 422, bad
+        r = c.post("/experiments", json={"kind": "caffeine_late", "metric": "deep_min"}, headers=H)
+        assert r.status_code == 200
+        a = r.json()["active"]
+        assert (a["kind"], a["metric"], a["start"], a["days"], a["ended"]) == ("caffeine_late", "deep_min", today, 14, None)
+        assert len(a["plan"]) == 14 and a["plan"].count("1") == 7
+        assert (a["status"], a["day"], a["kept"], a["skipped"]) == ("running", 1, [], [])
+        assert a["today"] == ("on" if a["plan"][0] == "1" else "off")
+        assert a["result"] == {"status": "learning", "need": 3, "n_with": 0, "n_without": 0}
+        assert c.post("/experiments", json={"kind": "alcohol", "metric": "hrv", "days": 10}, headers=H).status_code == 409
+        assert c.delete(f"/experiments/{a['id']}").status_code == 401
+        j = c.delete(f"/experiments/{a['id']}", headers=H).json()
+        assert j["active"] is None and [(p["id"], p["ended"]) for p in j["past"]] == [(a["id"], today)]
+        j = c.post("/experiments", json={"kind": "alcohol", "metric": "hrv", "days": 10}, headers=H).json()  # stopped: free
+        assert j["active"]["days"] == 10 and [p["id"] for p in j["past"]] == [a["id"]]  # ended, never deleted

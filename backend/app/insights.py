@@ -1,4 +1,5 @@
 """Journal insights: outcomes on days with vs without a journal kind, last 90 days. Pure (no I/O)."""
+import random
 from datetime import date, datetime, timedelta
 from statistics import mean, median
 
@@ -7,6 +8,7 @@ from . import samples
 DAYS, MIN_N = 90, 3
 NIGHT_KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "stress", "travel", "breathe", "phone_in_bed")
 NIGHT = ("sleep_score", "deep_min", "rem_min", "hrv", "rhr", "total_min", "awake_min", "bed_start")
+EXPERIMENT_KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "breathe", "phone_in_bed")
 MED = ("day_hr", "rhr", "hrv", "bed_start", "total_min", "sleep_score")
 UNITS = {"sleep_score": "pts", "readiness_score": "pts", "deep_min": "min", "rem_min": "min", "total_min": "min", "awake_min": "min",
          "bed_start": "min", "hrv": "ms", "rhr": "bpm", "day_hr": "bpm", "strain": "pts"}
@@ -60,6 +62,25 @@ def compare(w: list[dict], wo: list[dict], metrics: tuple[str, ...]) -> dict:
             effects.append({"metric": m, "unit": UNITS[m], **e})
     top = sorted((e for e in effects if e["strong"]), key=lambda e: -abs(e["z"]))[:2]
     return {"status": "ok", "n_with": len(w), "n_without": len(wo), "top": top, "all": effects}
+
+
+def plan(days: int, rng: random.Random) -> str:
+    """Experiment assignments, one per day: "1" do it, "0" skip it; exactly half ones."""
+    p = ["1", "0"] * (days // 2)
+    rng.shuffle(p)
+    return "".join(p)
+
+
+def experiment(plan: str, start: date, nt: dict[date, dict], logged: set[date], today: date, metric: str) -> dict:
+    """Day i is start + i; it counts only when the journal agrees with the plan and night d + 1 exists.
+    kept / skipped: 0-based indexes of the days before today."""
+    days, i = len(plan), (today - start).days
+    past = range(min(i, days))
+    kept = [j for j in past if ((d := start + timedelta(j)) in logged) == (plan[j] == "1") and d + timedelta(1) in nt]
+    side = lambda bit: [nt[start + timedelta(j + 1)] for j in kept if plan[j] == bit]
+    return {"status": "done" if i >= days else "running", "day": min(i + 1, days), "days": days,
+            "today": None if i >= days else "on" if plan[i] == "1" else "off",
+            "kept": kept, "skipped": [j for j in past if j not in kept], "result": compare(side("1"), side("0"), (metric,))}
 
 
 def _hhmm(m: float) -> str:

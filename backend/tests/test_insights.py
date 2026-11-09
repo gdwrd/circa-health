@@ -104,3 +104,48 @@ def test_breathe_stress_delta_needs_three() -> None:
     br = [{"stress_before": 60, "stress_after": a} for a in (40, 50, 45)] + [{"stress_before": 60, "stress_after": None}]
     assert insights.kinds([], [], TODAY, {}, "", br)["breathe"]["stress"] == {"delta": -15.0, "n": 3}
     assert insights.kinds([], [], TODAY, {}, "", br[1:])["breathe"]["stress"] is None
+
+
+def test_plan_balanced() -> None:
+    import random
+    for days in (10, 14, 28):
+        p = insights.plan(days, random.Random(1))
+        assert len(p) == days and p.count("1") == p.count("0") == days // 2
+    assert insights.plan(14, random.Random(1)) == insights.plan(14, random.Random(1)) != "10" * 7  # shuffled, by the rng
+
+
+def test_experiment_skips_non_compliant_days_and_verdict_is_compare() -> None:
+    start, plan = TODAY - timedelta(10), "1010101010"
+    night = lambda j: start + timedelta(j + 1)  # the night after day j
+    nt = insights.nights([row(night(j), deep=60 if j % 2 == 0 else 80) for j in range(10) if j != 7])
+    logged = {start + timedelta(j) for j in (0, 2, 3, 4, 6)}  # day 3: done on a skip day; day 8: not done on a do day
+    e = insights.experiment(plan, start, nt, logged, TODAY, "deep_min")
+    assert (e["status"], e["day"], e["days"], e["today"]) == ("done", 10, 10, None)
+    assert e["kept"] == [0, 1, 2, 4, 5, 6, 9] and e["skipped"] == [3, 7, 8]  # day 7: no night
+    assert e["result"] == insights.compare([nt[night(j)] for j in (0, 2, 4, 6)], [nt[night(j)] for j in (1, 5, 9)],
+                                           ("deep_min",))
+    assert e["result"]["status"] == "ok" and e["result"]["all"][0]["delta"] == -20
+    r = insights.experiment(plan, start, nt, logged, start + timedelta(4), "deep_min")
+    assert (r["status"], r["day"], r["today"], r["kept"], r["skipped"]) == ("running", 5, "on", [0, 1, 2], [3])
+    assert r["result"] == {"status": "learning", "need": 2, "n_with": 2, "n_without": 1}
+    assert insights.experiment(plan, start, nt, logged, start + timedelta(5), "deep_min")["today"] == "off"
+
+
+def test_experiment_route_done_counts_journal_and_nights() -> None:
+    with TestClient(app) as c:
+        d = main._today()
+        start = d - timedelta(10)
+        db.add_experiment("alcohol", "deep_min", start.isoformat(), 10, "1010101010")
+        for j in range(10):
+            r = row(start + timedelta(j + 1), deep=60 if j % 2 == 0 else 80)
+            db.save_day(r["date"], (80, 70, 60), {**r["c"], "inputs": r["inputs"]}, {})
+        for j in (0, 2, 4, 6, 8, 9):  # day 9: alcohol on a skip day
+            db.add_journal((start + timedelta(j)).isoformat(), "alcohol", None, None, j)
+        db.add_journal(start.isoformat(), "workout", None, None, 1)  # another kind does not count
+        a = c.get("/experiments", headers=H).json()["active"]
+        assert (a["status"], a["today"], a["kept"], a["skipped"]) == ("done", None, list(range(9)), [9])
+        assert a["result"]["status"] == "ok" and a["result"]["all"][0]["delta"] == -20
+        # a finished one does not block the next; it is ended, not deleted
+        j = c.post("/experiments", json={"kind": "workout", "metric": "hrv", "days": 10}, headers=H).json()
+        assert j["active"]["kind"] == "workout" and [(p["kind"], p["ended"], p["status"]) for p in j["past"]] == [
+            ("alcohol", d.isoformat(), "done")]

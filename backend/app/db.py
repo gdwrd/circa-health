@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS sleep_override(date TEXT PRIMARY KEY, start INTEGER, 
 CREATE TABLE IF NOT EXISTS breath_session(start INTEGER PRIMARY KEY, "end" INTEGER, rounds INTEGER,
   hr_start REAL, hr_end REAL, hr_min REAL, feel_before INTEGER, feel_after INTEGER, stress_before REAL,
   stress_after REAL);
+CREATE TABLE IF NOT EXISTS experiment(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, metric TEXT, start TEXT,
+  days INTEGER, plan TEXT, ended TEXT);
 """
 
 
@@ -200,3 +202,21 @@ def breaths(start: date, end: date) -> list[dict]:
 def set_breath_stress(start: int, before: float | None, after: float | None) -> None:
     with closing(connect()) as con, con:
         con.execute("UPDATE breath_session SET stress_before=?, stress_after=? WHERE start=?", (before, after, start))
+
+
+def experiments() -> list[dict]:
+    """Newest first; at most one row has ended NULL (the active one)."""
+    return [dict(r) for r in query("SELECT * FROM experiment ORDER BY id DESC")]
+
+
+def add_experiment(kind: str, metric: str, start: str, days: int, plan: str) -> None:
+    with closing(connect()) as con, con:
+        con.execute("UPDATE experiment SET ended=? WHERE ended IS NULL", (start,))  # a finished one still open
+        con.execute("INSERT INTO experiment(kind, metric, start, days, plan) VALUES(?,?,?,?,?)",
+                    (kind, metric, start, days, plan))
+
+
+def end_experiment(id: int, ended: str) -> None:
+    """Rows are ended, never deleted."""
+    with closing(connect()) as con, con:
+        con.execute("UPDATE experiment SET ended=? WHERE id=? AND ended IS NULL", (ended, id))
