@@ -10,7 +10,7 @@
 - Sleep model: `ColmiProtocol.SleepSession(startMs, endMs, stages)`, `SleepStage(startMs, durationMinutes, stage: Byte)`; stage bytes `SLEEP_LIGHT=2, SLEEP_DEEP=3, SLEEP_REM=4, SLEEP_AWAKE=5` ([ColmiProtocol.kt:36](app/src/main/java/dev/ring/health/ColmiProtocol.kt:36)). Emission site: [SyncWorker.kt:336](app/src/main/java/dev/ring/health/SyncWorker.kt:336).
 - Gotcha: R02 has no temperature, respiratory rate or PWV. Anything in the plan marked "omitted" stays omitted.
 - Compose BOM 2024.12.01 = Compose 1.7.6 (SharedTransitionLayout available, experimental). Vico 2.0.0 markers: `rememberDefaultCartesianMarker` in `vico.compose.cartesian.marker`, passed as `marker =` to `rememberCartesianChart`.
-- App version now versionCode 26 / 3.10.1 (`app/build.gradle.kts`); each release bumps both. `adb` at `%LOCALAPPDATA%\Android\Sdk\platform-toolsdb.exe`.
+- App version now versionCode 26 / 3.10.1 (`app/build.gradle.kts`); each release bumps both. `adb` at `%LOCALAPPDATA%\Android\Sdk\platform-tools/adb.exe`.
 - Emulator Pixel_9a; seed the local stack (`infra/`) with a synthetic fortnight via `curl` to `:8429/api/v1/import/prometheus` before screenshots. `adb uninstall dev.ring.health` before installing a debug build over a release-signed one.
 - `biometric_hr_bpm` is 0 when the ring is off the finger (filter `> 0`); an hour with no `> 0` sample means not worn.
 
