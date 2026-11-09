@@ -1,18 +1,4 @@
 services:
-  victoriametrics:
-    image: victoriametrics/victoria-metrics:v1.131.0
-    container_name: ring-victoriametrics
-    restart: unless-stopped
-    ports:
-      - "8428:8428"
-    volumes:
-      - vm-data:/victoria-metrics-data
-    command:
-      - "--retentionPeriod=10y"
-      # Keep one sample per series+timestamp (the larger value): a re-sent, corrected sleep session replaces the
-      # truncated one pushed at the same timestamp; distinct timestamps are never touched.
-      - "--dedup.minScrapeInterval=1ms"
-
   backend:
     build: ../backend
     container_name: ring-backend
@@ -20,14 +6,10 @@ services:
     ports:
       - "8429:8000"
     environment:
-      VM_URL: http://victoriametrics:8428
       API_TOKEN: ${API_TOKEN:?set in .env}
       TZ: ${TZ:-Europe/London}
     volumes:
       - backend-data:/data
-    depends_on:
-      - victoriametrics
 
 volumes:
-  vm-data:
   backend-data:

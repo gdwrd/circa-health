@@ -13,28 +13,21 @@ A self-hosted biometric pipeline for the **Colmi R02** smart ring.
                                   | POST /api/v1/import/prometheus
                                   | (GET /today, /sleep, /trends back)
                                   V
-                          ┌────────────────┐   read/write  ┌────────┐
-                          │    backend     │ ◀───────────▶ │ SQLite │
-                          │  (FastAPI)     │               └────────┘
-                          └────────────────┘
-                                  |
-                                  | forward
-                                  V
-                          ┌────────────────┐
-                          │ VictoriaMetrics│
-                          │  (your host)   │
-                          └────────────────┘
+                          ┌────────────────┐   read/write  ┌─────────┐
+                          │    backend     │ ◀───────────▶ │ ring.db │
+                          │  (FastAPI)     │               │ (SQLite)│
+                          └────────────────┘               └─────────┘
 ```
 
 The Android app pulls heart rate, HRV, SpO₂, stress, steps, calories, distance,
 sleep stages and ring battery from the ring every 5 minutes, then pushes them as
-Prometheus-style metrics to a self-hosted [VictoriaMetrics](https://victoriametrics.com/)
-instance. A Python [backend](#backend) sits in front of VictoriaMetrics and
-computes daily Sleep / Readiness / Activity scores from that data.
+Prometheus-style metrics to a self-hosted Python [backend](#backend), which
+stores every sample in one SQLite file and computes daily Sleep / Readiness /
+Activity scores from it.
 
 No vendor cloud, no telemetry, no account — your biometric data never leaves
 your network. In this case I'm using a VPN on the phone so that it is constantly
-able to connect to the home network which hosts VictoriaMetrics, etc. The ring 
+able to connect to the home network which hosts the backend. The ring 
 does keep data for a day or two though, so there is no need to sync constantly. 
 
 ## Why
@@ -47,15 +40,15 @@ project is a minimal Android app whose only job is:
 1. wake up every 5 min,
 2. connect to the ring,
 3. drain whatever new samples the ring has buffered,
-4. POST them to your VictoriaMetrics instance,
+4. POST them to your backend,
 5. disconnect.
 
 ## Hardware
 
 - **Ring**: Colmi R02 (other R0x variants likely work — same protocol family)
 - **Phone**: any Android device with API 31+ (Android 12 or newer)
-- **Server**: any host that can run VictoriaMetrics + the backend (a Raspberry Pi
-  is enough)
+- **Server**: any host that can run the backend container (a Raspberry Pi is
+  enough)
 
 ## Metrics collected
 
@@ -80,10 +73,11 @@ project is a minimal Android app whose only job is:
 
 The `biometric_*` and `ring_*` metrics carry the label `device="colmi_r02"`.
 
-Aggregations like overnight RHR (`min_over_time(biometric_hr_bpm[8h])`) are
-done in PromQL (VictoriaMetrics' `:8428/vmui`) rather than at write time, so you keep the raw data.
+Raw samples are kept as pushed (no aggregation at write time) in the `samples`
+table of `ring.db` (`metric`, `ts` in ms, `value`); query them with
+`sqlite3`, e.g. `select count(*) from samples where metric='biometric_hr_bpm'`.
 
-## Server side: VictoriaMetrics + backend
+## Server side
 
 A ready-to-run stack lives in [`infra/`](infra/).
 
@@ -94,29 +88,27 @@ cp .env.example .env   # set API_TOKEN
 docker compose up -d
 ```
 
-VictoriaMetrics listens on `:8428` (ad-hoc queries at `/vmui`), the backend on `:8429`.
+The backend listens on `:8429`. Point the app at `http://<server-ip>:8429` plus
+`API_TOKEN` from `infra/.env` (app v2 or newer; the backend is required).
 
-### Point the app at the backend (`:8429`) or straight at VM (`:8428`)
+**Backup**: copy `ring.db` out of the backend volume, e.g.
+`docker cp ring-backend:/data/ring.db .`.
 
-- **Backend**: `http://<server-ip>:8429` plus `API_TOKEN` from `infra/.env`.
-  This needs app v2 (token field in Settings); app v1.x has no token field and
-  sends no `Authorization` header, so the backend would reject it. The backend
-  accepts the same `/api/v1/import/prometheus` path, forwards every push to
-  VictoriaMetrics unchanged and rescores the days it touched.
-- **VictoriaMetrics directly**: `http://<server-ip>:8428`, no token. This is the
-  only option for app v1.x. Everything except the scores keeps working.
+Moving off an old VictoriaMetrics stack? `backend/migrate_vm.py` copies its
+history into `ring.db` (`python migrate_vm.py` in the backend container, with
+`VM_URL` pointing at the old instance).
 
 ## Backend
 
 [`backend/`](backend/) is a small FastAPI + SQLite service (port `8429`, one
-`docker compose up` with the rest of the stack). After each push it computes:
+`docker compose up`). After each push it computes:
 
 - **Sleep**, **Readiness** and **Activity** scores (0–100) from sleep, heart
   rate, HRV, steps and calories, each with its contributors,
 - stress zones (restored / relaxed / engaged / stressed) and a resilience level,
 - trailing 14-day personal baselines.
 
-Results are stored in SQLite only and read through the backend routes. Routes
+Samples and results are stored in SQLite only and read through the backend routes. Routes
 (`/today`, `/sleep`, `/trends`, ...) need `Authorization: Bearer <API_TOKEN>`;
 only `/health` is open. TLS is not handled here (use a VPN such as Tailscale).
 
@@ -150,14 +142,13 @@ days have data, so expect the first week to be incomplete.
 1. Launch **Circa** on the phone.
 2. Grant the Bluetooth and notification permissions.
 3. Tap **Scan for ring**, pick your Colmi R02 from the list (the MAC fills in).
-4. Enter your VictoriaMetrics URL, e.g. `http://192.168.1.10:8428`.
+4. Enter your backend URL, e.g. `http://192.168.1.10:8429`, and the token.
 5. Tap **Save settings**, then **Sync now** to verify.
 
-If everything is healthy you should see the metric counts climb in
-VictoriaMetrics:
+If everything is healthy the sample counts climb:
 
 ```bash
-curl 'http://YOUR_VM_HOST:8428/api/v1/query?query=count_over_time(biometric_hr_bpm[24h])'
+docker exec ring-backend python -c "import sqlite3;print(sqlite3.connect('/data/ring.db').execute(\"select count(*) from samples where metric='biometric_hr_bpm'\").fetchone())"
 ```
 
 ## How it works
@@ -170,9 +161,9 @@ curl 'http://YOUR_VM_HOST:8428/api/v1/query?query=count_over_time(biometric_hr_b
 - **`ColmiProtocol`** holds packet builders and parsers for the Colmi R0x
   wire format (heavily inspired by
   [Gadgetbridge's `ColmiR0xDeviceSupport`](https://codeberg.org/Freeyourgadget/Gadgetbridge/src/branch/master/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/colmi)).
-- **`MetricsPusher`** posts to the VictoriaMetrics
-  [JSON line protocol endpoint](https://docs.victoriametrics.com/#how-to-import-data-in-json-line-format).
-- **`Prefs`** persists the ring MAC, VM URL and per-metric "last synced"
+- **`MetricsPusher`** posts Prometheus text lines to the backend's
+  `/api/v1/import/prometheus`.
+- **`Prefs`** persists the ring MAC, server URL and per-metric "last synced"
   cursors so we don't re-push the same samples.
 
 The ring keeps roughly the last 24 h of detailed samples in its own flash; the
@@ -188,9 +179,9 @@ we've already shipped.
   the session's start time. The "Sleep stages over time" panel therefore shows
   one bar per night, anchored at the moment you fell asleep, rather than a
   tidy per-calendar-day total. Aggregating sessions onto calendar-day buckets
-  in PromQL is on the TODO list — patches welcome.
+  is on the TODO list — patches welcome.
 - Cleartext HTTP is allowed by the network security config so that you can
-  point at a local VictoriaMetrics over plain HTTP. If you front your
+  point at a local backend over plain HTTP. If you front your
   endpoint with TLS you can tighten `app/src/main/res/xml/network_security_config.xml`.
 - This is a personal project, not a medical device. Don't make health decisions
   off these numbers.
@@ -199,7 +190,7 @@ we've already shipped.
 
 - Protocol details reverse-engineered by the
   [Gadgetbridge](https://gadgetbridge.org/) community (GPL-3.0).
-- VictoriaMetrics, AndroidX, OkHttp — thanks to all the maintainers.
+- AndroidX, OkHttp — thanks to all the maintainers.
 
 ## License
 

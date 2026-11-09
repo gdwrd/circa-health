@@ -1,7 +1,7 @@
 # Ring Health Tracker — agent rules
 
-Colmi R02 ring → Android app (`app/`, package `dev.ring.health`) → backend → VictoriaMetrics (`/api/v1/import/prometheus`).
-v2 adds a Python backend (`backend/`) that sits on that same import path and computes Sleep / Readiness / Activity scores.
+Colmi R02 ring → Android app (`app/`, package `dev.ring.health`) → backend (`/api/v1/import/prometheus`, samples stored in `ring.db`).
+The Python backend (`backend/`) serves that import path, stores the samples and computes Sleep / Readiness / Activity scores.
 The plan is `docs/PLAN.md`; the task ledger is `NEXTSTEPS.md`.
 
 ## Token Economy & Workflow
@@ -30,6 +30,6 @@ The plan is `docs/PLAN.md`; the task ledger is `NEXTSTEPS.md`.
 
 ## Infra
 - Compose file: `infra/docker-compose.yml`; `.env` next to it (gitignored), `infra/.env.example` is the template.
-- Check: `docker compose -f infra/docker-compose.yml config -q` (export `API_TOKEN=x` first). Local stack: `docker compose -f infra/docker-compose.yml up -d --build`; VM `:8428` (ad-hoc queries at `/vmui`), backend `:8429`.
+- Check: `docker compose -f infra/docker-compose.yml config -q` (export `API_TOKEN=x` first). Local stack: `docker compose -f infra/docker-compose.yml up -d --build`; backend `:8429` only. Backup = copy `ring.db` (`docker cp ring-backend:/data/ring.db .`).
 - Homelab deploy: `scp` changed dirs to `d0p3@192.168.0.104:~/ring-health/`, then `ssh d0p3@192.168.0.104 "cd ~/ring-health/infra && docker compose up -d --build"`. Never `docker compose down -v` (deletes 10 y of ring data).
-- Never regenerate committed data or re-import history as a check. VictoriaMetrics instant queries hide samples newer than 30 s.
+- Never regenerate committed data or re-import history as a check.

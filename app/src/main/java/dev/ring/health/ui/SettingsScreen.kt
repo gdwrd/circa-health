@@ -284,7 +284,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         item {
             Section(
                 "Setup",
-                "Point the server at the backend (:8429) or straight at VictoriaMetrics (:8428). " +
+                "Point the server at the backend (:8429). " +
                     "Android delays background sync while battery optimisation is on.\n\n" +
                     if (stored.first == 0) "Stored on this phone: no samples yet"
                     else "Stored on this phone: ${"%,d".format(stored.first)} samples since " +
