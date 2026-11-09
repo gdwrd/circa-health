@@ -43,6 +43,24 @@ def sleep_score(session: dict, need_min: float) -> dict:
     })
 
 
+def _on_min(intervals: list[tuple[float, float]], lo: float, hi: float) -> float:
+    return sum(max(min(off, hi) - max(on, lo), 0.0) for on, off in intervals) / 60
+
+
+def clip_night(start: float, end: float, awake_min: float, intervals: list[tuple[float, float]]
+               ) -> tuple[float, float, float, float]:
+    """Screen-on (on, off) epoch seconds -> (start, end, awake_min, phone_min) of a night.
+
+    shortcut: screen-on means someone used this phone, not necessarily the user; upgrade with an unlock/usage signal.
+    """
+    phone = _on_min(intervals, start - 3600, end)
+    s = max((off for on, off in intervals if off - on >= 60 and on < start + 5400 and off > start), default=start)
+    e = next((on for on, off in intervals if off - on >= 180 and end - 3600 <= on < end), end)
+    if s >= e:
+        return start, end, awake_min, phone
+    return s, e, min(awake_min + _on_min(intervals, s, e), (e - s) / 60), phone
+
+
 def regularity(midpoints_min: list[float]) -> float | None:
     """SD (minutes) of the last 7 nights' sleep midpoints; None under 4 nights."""
     m = midpoints_min[-7:]

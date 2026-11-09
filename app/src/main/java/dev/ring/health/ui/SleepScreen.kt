@@ -181,6 +181,7 @@ fun SleepScreen(backend: Boolean?) {
             val naps = (d["naps"] as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
             val napMin = naps.sumOf { it["total_min"].num() ?: 0.0 }
             val hr = (d["hr"] as? JsonArray)?.mapNotNull { it.obj()?.hrPt() }.orEmpty()
+            val phoneMin = d["phone_min"].num()?.roundToInt() ?: 0
             val edited = (d["edited"] as? JsonPrimitive)?.contentOrNull == "true"
             item {
                 InsetCard {
@@ -203,6 +204,7 @@ fun SleepScreen(backend: Boolean?) {
                             )
                             Text("${clock(startS)} – ${clock(endS)}", style = AppType.subhead, color = c.secondaryLabel)
                             if (edited) Text("Edited by you", style = AppType.footnote, color = c.secondaryLabel)
+                            if (phoneMin > 0) Text("Phone in bed · $phoneMin min", style = AppType.footnote, color = c.secondaryLabel)
                             if (napMin > 0) Text("+${napMin.roundToInt()} min nap", style = AppType.subhead, color = c.sleep)
                         }
                         ScoreRing((score ?: 0.0).toFloat() / 100f, c.sleep, Modifier.size(64.dp), stroke = 7.dp) {

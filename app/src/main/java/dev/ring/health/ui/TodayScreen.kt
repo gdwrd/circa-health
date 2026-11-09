@@ -540,7 +540,7 @@ private class Entry(val id: Int, val date: String, val kind: String, val value: 
 
 private fun JsonElement?.str() = (this as? JsonPrimitive)?.contentOrNull
 
-private fun parseJournal(json: JsonElement?): List<Entry> = (json.obj()?.get("entries") as? JsonArray)?.mapNotNull { it.obj() }?.mapNotNull {
+private fun parseJournal(json: JsonElement?): List<Entry> = (json.obj()?.get("entries") as? JsonArray)?.mapNotNull { it.obj() }?.filter { it["kind"].str() != "phone_in_bed" }?.mapNotNull { // auto row, not for the day list
     Entry(it["id"].str()?.toIntOrNull() ?: return@mapNotNull null, it["date"].str().orEmpty(), it["kind"].str().orEmpty(), it["value"].str(), it["note"].str())
 } ?: emptyList()
 

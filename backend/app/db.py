@@ -59,7 +59,7 @@ def backup() -> None:
             f.unlink()
 
 
-KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "sick", "travel", "stress", "medication", "bp", "note", "breathe")
+KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "sick", "travel", "stress", "medication", "bp", "note", "breathe", "phone_in_bed")
 TAG_ALIASES = {"caffeine": "caffeine_late"}
 
 
@@ -139,6 +139,11 @@ def add_journal(d: str, kind: str, value: str | None, note: str | None, ts: int)
     with closing(connect()) as con, con:
         return con.execute(f"{verb} INTO journal(date, kind, value, note, ts) VALUES(?,?,?,?,?)",
                            (d, kind, value, note, ts)).lastrowid
+
+
+def delete_phone_in_bed(d: str) -> None:
+    with closing(connect()) as con, con:
+        con.execute("DELETE FROM journal WHERE date=? AND kind='phone_in_bed'", (d,))
 
 
 def journal(since: str) -> list[dict]:

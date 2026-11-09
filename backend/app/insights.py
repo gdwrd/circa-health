@@ -5,7 +5,7 @@ from statistics import mean, median
 from . import samples
 
 DAYS, MIN_N = 90, 3
-NIGHT_KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "stress", "travel", "breathe")
+NIGHT_KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "stress", "travel", "breathe", "phone_in_bed")
 NIGHT = ("sleep_score", "deep_min", "rem_min", "hrv", "rhr", "total_min", "awake_min", "bed_start")
 MED = ("day_hr", "rhr", "hrv", "bed_start", "total_min", "sleep_score")
 UNITS = {"sleep_score": "pts", "readiness_score": "pts", "deep_min": "min", "rem_min": "min", "total_min": "min", "awake_min": "min",
@@ -75,6 +75,8 @@ def kinds(rows: list[dict], entries: list[dict], today: date, day_hr: dict[date,
     doses: dict[date, list[int]] = {}
     for e in entries:
         d = date.fromisoformat(e["date"])
+        if e["kind"] == "phone_in_bed" and int(e["value"] or 0) < 20:  # a quick check is not phone in bed
+            continue
         logged.setdefault(e["kind"], set()).add(d)
         if e["kind"] == "medication" and e["value"]:
             doses.setdefault(d, []).append(int(e["value"][:2]) * 60 + int(e["value"][3:]))

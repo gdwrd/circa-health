@@ -54,12 +54,35 @@ def _sessions(d: date) -> list[dict]:
     for s in sorted(out, key=lambda s: -s["total_min"]):
         if all(s["end"] <= k["start"] or s["start"] >= k["end"] for k in kept):  # overlap = re-sent copy, not a nap
             kept.append(s)
+    if kept:  # screen-on time inside the night is awake; sleep starts when the phone is put down
+        m = kept[0]
+        s, e, a, m["phone_min"] = scoring.clip_night(m["start"], m["end"], m["awake_min"], _screen_on(lo, hi))
+        if (s, e, a) != (m["start"], m["end"], m["awake_min"]):
+            total = max((e - s) / 60 - a, 0.0)
+            m |= {"start": s, "end": e, "awake_min": a, "total_min": total,
+                  "rem_min": min(m["rem_min"], total), "deep_min": min(m["deep_min"], total)}
     if o := db.sleep_override(d):  # the user's bed/wake times replace the main session; naps untouched
         span = (o[1] - o[0]) / 60
         n = kept[0] if kept else {"awake_min": 0.0, "rem_min": 0.0, "deep_min": 0.0}
         cap = {k: min(n[k], span) for k in ("awake_min", "rem_min", "deep_min")}
-        kept[:1] = [{"start": o[0], "end": o[1], "total_min": max(span - cap["awake_min"], 0.0), **cap}]
+        kept[:1] = [{"start": o[0], "end": o[1], "total_min": max(span - cap["awake_min"], 0.0), **cap,
+                     "phone_min": n.get("phone_min", 0.0)}]
     return kept
+
+
+def _screen_on(lo: datetime, hi: datetime) -> list[tuple[float, float]]:
+    """biometric_screen_on (1 on, 0 off) -> (on, off) intervals; an ON without an OFF ends at hi."""
+    out: list[tuple[float, float]] = []
+    on: float | None = None
+    for t, v in sorted(samples.raw("biometric_screen_on", lo, hi).items()):
+        if v >= 0.5 and on is None:
+            on = t
+        elif v < 0.5 and on is not None:
+            out.append((on, t))
+            on = None
+    if on is not None:
+        out.append((on, hi.timestamp()))
+    return out
 
 
 def _dt(ts: float) -> datetime:
@@ -83,6 +106,12 @@ def _score_day(d: date) -> None:
 
     def awake(ts: float) -> bool:
         return ts <= now.timestamp() and not any(x["start"] <= ts < x["end"] for x in ss)
+
+    pm = round(n["phone_min"]) if n else 0
+    if pm >= 1:  # auto journal row on the evening date, so insights pair it with this night
+        db.add_journal((d - timedelta(1)).isoformat(), "phone_in_bed", str(pm), None, int(time.time()))
+    else:
+        db.delete_phone_in_bed((d - timedelta(1)).isoformat())
 
     inputs: dict = {"sleep_min": n and n["total_min"], "nap_min": sum(x["total_min"] for x in naps)}
     extra: dict = {"naps": naps, "regularity": None, "spo2": None, "hr_low_t": None}
@@ -294,7 +323,7 @@ def sleep(day: str | None = Query(None, alias="date")) -> dict:
             "naps": (row["c"].get("sleep_extra") or {}).get("naps", []), "hr": hr, "sleep_extra": row["c"].get("sleep_extra"),
             "hr_low": hr[scoring.low_index([p["bpm"] for p in hr])] if hr else None,
             "debt": debt(d), "bedtime": notify.bedtime_window(_today()), "plan": notify.tonight(_today()),
-            "edited": db.sleep_override(d) is not None}
+            "edited": db.sleep_override(d) is not None, "phone_min": round(n.get("phone_min", 0)) if n else 0}
 
 
 @api.patch("/sleep")
@@ -526,7 +555,7 @@ def add_journal(body: dict = Body(...)) -> dict:
         d = date.fromisoformat(body.get("date"))
     except (TypeError, ValueError):
         raise HTTPException(422, "bad date")
-    if d > _today() or kind not in db.KINDS or kind == "breathe":  # sessions come only from POST /breathe
+    if d > _today() or kind not in db.KINDS or kind in ("breathe", "phone_in_bed"):  # breathe: POST /breathe only; phone_in_bed: auto
         raise HTTPException(422, "bad date or kind")
     if note is not None and (not isinstance(note, str) or len(note) > 200):
         raise HTTPException(422, "bad note")
