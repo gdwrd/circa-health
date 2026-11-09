@@ -2,6 +2,7 @@ package dev.ring.health.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
@@ -16,7 +17,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bedtime
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -39,6 +42,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -131,6 +135,7 @@ fun SleepScreen(backend: Boolean?) {
         producer.runTransaction { columnSeries { series(t.map { (it.second ?: 0.0) / 60 }) } }
     }
     LaunchedEffect(date) { load() }
+    var editing by remember { mutableStateOf(false) }
 
     val c = AppTheme.colors
     LargeTitleScaffold("Sleep", refreshing = refreshing, onRefresh = {
@@ -142,8 +147,12 @@ fun SleepScreen(backend: Boolean?) {
         if (ses == null) {
             item {
                 InsetCard {
-                    if (date == LocalDate.now()) EmptyState(Icons.Rounded.Bedtime, "No sleep recorded", "Wear the ring to bed; last night appears after the morning sync.")
-                    else EmptyState(Icons.Rounded.Bedtime, "No sleep recorded for this night", "Wear the ring to bed and sync in the morning.")
+                    if (date == LocalDate.now()) EmptyState(Icons.Rounded.Bedtime, "No sleep recorded", "Wear the ring to bed; last night appears after the morning sync. Or add it yourself with Edit.")
+                    else EmptyState(Icons.Rounded.Bedtime, "No sleep recorded for this night", "Wear the ring to bed and sync in the morning. Or add it yourself with Edit.")
+                    Text(
+                        "Edit", style = AppType.headline, color = c.tint, textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth().clickable { editing = true }.padding(bottom = AppSpace.l),
+                    )
                 }
             }
             // The window is from today, not this night, so it still shows.
@@ -159,6 +168,7 @@ fun SleepScreen(backend: Boolean?) {
             val naps = (d["naps"] as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
             val napMin = naps.sumOf { it["total_min"].num() ?: 0.0 }
             val hr = (d["hr"] as? JsonArray)?.mapNotNull { it.obj()?.hrPt() }.orEmpty()
+            val edited = (d["edited"] as? JsonPrimitive)?.contentOrNull == "true"
             item {
                 InsetCard {
                     Row(
@@ -166,7 +176,10 @@ fun SleepScreen(backend: Boolean?) {
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(Modifier.weight(1f)) {
-                            Text("Time asleep", style = AppType.subhead, color = c.secondaryLabel)
+                            Row {
+                                Text("Time asleep", style = AppType.subhead, color = c.secondaryLabel)
+                                Text("Edit", style = AppType.subhead, color = c.tint, modifier = Modifier.padding(start = AppSpace.m).clickable { editing = true })
+                            }
                             Text(
                                 buildAnnotatedString {
                                     val unit = SpanStyle(fontSize = 17.sp, color = c.secondaryLabel)
@@ -176,6 +189,7 @@ fun SleepScreen(backend: Boolean?) {
                                 style = AppType.largeTitle,
                             )
                             Text("${clock(startS)} – ${clock(endS)}", style = AppType.subhead, color = c.secondaryLabel)
+                            if (edited) Text("Edited by you", style = AppType.footnote, color = c.secondaryLabel)
                             if (napMin > 0) Text("+${napMin.roundToInt()} min nap", style = AppType.subhead, color = c.sleep)
                         }
                         ScoreRing((score ?: 0.0).toFloat() / 100f, c.sleep, Modifier.size(64.dp), stroke = 7.dp) {
@@ -187,6 +201,13 @@ fun SleepScreen(backend: Boolean?) {
                         Text(
                             "Nap ${span(n["start"].num() ?: 0.0, n["end"].num() ?: 0.0)} · ${(n["total_min"].num() ?: 0.0).roundToInt()} min",
                             style = AppType.body, modifier = Modifier.padding(AppSpace.l),
+                        )
+                    }
+                    if (edited) {
+                        Hairline(Modifier.padding(start = AppSpace.l))
+                        Text(
+                            "Use the ring's times", style = AppType.body, color = c.tint,
+                            modifier = Modifier.fillMaxWidth().clickable { scope.launch { if (Api.clearSleep(ctx, date) != null) load() } }.padding(AppSpace.l),
                         )
                     }
                 }
@@ -267,6 +288,51 @@ fun SleepScreen(backend: Boolean?) {
                     )
                 }
             }
+        }
+    }
+    if (editing) EditNight(data?.get("session").obj(), date, { editing = false }) { start, end ->
+        (Api.setSleep(ctx, date, start, end) != null).also { if (it) { load(); editing = false } }
+    }
+}
+
+/** Bed / Wake rows; wake is on [date], bed the day before when its time is later than wake. [save] returns false to keep the dialog open. */
+@Composable
+private fun EditNight(ses: JsonObject?, date: LocalDate, onDismiss: () -> Unit, save: suspend (Long, Long) -> Boolean) {
+    val c = AppTheme.colors
+    val zone = ZoneId.systemDefault()
+    fun local(k: String, def: LocalTime) = ses?.get(k).num()?.let { Instant.ofEpochSecond(it.toLong()).atZone(zone).toLocalTime().withSecond(0).withNano(0) } ?: def
+    var bed by remember { mutableStateOf(local("start", LocalTime.of(23, 0))) }
+    var wake by remember { mutableStateOf(local("end", LocalTime.of(7, 0))) }
+    var picking by remember { mutableStateOf<String?>(null) }
+    var failed by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    AlertDialog(
+        onDismissRequest = onDismiss, containerColor = c.card,
+        title = { Text("Edit this night") },
+        text = {
+            Column {
+                listOf("Bed" to bed, "Wake" to wake).forEach { (name, t) ->
+                    Row(Modifier.fillMaxWidth().clickable { picking = name }.padding(vertical = AppSpace.m)) {
+                        Text(name, style = AppType.body, modifier = Modifier.weight(1f))
+                        Text(clock(t), style = AppType.body, color = c.tint)
+                    }
+                }
+                if (failed) Text("Couldn't save. Check the times and the connection.", style = AppType.footnote, color = c.secondaryLabel)
+            }
+        },
+        confirmButton = {
+            TextButton({
+                val end = date.atTime(wake).atZone(zone).toEpochSecond()
+                val start = (if (bed > wake) date.minusDays(1) else date).atTime(bed).atZone(zone).toEpochSecond()
+                scope.launch { failed = !save(start, end) }
+            }) { Text("Save", color = c.tint) }
+        },
+        dismissButton = { TextButton(onDismiss) { Text("Cancel", color = c.tint) } },
+    )
+    picking?.let { which ->
+        TimePickDialog((if (which == "Bed") bed else wake).toString(), { picking = null }) { hhmm ->
+            LocalTime.parse(hhmm).let { if (which == "Bed") bed = it else wake = it }
+            picking = null
         }
     }
 }

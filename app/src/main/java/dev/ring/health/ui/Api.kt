@@ -78,6 +78,13 @@ object Api {
     suspend fun setWorkoutKind(ctx: Context, date: LocalDate, start: Long, kind: String) =
         call(ctx, "/workouts", "PATCH", JsonObject(mapOf("date" to JsonPrimitive(date.toString()), "start" to JsonPrimitive(start), "kind" to JsonPrimitive(kind))).toString()) as? JsonObject
 
+    /** PATCH /sleep overrides the night ending on [date] (unix s); returns GET /sleep, or null on failure. */
+    suspend fun setSleep(ctx: Context, date: LocalDate, start: Long, end: Long) =
+        call(ctx, "/sleep", "PATCH", JsonObject(mapOf("date" to JsonPrimitive(date.toString()), "start" to JsonPrimitive(start), "end" to JsonPrimitive(end))).toString()) as? JsonObject
+
+    /** DELETE /sleep drops the override, back to the ring's times. */
+    suspend fun clearSleep(ctx: Context, date: LocalDate) = call(ctx, "/sleep?date=$date", "DELETE") as? JsonObject
+
     private val probe = client.newBuilder().callTimeout(3, TimeUnit.SECONDS).build()
     // Session cache of the last probe, keyed by URL+token so editing either re-probes.
     private var cache: Pair<String, Boolean>? = null
