@@ -94,6 +94,12 @@ object Api {
 
     suspend fun deleteJournal(ctx: Context, id: Int): Boolean = call(ctx, "/journal/$id", "DELETE") != null
 
+    /** All three return `{active: {...}|null, past: [...]}`; start and stop give null on failure (409 while one runs). */
+    suspend fun experiments(ctx: Context) = get(ctx, "/experiments")
+    suspend fun startExperiment(ctx: Context, kind: String, metric: String) =
+        call(ctx, "/experiments", "POST", JsonObject(mapOf("kind" to JsonPrimitive(kind), "metric" to JsonPrimitive(metric), "days" to JsonPrimitive(14))).toString()) as? JsonObject
+    suspend fun stopExperiment(ctx: Context, id: Int) = call(ctx, "/experiments/$id", "DELETE") as? JsonObject
+
     /** Body is a subset of the backend settings keys; returns the full settings, or null on failure. */
     suspend fun patchSettings(ctx: Context, body: Map<String, JsonPrimitive>) = call(ctx, "/settings", "PATCH", JsonObject(body).toString()) as? JsonObject
 

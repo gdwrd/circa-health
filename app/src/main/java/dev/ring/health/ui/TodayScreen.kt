@@ -9,6 +9,11 @@ import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.EaseInOut
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -95,6 +100,8 @@ import androidx.compose.material.icons.rounded.SelfImprovement
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -191,6 +198,8 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
     var sheet by remember { mutableStateOf(false) }
     var sheetDay by remember { mutableStateOf<Int?>(null) } // 0 Yesterday, 1 Today; null = by time of day
     var insights by remember { mutableStateOf<JsonObject?>(null) }
+    var exp by remember { mutableStateOf<JsonObject?>(null) } // `/experiments.active`
+    var testing by remember { mutableStateOf(false) }
     var hr by remember { mutableStateOf<List<Double>>(emptyList()) }
     var hrv by remember { mutableStateOf<List<Double>>(emptyList()) }
     LaunchedEffect(journalDate) {
@@ -207,6 +216,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
         loadJournal()
         Api.settings(ctx)?.let { s -> s["medication_time"].str()?.let { medTime = it }; medStarted = s["medication_started"].str() }
         Api.insights(ctx).obj()?.let { insights = it["kinds"].obj() }
+        Api.experiments(ctx).obj()?.let { exp = it["active"].obj() }
         (Api.hr(ctx, 24).obj()?.get("points") as? JsonArray)?.let { a -> hr = a.mapNotNull { it.obj()?.get("bpm").num() } }
         (Api.trends(ctx, "hrv", 14).obj()?.get("points") as? JsonArray)?.let { a -> hrv = a.mapNotNull { it.obj()?.get("value").num() } }
     }
@@ -338,9 +348,23 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
                 }
             }
         }
+        exp?.let { x ->
+            item {
+                ExperimentCard(
+                    x,
+                    onAgain = { scope.launch { Api.startExperiment(ctx, x["kind"].str().orEmpty(), x["metric"].str().orEmpty())?.let { exp = it["active"].obj() } } },
+                    onDone = { scope.launch { Api.stopExperiment(ctx, x["id"].num()?.toInt() ?: return@launch)?.let { exp = it["active"].obj() } } },
+                )
+            }
+        }
         // Kinds the user has logged at least once; never-logged kinds would all read "log 3 more days".
         val kinds = insights?.let { k -> AFFECT_KINDS.mapNotNull { kind -> k[kind].obj()?.takeIf { it["status"].str() == "ok" || (it["n_with"].num() ?: 0.0) > 0 }?.let { kind to it } } }
-        if (!kinds.isNullOrEmpty()) item { WhatAffectsYou(kinds) }
+        // One experiment at a time: the entry row hides while one is on the card.
+        if (!kinds.isNullOrEmpty()) item { WhatAffectsYou(kinds, if (exp == null) ({ testing = true }) else null) }
+    }
+    if (testing) TestDialog({ testing = false }) { kind, metric ->
+        testing = false
+        scope.launch { Api.startExperiment(ctx, kind, metric)?.let { exp = it["active"].obj() } }
     }
     if (sheet) CheckInSheet(journal, medTime, scope, sheetDay, ::loadJournal) { sheet = false; sheetDay = null }
 }
@@ -937,7 +961,7 @@ private val AFFECT_KINDS = listOf("alcohol", "caffeine_late", "late_meal", "work
 private val AFTER = mapOf(
     "alcohol" to "after alcohol", "caffeine_late" to "after late caffeine", "late_meal" to "after a late meal",
     "workout" to "after a workout", "stress" to "after a stressful day", "travel" to "after travel",
-    "breathe" to "after breathing",
+    "breathe" to "after breathing", "phone_in_bed" to "after using your phone in bed",
 )
 
 /** Short name (pills, tables) and sentence name per insight metric. */
@@ -998,8 +1022,9 @@ private fun sentence(kind: String, e: JsonObject): String? {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun WhatAffectsYou(kinds: List<Pair<String, JsonObject>>) {
+private fun WhatAffectsYou(kinds: List<Pair<String, JsonObject>>, onTest: (() -> Unit)?) {
     val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
     Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
         Text("What affects you", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
         InsetCard {
@@ -1056,6 +1081,151 @@ private fun WhatAffectsYou(kinds: List<Pair<String, JsonObject>>) {
                     }
                 }
             }
+            if (onTest != null) {
+                Hairline(Modifier.padding(start = AppSpace.l))
+                Column(Modifier.fillMaxWidth().clickable(role = Role.Button) { haptic.tick(); onTest() }.padding(AppSpace.l)) {
+                    Text("Test it yourself", style = AppType.body, color = c.tint)
+                    Text("Try one habit for 14 days and see what changes.", style = AppType.footnote, color = c.secondaryLabel)
+                }
+            }
+        }
+    }
+}
+
+// Experiment kinds (backend insights.experiment) as the "do it" day's instruction; a "skip it" day reads "No …".
+private val TEST_ON = mapOf(
+    "alcohol" to "Alcohol", "caffeine_late" to "Coffee after 14:00", "late_meal" to "Late meal", "workout" to "Workout",
+    "breathe" to "Breathing session", "phone_in_bed" to "Phone in bed",
+)
+private val TEST_METRICS = listOf("sleep_score", "deep_min", "rem_min", "hrv", "rhr", "total_min", "awake_min", "bed_start")
+
+/** Pick a habit and what to watch; [onStart] gets (kind, metric). */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun TestDialog(onDismiss: () -> Unit, onStart: (String, String) -> Unit) {
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    var kind by remember { mutableStateOf<String?>(null) }
+    var metric by remember { mutableStateOf("deep_min") }
+    @Composable fun chips(options: List<Pair<String, String>>, selected: String?, pick: (String) -> Unit) = FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s),
+    ) {
+        options.forEach { (k, label) ->
+            val col = if (k == selected) c.tint else c.secondaryLabel
+            Text(
+                label, style = AppType.footnote.copy(fontWeight = FontWeight.Medium), color = if (k == selected) c.tint else c.label,
+                modifier = Modifier.clip(RoundedCornerShape(50)).background(col.copy(alpha = 0.16f))
+                    .clickable(role = Role.RadioButton) { haptic.tick(); pick(k) }.padding(horizontal = 14.dp, vertical = 9.dp),
+            )
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss, containerColor = c.card, titleContentColor = c.label, textContentColor = c.label,
+        title = { Text("Test it yourself", style = AppType.title) },
+        confirmButton = {
+            TextButton({ haptic.tick(); kind?.let { onStart(it, metric) } }, enabled = kind != null) { Text("Start", color = if (kind != null) c.tint else c.secondaryLabel) }
+        },
+        dismissButton = { TextButton({ haptic.tick(); onDismiss() }) { Text("Cancel", color = c.tint) } },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                Text("Habit", style = AppType.footnote, color = c.secondaryLabel)
+                chips(TEST_ON.toList(), kind) { kind = it }
+                Text("What to watch", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s))
+                chips(TEST_METRICS.map { m -> m to METRIC.getValue(m).second.replaceFirstChar { it.uppercase() } }, metric) { metric = it }
+                Text(
+                    "14 days: 7 with it and 7 without, in a random order. A day counts when your journal matches the plan.",
+                    style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s),
+                )
+            }
+        },
+    )
+}
+
+/** `/experiments.active`: running = today's instruction over the coin strip; done = the delta, one sentence, "Run again" / "Done". */
+@Composable
+private fun ExperimentCard(x: JsonObject, onAgain: () -> Unit, onDone: () -> Unit) {
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    val kind = x["kind"].str().orEmpty()
+    val metric = x["metric"].str().orEmpty()
+    val plan = x["plan"].str().orEmpty()
+    val on = TEST_ON[kind] ?: kind
+    val name = METRIC[metric]?.second ?: metric
+    val done = x["status"].str() == "done"
+    fun days(k: String) = (x[k] as? JsonArray)?.mapNotNull { it.num()?.toInt() }.orEmpty().toSet()
+    // Yesterday is listed as skipped until its night has synced: not a miss yet.
+    val pending = runCatching { ChronoUnit.DAYS.between(LocalDate.parse(x["start"].str()), LocalDate.now()).toInt() - 1 }.getOrNull()
+    val kept = days("kept")
+    val crossed = days("skipped") - setOfNotNull(pending)
+    val today = if (done) null else (x["day"].num()?.toInt() ?: 1) - 1
+    val counted = "${kept.size} of ${kept.size + crossed.size} days counted"
+    val instruction = (if (x["today"].str() == "on") "" else "no ") + on.replaceFirstChar { it.lowercase() }
+    Section("Experiment") {
+        Column(Modifier.fillMaxWidth().padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+            if (today != null) {
+                Row {
+                    Text("Day ${today + 1} of ${plan.length} · watching $name", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.weight(1f))
+                    // Ends the test the same way "Done" does, so a mis-started one does not block the next for 14 days.
+                    Text("Stop", style = AppType.footnote, color = c.tint, modifier = Modifier.padding(start = AppSpace.m).clickable(role = Role.Button) { haptic.tick(); onDone() })
+                }
+                Text("Today: $instruction", style = AppType.headline)
+            } else {
+                Text("$on · $name", style = AppType.footnote, color = c.secondaryLabel)
+                val e = (x["result"].obj()?.get("all") as? JsonArray)?.firstOrNull().obj()
+                val d = e?.get("delta").num()
+                val strong = e?.get("strong").str() == "true"
+                if (e != null && d != null) {
+                    // "−20 min" → sign, counted-up number, unit.
+                    val s = metricDelta(metric, d, e["pct"].num())
+                    val sign = s.takeWhile { !it.isDigit() }
+                    val n = s.drop(sign.length).takeWhile { it.isDigit() }
+                    val col = if (strong) effectColor(metric, d) else c.secondaryLabel
+                    val style = if (strong) AppType.display else AppType.title
+                    Row {
+                        Text(sign, style = style, color = col, modifier = Modifier.alignByBaseline())
+                        CountUp(n.toIntOrNull() ?: 0, style, Modifier.alignByBaseline(), color = col)
+                        Text(s.drop(sign.length + n.length), style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.alignByBaseline())
+                    }
+                    sentence(kind, e)?.let { Text(it, style = AppType.subhead) }
+                }
+                if (!strong) Text("No clear difference in this test.", style = AppType.subhead, color = c.secondaryLabel)
+            }
+            CoinStrip(
+                plan, kept, crossed, today,
+                (if (today != null) "Day ${today + 1} of ${plan.length}, today: $instruction" else "${plan.length}-day plan") +
+                    if (kept.size + crossed.size > 0) ". $counted, ${crossed.size} skipped." else ".",
+            )
+            if (kept.size + crossed.size > 0) Text(counted, style = AppType.footnote, color = c.secondaryLabel)
+            if (done) Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                TintButton("Run again", Modifier.weight(1f)) { haptic.tick(); onAgain() }
+                TintButton("Done", Modifier.weight(1f)) { haptic.tick(); onDone() }
+            }
+        }
+    }
+}
+
+/** One coin per plan day: filled = do it, hollow = skip it; counted days solid, days to come faint, a skipped day a faint cross; today's halo pulses. */
+@Composable
+private fun CoinStrip(plan: String, kept: Set<Int>, crossed: Set<Int>, today: Int?, describe: String) {
+    val c = AppTheme.colors
+    val pulse = if (today == null || LocalReduceMotion.current) null
+        else rememberInfiniteTransition(label = "coin").animateFloat(0f, 1f, infiniteRepeatable(tween(600, easing = EaseInOut), RepeatMode.Reverse), label = "coin")
+    Canvas(Modifier.fillMaxWidth().height(28.dp).semantics { contentDescription = describe }) {
+        val slot = size.width / plan.length.coerceAtLeast(1)
+        val r = minOf(slot * 0.36f, 7.dp.toPx())
+        val w = r * 0.3f
+        plan.forEachIndexed { i, p ->
+            val o = Offset(slot * (i + 0.5f), size.height / 2)
+            if (i in crossed) {
+                val k = r * 0.6f
+                val faint = c.secondaryLabel.copy(alpha = 0.45f)
+                drawLine(faint, Offset(o.x - k, o.y - k), Offset(o.x + k, o.y + k), w, StrokeCap.Round)
+                drawLine(faint, Offset(o.x - k, o.y + k), Offset(o.x + k, o.y - k), w, StrokeCap.Round)
+                return@forEachIndexed
+            }
+            val col = c.tint.copy(alpha = if (i in kept || i == today) 1f else 0.35f)
+            if (p == '1') drawCircle(col, r, o) else drawCircle(col, r - w / 2, o, style = Stroke(w))
+            if (i == today) drawCircle(c.tint.copy(alpha = 0.3f), r + w * (1.2f + 0.8f * (pulse?.value ?: 0.5f)), o, style = Stroke(w))
         }
     }
 }
