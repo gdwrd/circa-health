@@ -110,38 +110,43 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
     suspend fun loadDay() {
-        val hrDay = Api.hr(ctx, date).obj()
-        breaths = (hrDay?.get("breaths") as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
-        hr = (hrDay?.get("points") as? JsonArray)
-            ?.mapNotNull { o -> o.obj()?.let { p -> p["t"].num()?.let { t -> p["bpm"].num()?.let { t to it } } } }
-            ?.sortedBy { it.first }
-        day = Api.today(ctx, date).obj()
-        workouts = (day?.get("workouts") as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
+        Api.hr(ctx, date).obj()?.let { hrDay ->
+            breaths = (hrDay["breaths"] as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
+            hr = (hrDay["points"] as? JsonArray)
+                ?.mapNotNull { o -> o.obj()?.let { p -> p["t"].num()?.let { t -> p["bpm"].num()?.let { t to it } } } }
+                ?.sortedBy { it.first }
+        }
+        Api.today(ctx, date).obj()?.let { d ->
+            day = d
+            workouts = (d["workouts"] as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
+        }
     }
     suspend fun load() {
-        rhr = trend(Api.trends(ctx, "rhr", 30))
-        hrv = trend(Api.trends(ctx, "hrv", 30))
+        trend(Api.trends(ctx, "rhr", 30))?.let { rhr = it }
+        trend(Api.trends(ctx, "hrv", 30))?.let { hrv = it }
         Api.settings(ctx)?.let { s ->
             s["medication_window_h"].num()?.let { windowH = it }
             medStarted = s["medication_started"].str()?.takeIf { it.isNotBlank() }
         }
-        val es = (Api.journal(ctx, 30).obj()?.get("entries") as? JsonArray)?.mapNotNull { it.obj() }.orEmpty().reversed() // oldest first
-        doses = es.filter { it["kind"].str() == "medication" }.mapNotNull {
-            runCatching { LocalDate.parse(it["date"].str()).atTime(LocalTime.parse(it["value"].str())).atZone(ZoneId.systemDefault()).toEpochSecond() }.getOrNull()
+        Api.journal(ctx, 30).obj()?.let { j ->
+            val es = (j["entries"] as? JsonArray)?.mapNotNull { it.obj() }.orEmpty().reversed() // oldest first
+            doses = es.filter { it["kind"].str() == "medication" }.mapNotNull {
+                runCatching { LocalDate.parse(it["date"].str()).atTime(LocalTime.parse(it["value"].str())).atZone(ZoneId.systemDefault()).toEpochSecond() }.getOrNull()
+            }
+            // One point per day (the last reading): a line series needs distinct x values.
+            bp = es.filter { it["kind"].str() == "bp" }.mapNotNull { e ->
+                val v = e["value"].str()?.split("/")?.mapNotNull { it.toIntOrNull() }
+                if (v?.size == 2) Triple(LocalDate.parse(e["date"].str()), v[0], v[1]) else null
+            }.associateBy { it.first }.values.toList()
         }
-        // One point per day (the last reading): a line series needs distinct x values.
-        bp = es.filter { it["kind"].str() == "bp" }.mapNotNull { e ->
-            val v = e["value"].str()?.split("/")?.mapNotNull { it.toIntOrNull() }
-            if (v?.size == 2) Triple(LocalDate.parse(e["date"].str()), v[0], v[1]) else null
-        }.associateBy { it.first }.values.toList()
         if (medStarted != null) {
-            med = Api.insights(ctx).obj()?.get("kinds").obj()?.get("medication").obj()
-            rhr90 = (Api.trends(ctx, "rhr", 90).obj()?.get("points") as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
+            Api.insights(ctx).obj()?.let { med = it["kinds"].obj()?.get("medication").obj() }
+            (Api.trends(ctx, "rhr", 90).obj()?.get("points") as? JsonArray)?.let { a -> rhr90 = a.mapNotNull { it.obj() } }
         }
         loaded = true
     }
     LaunchedEffect(Unit) { load() }
-    LaunchedEffect(date) { loadDay() }
+    LaunchedEffect(date) { hr = null; breaths = emptyList(); day = null; workouts = emptyList(); loadDay() }
 
     val c = AppTheme.colors
     val inputs = day?.get("inputs").obj()

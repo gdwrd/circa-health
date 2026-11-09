@@ -94,21 +94,26 @@ fun StressScreen(backend: Boolean?, header: @Composable () -> Unit) {
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
     suspend fun load() {
-        data = Api.today(ctx, date).obj()
+        Api.today(ctx, date).obj()?.let { data = it }
         val midnight = date.atStartOfDay(ZoneId.systemDefault()).toEpochSecond()
         // 30-min slot since midnight (0..47) and the stress value.
-        samples = (Api.stress(ctx, date).obj()?.get("points") as? JsonArray)?.mapNotNull { o ->
-            o.obj()?.let { p -> p["t"].num()?.let { t -> p["v"].num()?.let { ((t - midnight) / 1800).roundToInt() to it } } }
-        }.orEmpty()
+        Api.stress(ctx, date).obj()?.let { s ->
+            samples = (s["points"] as? JsonArray)?.mapNotNull { o ->
+                o.obj()?.let { p -> p["t"].num()?.let { t -> p["v"].num()?.let { ((t - midnight) / 1800).roundToInt() to it } } }
+            }.orEmpty()
+        }
         // Breathing session starts in the same 30-min slot x.
-        starts = (Api.hr(ctx, date).obj()?.get("breaths") as? JsonArray)?.mapNotNull { it.obj()?.get("start").num()?.let { t -> (t - midnight) / 1800 } }.orEmpty()
+        Api.hr(ctx, date).obj()?.let { h ->
+            starts = (h["breaths"] as? JsonArray)?.mapNotNull { it.obj()?.get("start").num()?.let { t -> (t - midnight) / 1800 } }.orEmpty()
+        }
     }
-    LaunchedEffect(date) { load() }
-    LaunchedEffect(Unit) { today = Api.today(ctx).obj() }
+    // A changed day shows an empty day (not null: that hides the picker) until its load lands.
+    LaunchedEffect(date) { if (data != null) data = JsonObject(emptyMap()); samples = emptyList(); starts = emptyList(); load() }
+    LaunchedEffect(Unit) { Api.today(ctx).obj()?.let { today = it } }
 
     val c = AppTheme.colors
     LargeTitleScaffold("Stress", refreshing = refreshing, onRefresh = {
-        scope.launch { refreshing = true; try { load(); today = Api.today(ctx).obj() } finally { refreshing = false } }
+        scope.launch { refreshing = true; try { load(); Api.today(ctx).obj()?.let { today = it } } finally { refreshing = false } }
     }) {
         item { Box(Modifier.padding(bottom = AppSpace.m)) { header() } }
         val d = data ?: return@LargeTitleScaffold

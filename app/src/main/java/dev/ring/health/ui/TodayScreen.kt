@@ -200,15 +200,15 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
         onJournalOpened()
     }
     val scope = rememberCoroutineScope()
-    suspend fun loadJournal() { journal = parseJournal(Api.journal(ctx, 2)) }
+    suspend fun loadJournal() { Api.journal(ctx, 2)?.let { journal = parseJournal(it) } }
     var refreshing by remember { mutableStateOf(false) }
     suspend fun load() {
-        data = Api.today(ctx).obj()
+        Api.today(ctx).obj()?.let { data = it }
         loadJournal()
         Api.settings(ctx)?.let { s -> s["medication_time"].str()?.let { medTime = it }; medStarted = s["medication_started"].str() }
-        insights = Api.insights(ctx).obj()?.get("kinds").obj()
-        hr = (Api.hr(ctx, 24).obj()?.get("points") as? JsonArray)?.mapNotNull { it.obj()?.get("bpm").num() }.orEmpty()
-        hrv = (Api.trends(ctx, "hrv", 14).obj()?.get("points") as? JsonArray)?.mapNotNull { it.obj()?.get("value").num() }.orEmpty()
+        Api.insights(ctx).obj()?.let { insights = it["kinds"].obj() }
+        (Api.hr(ctx, 24).obj()?.get("points") as? JsonArray)?.let { a -> hr = a.mapNotNull { it.obj()?.get("bpm").num() } }
+        (Api.trends(ctx, "hrv", 14).obj()?.get("points") as? JsonArray)?.let { a -> hrv = a.mapNotNull { it.obj()?.get("value").num() } }
     }
     LaunchedEffect(Unit) { load() }
 

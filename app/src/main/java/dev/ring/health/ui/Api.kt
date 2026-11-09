@@ -118,9 +118,10 @@ object Api {
         val k = key(ctx)
         val ok = withContext(Dispatchers.IO) {
             val req = request(ctx, "/today") ?: return@withContext false
-            runCatching { probe.newCall(req).execute().use { it.code == 200 } }.getOrDefault(false)
+            runCatching { probe.newCall(req).execute().use { it.code == 200 } }.getOrNull()
         }
-        cache = k to ok
-        return ok
+        // An exception (network or VPN still waking) is not an answer: don't cache, so the next call re-probes.
+        ok?.let { cache = k to it }
+        return ok ?: false
     }
 }

@@ -140,21 +140,22 @@ fun SleepScreen(backend: Boolean?) {
     suspend fun load() {
         val days = (6 downTo 0).map { date.minusDays(it.toLong()) }
         val all = coroutineScope { days.map { day -> async { Api.sleep(ctx, day.toString()).obj() } }.awaitAll() }
+        if (all.all { it == null }) return // failed load: keep what is shown
         week = days.zip(all.map { it?.get("session").obj() })
-        data = all.last()
+        all.last()?.let { data = it }
         val t = week.map { (day, s) -> day.toString() to s?.get("total_min").num() }
         trend = t
         producer.runTransaction { columnSeries { series(t.map { (it.second ?: 0.0) / 60 }) } }
     }
-    LaunchedEffect(date) { load() }
+    LaunchedEffect(date) { data = null; week = emptyList(); trend = null; load() }
     var editing by remember { mutableStateOf(false) }
 
     val c = AppTheme.colors
     LargeTitleScaffold("Sleep", refreshing = refreshing, onRefresh = {
         scope.launch { refreshing = true; try { load() } finally { refreshing = false } }
     }) {
-        val d = data ?: return@LargeTitleScaffold
         item { DayPicker(date) { date = it } }
+        val d = data ?: return@LargeTitleScaffold
         val ses = d["session"].obj()
         if (ses == null) {
             item {

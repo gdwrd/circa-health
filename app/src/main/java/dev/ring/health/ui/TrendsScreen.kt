@@ -142,16 +142,17 @@ fun TrendsScreen(backend: Boolean?, openMonth: Boolean, onLinkHandled: () -> Uni
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
     suspend fun load() {
-        week = runCatching { Api.week(ctx).obj() }.getOrNull()
-        journal = runCatching {
+        Api.week(ctx).obj()?.let { week = it }
+        runCatching {
             (Api.journal(ctx, days).obj()?.get("entries") as JsonArray).mapNotNull { it.obj() }.map {
                 LocalDate.parse((it["date"] as JsonPrimitive).content) to (it["kind"] as JsonPrimitive).content
             }
-        }.getOrDefault(emptyList())
-        data = runCatching { parse(Api.trends(ctx, m.key, days), m.div) }.getOrNull()
+        }.getOrNull()?.let { journal = it }
+        runCatching { parse(Api.trends(ctx, m.key, days), m.div) }.getOrNull()?.let { data = it }
     }
     LaunchedEffect(m, days) {
         loaded = false
+        data = null // another metric/range: never show the previous one's chart under the new label
         load()
         loaded = true
     }
@@ -160,7 +161,7 @@ fun TrendsScreen(backend: Boolean?, openMonth: Boolean, onLinkHandled: () -> Uni
     LargeTitleScaffold("Trends", refreshing = refreshing, onRefresh = {
         scope.launch {
             refreshing = true
-            try { load(); month = runCatching { Api.month(ctx, ym).obj() }.getOrNull() } finally { refreshing = false }
+            try { load(); Api.month(ctx, ym).obj()?.let { month = it } } finally { refreshing = false }
         }
     }) {
         week?.let { item { WeekCard(it) } }

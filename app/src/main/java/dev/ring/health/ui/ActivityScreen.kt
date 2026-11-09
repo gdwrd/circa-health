@@ -81,20 +81,26 @@ fun ActivityScreen(backend: Boolean?) {
     var open by remember { mutableStateOf<Double?>(null) } // start of the expanded workout row
     var refreshing by remember { mutableStateOf(false) }
     suspend fun loadDay() {
-        hours = (Api.activity(ctx, date).obj()?.get("hours") as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
-        day = Api.today(ctx, date).obj()
-        workouts = (day?.get("workouts") as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
-        hr = (Api.hr(ctx, date).obj()?.get("points") as? JsonArray)
-            ?.mapNotNull { o -> o.obj()?.let { p -> p["t"].num()?.let { t -> p["bpm"].num()?.let { t to it } } } }
-            ?.sortedBy { it.first }.orEmpty()
+        Api.activity(ctx, date).obj()?.let { a -> hours = (a["hours"] as? JsonArray)?.mapNotNull { it.obj() }.orEmpty() }
+        Api.today(ctx, date).obj()?.let { d ->
+            day = d
+            workouts = (d["workouts"] as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
+        }
+        Api.hr(ctx, date).obj()?.let { h ->
+            hr = (h["points"] as? JsonArray)
+                ?.mapNotNull { o -> o.obj()?.let { p -> p["t"].num()?.let { t -> p["bpm"].num()?.let { t to it } } } }
+                ?.sortedBy { it.first }.orEmpty()
+        }
     }
     suspend fun load() {
-        steps = trend(Api.trends(ctx, "steps", 30))
-        journalWorkout = (Api.journal(ctx, 30).obj()?.get("entries") as? JsonArray)?.mapNotNull { it.obj() }
-            ?.filter { it["kind"].str() == "workout" }?.mapNotNull { it["date"].str() }.orEmpty().toSet()
+        trend(Api.trends(ctx, "steps", 30))?.let { steps = it }
+        Api.journal(ctx, 30).obj()?.let { j ->
+            journalWorkout = (j["entries"] as? JsonArray)?.mapNotNull { it.obj() }
+                ?.filter { it["kind"].str() == "workout" }?.mapNotNull { it["date"].str() }.orEmpty().toSet()
+        }
     }
     LaunchedEffect(Unit) { load() }
-    LaunchedEffect(date) { open = null; loadDay() }
+    LaunchedEffect(date) { open = null; hours = null; day = null; workouts = emptyList(); hr = emptyList(); loadDay() }
 
     val c = AppTheme.colors
     val today = date == LocalDate.now()
