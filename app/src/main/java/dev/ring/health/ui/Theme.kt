@@ -3,6 +3,7 @@ package dev.ring.health.ui
 import android.graphics.BlurMaskFilter
 import android.provider.Settings
 import android.text.format.DateFormat
+import android.text.format.DateUtils
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.Spring
@@ -429,6 +430,12 @@ fun LargeTitleScaffold(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(title, style = AppType.largeTitle, modifier = Modifier.weight(1f).padding(start = AppSpace.xs))
                         action?.invoke()
+                    }
+                    Api.stale.value?.let { ms ->
+                        val now = System.currentTimeMillis()
+                        val ago = if (now - ms < 60_000) "just now" else DateUtils.getRelativeTimeSpanString(ms, now, DateUtils.MINUTE_IN_MILLIS)
+                        Text("Showing data from $ago · server unreachable", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.xs, top = AppSpace.xs))
+                        Hairline(Modifier.padding(top = AppSpace.s))
                     }
                 }
             }

@@ -1,6 +1,7 @@
 package dev.ring.health.ui
 
 import android.content.Context
+import androidx.compose.runtime.mutableStateOf
 import dev.ring.health.Prefs.apiToken
 import dev.ring.health.Prefs.vmUrl
 import kotlinx.coroutines.Dispatchers
@@ -14,6 +15,8 @@ import okhttp3.OkHttpClient
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.File
+import java.security.MessageDigest
 import java.time.LocalDate
 import java.util.concurrent.TimeUnit
 
@@ -36,14 +39,32 @@ object Api {
         }.getOrNull()
     }
 
-    /** Parsed JSON body on 2xx, else null. */
+    /** Epoch ms of the cached answer the last GET fell back to; null when it was live. */
+    val stale = mutableStateOf<Long?>(null)
+
+    private fun cacheFile(ctx: Context, path: String) =
+        File(File(ctx.cacheDir, "api"), MessageDigest.getInstance("SHA-1").digest(path.toByteArray()).joinToString("") { "%02x".format(it) })
+
+    fun clearCache(ctx: Context) { File(ctx.cacheDir, "api").deleteRecursively(); stale.value = null }
+
+    /** Parsed JSON body on 2xx, else null. A failed GET falls back to the last good body of that path. */
     private suspend fun call(ctx: Context, path: String, method: String = "GET", json: String? = null): JsonElement? = withContext(Dispatchers.IO) {
         val req = request(ctx, path, method, json) ?: return@withContext null
-        runCatching {
+        val file = cacheFile(ctx, path)
+        val live = runCatching {
             client.newCall(req).execute().use { r ->
-                if (r.isSuccessful) Json.parseToJsonElement(r.body!!.string()) else null
+                if (r.isSuccessful) r.body!!.string().also { Json.parseToJsonElement(it) } else null
             }
         }.getOrNull()
+        if (method != "GET") return@withContext live?.let { Json.parseToJsonElement(it) }
+        if (live != null) {
+            runCatching { file.parentFile!!.mkdirs(); file.writeText(live) }
+            stale.value = null
+            return@withContext Json.parseToJsonElement(live)
+        }
+        val old = runCatching { Json.parseToJsonElement(file.readText()) }.getOrNull()
+        stale.value = if (old != null) file.lastModified() else null
+        old
     }
 
     private suspend fun get(ctx: Context, path: String) = call(ctx, path)
@@ -120,6 +141,8 @@ object Api {
             val req = request(ctx, "/today") ?: return@withContext false
             runCatching { probe.newCall(req).execute().use { it.code == 200 } }.getOrNull()
         }
+        // Probe threw but a cache exists: render from it (uncached, so the next call re-probes).
+        if (ok == null && File(ctx.cacheDir, "api").list()?.isNotEmpty() == true) return true
         // An exception (network or VPN still waking) is not an answer: don't cache, so the next call re-probes.
         ok?.let { cache = k to it }
         return ok ?: false

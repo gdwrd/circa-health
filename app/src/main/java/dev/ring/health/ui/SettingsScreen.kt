@@ -303,6 +303,11 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                     else Toast.makeText(ctx, "Already unrestricted", Toast.LENGTH_SHORT).show()
                 }
                 Hairline(Modifier.padding(start = AppSpace.l))
+                ButtonRow("Clear cached data") {
+                    Api.clearCache(ctx)
+                    Toast.makeText(ctx, "Cache cleared", Toast.LENGTH_SHORT).show()
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
                 ButtonRow("Send all history") {
                     activity.lifecycleScope.launch {
                         withContext(Dispatchers.IO) { SampleStore.get(ctx).markAllUnsent() }
