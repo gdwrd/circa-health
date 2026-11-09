@@ -106,6 +106,23 @@ def test_day_history_routes(tmp_path, monkeypatch) -> None:
         assert c.get("/today?date=bogus", headers=H).status_code == 422
 
 
+def test_activity_hours(monkeypatch) -> None:
+    monkeypatch.delenv("TZ", raising=False)
+    d = date(2026, 11, 3)
+    t9 = (vm.midnight(d) + timedelta(hours=9)).timestamp()
+    data = {"biometric_steps": {t9: 1200.0}, "biometric_calories": {t9: 80.0},
+            "biometric_distance_meters": {t9: 900.0}, "biometric_hr_bpm": {t9 - 3600: 0.0, t9 + 600: 72.0}}
+    monkeypatch.setattr(vm, "series", lambda e, s, en, st: {t: v for t, v in data.get(e, {}).items()
+                                                            if s.timestamp() <= t <= en.timestamp()})
+    with TestClient(app) as c:
+        h = c.get("/activity?date=2026-11-03", headers=H).json()
+        assert h["date"] == "2026-11-03" and len(h["hours"]) == 24
+        assert h["hours"][9] == {"h": 9, "steps": 1200.0, "calories": 80.0, "distance_m": 900.0, "worn": True}
+        assert h["hours"][8] == {"h": 8, "steps": 0.0, "calories": 0.0, "distance_m": 0.0, "worn": False}
+        assert [x["h"] for x in h["hours"] if x["worn"]] == [9]
+        assert c.get("/activity?date=bad", headers=H).status_code == 422
+
+
 def test_night_without_end_ts(monkeypatch) -> None:
     """Sessions pushed by app v1.0 carry only *_min series; the night still resolves."""
     db.init()  # _sessions reads sleep_override
