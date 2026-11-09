@@ -1,5 +1,6 @@
 package dev.ring.health.ui
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -86,6 +87,16 @@ private class Seg(val startS: Double, val endS: Double, val stage: Int)
 private class HrPt(val t: Double, val bpm: Double)
 
 private val STAGE_NAME = mapOf(4 to "Awake", 3 to "REM", 1 to "Light", 2 to "Deep")
+private val STAGE_INFO = mapOf(
+    "Awake" to "Minutes awake after you first fell asleep, including brief wakes you do not remember. Under about " +
+        "20 minutes a night is typical.",
+    "REM" to "Rapid eye movement sleep, when most dreaming happens. It supports memory and mood, is typically 20 to " +
+        "25 percent of the night, and comes mostly toward morning.",
+    "Light" to "The stage between waking and deeper sleep, usually about half the night. Heart rate and breathing slow " +
+        "down here.",
+    "Deep" to "The most restorative stage, when the body repairs itself and heart rate is lowest. Most of it comes in the " +
+        "first half of the night. 60 to 90 minutes is typical.",
+)
 
 /** "1:10 – 1:45 PM": AM/PM once when both ends share it (24 h: "13:10 – 13:45"). */
 private fun span(a: Double, b: Double): String {
@@ -225,6 +236,7 @@ fun SleepScreen(backend: Boolean?) {
                     "Awake" to (awake to c.stageAwake), "REM" to (rem to c.stageRem),
                     "Light" to (light to c.stageCore), "Deep" to (deep to c.stageDeep),
                 )
+                var expanded by remember { mutableStateOf<String?>(null) }
                 Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
                 Text("Time in stages", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
                 InsetCard {
@@ -234,13 +246,22 @@ fun SleepScreen(backend: Boolean?) {
                     }
                     stages.forEach { (name, v) ->
                         Hairline(Modifier.padding(start = AppSpace.l))
-                        Row(Modifier.fillMaxWidth().padding(AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.size(10.dp).background(v.second, CircleShape))
-                            Text(name, style = AppType.body, modifier = Modifier.weight(1f).padding(start = AppSpace.m))
-                            Text(duration(v.first.roundToInt()), style = AppType.body, color = c.secondaryLabel)
+                        Column(Modifier.fillMaxWidth().clickable { expanded = if (expanded == name) null else name }.padding(AppSpace.l)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(Modifier.size(10.dp).background(v.second, CircleShape))
+                                Text(name, style = AppType.body, modifier = Modifier.weight(1f).padding(start = AppSpace.m))
+                                Text(duration(v.first.roundToInt()), style = AppType.body, color = c.secondaryLabel)
+                            }
+                            AnimatedVisibility(expanded == name) {
+                                Text(STAGE_INFO[name].orEmpty(), style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.xs))
+                            }
                         }
                     }
                 }
+                Text(
+                    "The ring estimates stages from movement and heart rate. This is an approximation, not a sleep lab.",
+                    style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.xs),
+                )
                 }
             }
             item { Regularity(d["contributors"].obj()?.get("regularity").num(), week, d["sleep_extra"].obj()?.get("regularity").obj()) }

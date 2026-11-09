@@ -18,6 +18,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.shape.CircleShape
@@ -121,6 +122,15 @@ private val SCORE_INFO = mapOf(
     "activity" to "How active you have been today, from 0 to 100. It averages your steps against your step goal, " +
         "the awake hours you barely moved, your calories against your 7-day average and how many of the last " +
         "7 days reached your goal.",
+)
+private val VITALS_INFO = mapOf(
+    "hr" to "Your latest reading from the ring, in beats per minute. The ring samples every 5 minutes while worn; the " +
+        "line is the last 24 hours. Resting adults are usually around 50 to 80.",
+    "hrv" to "Heart rate variability, the beat-to-beat variation in milliseconds, measured every 30 minutes. Higher " +
+        "usually means better recovery. Compare it with your own baseline, not with other people.",
+    "spo2" to "Blood oxygen saturation, measured hourly during sleep. 95 to 100 percent is normal. A single low reading " +
+        "usually means a loose ring, not a problem.",
+    "battery" to "Charge left in the ring. You get a reminder below 15 percent.",
 )
 private const val SCORE_SCALE = "80 or more is good, 60–79 fair, below 60 low. A contributor shows “—” until " +
     "there is enough data; the score uses the ones available. Scores are estimates from your ring, compared " +
@@ -266,6 +276,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, journalDate: String? 
         item {
             val v = d["vitals"].obj()
             val tiles = listOf("Heart rate" to ("hr" to "bpm"), "HRV" to ("hrv" to "ms"), "SpO₂ · latest" to ("spo2" to "%"), "Ring battery" to ("battery" to "%"))
+            var expanded by remember { mutableStateOf<String?>(null) }
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
                 Text("Vitals", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
                 tiles.chunked(2).forEach { pair ->
@@ -273,7 +284,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, journalDate: String? 
                         pair.forEach { (label, m) ->
                             val x = v?.get(m.first).num()
                             InsetCard(Modifier.weight(1f).fillMaxHeight()) {
-                                Column(Modifier.padding(AppSpace.l)) {
+                                Column(Modifier.fillMaxSize().clickable { expanded = if (expanded == m.first) null else m.first }.padding(AppSpace.l)) {
                                     Text(label, style = AppType.footnote, color = c.secondaryLabel)
                                     Row(verticalAlignment = Alignment.Bottom) {
                                         Text(x?.roundToInt()?.toString() ?: "—", style = AppType.title)
@@ -281,6 +292,9 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, journalDate: String? 
                                     }
                                     val line = if (m.first == "hr") hr else if (m.first == "hrv") hrv else emptyList()
                                     if (line.size > 1) Sparkline(line, if (m.first == "hr") c.heart else c.hrv, Modifier.padding(top = AppSpace.s).fillMaxWidth().height(40.dp))
+                                    AnimatedVisibility(expanded == m.first) {
+                                        Text(VITALS_INFO[m.first].orEmpty(), style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s))
+                                    }
                                 }
                             }
                         }
