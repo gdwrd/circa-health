@@ -59,6 +59,13 @@ def sleep_debt(asleep_7: list[float | None], need_min: float) -> dict | None:
             "suggest_min": 0 if debt < 30 else min(60, round(debt / 3 / 5) * 5)}
 
 
+def tonight(wake_min: float, need_min: float, suggest_min: int) -> dict:
+    """Tonight's plan, all minutes after noon (07:00 = 1140): asleep-by = wake - need - catch-up share."""
+    asleep = wake_min - need_min - suggest_min
+    # shortcut: fixed 15-min sleep-onset allowance (ring reports onset, not time in bed); use a measured median once a bed-time source exists
+    return {"asleep_by_min": asleep, "in_bed_by_min": asleep - 15, "sleep_min": need_min + suggest_min, "extra_min": suggest_min}
+
+
 def bedtime_window(nights: list[tuple[float, float]]) -> dict:
     """nights: (bed_start minutes after noon, quality). Best 60-min span (30-min grid, >= 5 nights) vs the rest."""
     if len(nights) < 14:

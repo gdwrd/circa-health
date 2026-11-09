@@ -12,6 +12,7 @@ from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, HTTPExce
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from . import cardio, db, insights, notify, scoring, vm
+from .notify import debt
 
 log = logging.getLogger("ring")
 
@@ -235,13 +236,6 @@ def _day(day: str | None) -> date:
         raise HTTPException(422, "bad date")
 
 
-def _debt(end: date) -> dict | None:
-    """Sleep debt over the 7 nights ending at end (sleep + naps, as sleep balance)."""
-    ins = [r["inputs"] for r in db.days(end - timedelta(6), end)]
-    return scoring.sleep_debt([None if i.get("sleep_min") is None else i["sleep_min"] + (i.get("nap_min") or 0)
-                               for i in ins], db.setting("sleep_need_min"))
-
-
 @api.get("/today")
 def today(day: str | None = Query(None, alias="date")) -> dict:
     d = _day(day)
@@ -265,7 +259,7 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
                    "minutes": (row["c"].get("cardio") or {}).get("minutes"), "days": days,
                    "target": cardio.target(row.get("readiness_score"), m) if status == "ok" else None},
         "workouts": row["c"].get("workouts", []),
-        "tonight": {"bedtime": notify.bedtime_window(_today()), "debt": _debt(_today())},
+        "tonight": {"bedtime": notify.bedtime_window(_today()), "debt": debt(_today()), "plan": notify.tonight(_today())},
     }
 
 
@@ -284,7 +278,8 @@ def sleep(day: str | None = Query(None, alias="date")) -> dict:
             "contributors": row["c"].get("sleep"), "session": n, "stages": stages,
             "naps": (row["c"].get("sleep_extra") or {}).get("naps", []), "hr": hr, "sleep_extra": row["c"].get("sleep_extra"),
             "hr_low": hr[scoring.low_index([p["bpm"] for p in hr])] if hr else None,
-            "debt": _debt(d), "bedtime": notify.bedtime_window(_today()), "edited": db.sleep_override(d) is not None}
+            "debt": debt(d), "bedtime": notify.bedtime_window(_today()), "plan": notify.tonight(_today()),
+            "edited": db.sleep_override(d) is not None}
 
 
 @api.patch("/sleep")
@@ -523,7 +518,8 @@ def _settings_out() -> dict:
     return {"step_goal": float(s["step_goal"]), "sleep_need_min": float(s["sleep_need_min"]),
             "medication_started": s["medication_started"], "medication_time": s["medication_time"],
             "medication_window_h": float(s["medication_window_h"]), "birth_year": s["birth_year"],
-            "low_step_kind": s["low_step_kind"], "muted": s["muted"]}
+            "low_step_kind": s["low_step_kind"], "muted": s["muted"],
+            "wake_weekday": s["wake_weekday"], "wake_weekend": s["wake_weekend"]}
 
 
 def _year_ok(v: object) -> bool:
@@ -547,6 +543,8 @@ SETTINGS = {"step_goal": lambda v: _num(v, 1000, 100000), "sleep_need_min": lamb
             "medication_started": _started_ok, "medication_time": lambda v: isinstance(v, str) and HHMM.fullmatch(v),
             "medication_window_h": lambda v: _num(v, 1, 24), "birth_year": _year_ok,
             "low_step_kind": lambda v: v in ("ride", "workout"),
+            "wake_weekday": lambda v: v == "" or isinstance(v, str) and HHMM.fullmatch(v),
+            "wake_weekend": lambda v: v == "" or isinstance(v, str) and HHMM.fullmatch(v),
             "muted": lambda v: isinstance(v, str) and (v == "" or all(k in notify.KINDS for k in v.split(",")))}
 
 

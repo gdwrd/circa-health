@@ -4,7 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.scoring import (activity_score, baseline, bedtime_window, low_index, readiness_score, regularity, resilience,
-                         robust, sleep_debt, sleep_score, strain, stress_zones)
+                         robust, sleep_debt, sleep_score, strain, stress_zones, tonight)
 
 GOOD = {"total_min": 480, "awake_min": 8, "rem_min": 100, "deep_min": 100, "midpoint_h": 2.0, "regularity_sd": 20}
 SHORT = {"total_min": 240, "awake_min": 20, "rem_min": 40, "deep_min": 30, "midpoint_h": 1.0}
@@ -131,3 +131,7 @@ def test_bedtime_window_learning_flat_ok():
     assert bedtime_window(n) == {"status": "ok", "start_min": 600, "end_min": 660, "score_in": 90,
                                  "score_out": 71, "nights": 18, "nights_in": 6}  # (350+300+200)/12
     assert bedtime_window([(600, 81)] * 7 + [(700, 79)] * 7)["status"] == "flat"  # 2 apart < 3
+
+
+def test_tonight() -> None:
+    assert tonight(1140, 450, 40) == {"asleep_by_min": 650, "in_bed_by_min": 635, "sleep_min": 490, "extra_min": 40}

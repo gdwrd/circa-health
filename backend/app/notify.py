@@ -29,8 +29,10 @@ def _add(kind: str, title: str, body: str, now: datetime, extra: dict[str, str] 
                     (kind, title, body, now.isoformat(), json.dumps(extra) if extra else None))
 
 
-def _fired(kind: str, now: datetime) -> bool:
-    """Dedup: a kind fires at most once per local day (created_at starts with the local date)."""
+def _fired(kind: str, now: datetime, since: datetime | None = None) -> bool:
+    """Dedup: a kind fires at most once per local day (created_at starts with the local date), or once since `since`."""
+    if since:
+        return bool(db.query("SELECT 1 FROM notifications WHERE kind=? AND created_at>=?", (kind, since.isoformat())))
     return bool(db.query("SELECT 1 FROM notifications WHERE kind=? AND substr(created_at,1,10)=?",
                          (kind, now.date().isoformat())))
 
@@ -72,13 +74,49 @@ def bedtime_window(d: date) -> dict:
     return scoring.bedtime_window(nights)
 
 
+def debt(end: date) -> dict | None:
+    """Sleep debt over the 7 nights ending at end (sleep + naps, as sleep balance)."""
+    ins = [r["inputs"] for r in db.days(end - timedelta(6), end)]
+    return scoring.sleep_debt([None if i.get("sleep_min") is None else i["sleep_min"] + (i.get("nap_min") or 0)
+                               for i in ins], db.setting("sleep_need_min"))
+
+
+def tonight(d: date) -> dict | None:
+    """Plan for the night after evening d from the usual wake time (weekend = nights before Sat/Sun); None when unset."""
+    s = db.settings()
+    wake = s["wake_weekend" if (d + timedelta(1)).weekday() >= 5 else "wake_weekday"]
+    if not wake:
+        return None
+    h, m = map(int, wake.split(":"))
+    wake_min = (h * 60 + m - 720) % 1440
+    b = debt(d)
+    p = scoring.tonight(wake_min, float(s["sleep_need_min"]), b["suggest_min"] if b else 0)
+    w = bedtime_window(d)
+    t = p["in_bed_by_min"]
+    p["wake_min"] = wake_min
+    p["window"] = None if w["status"] != "ok" else "earlier" if t < w["start_min"] else "later" if t >= w["end_min"] else "in"
+    return p
+
+
 def _bedtime(now: datetime, dates: set[date]) -> None:
     d = now.date()
-    if _fired("bedtime", now):
-        return
     noon = vm.midnight(d) + timedelta(hours=12)
     if now < noon:
         noon -= timedelta(1)
+    p = tonight(noon.date())
+    if p:
+        target = noon + timedelta(minutes=p["in_bed_by_min"])
+        at = lambda k: f"{noon + timedelta(minutes=p[k]):%H:%M}"
+        if target - timedelta(minutes=30) <= now < target + timedelta(minutes=15):
+            if not _fired("bedtime_soon", now, noon):  # per evening: windows can cross midnight
+                _add("bedtime_soon", "Time for bed", f"Lights out by {at('asleep_by_min')} — {_duration(p['sleep_min'])} "
+                     f"before your {at('wake_min')} alarm.", now)
+        elif target - timedelta(minutes=60) <= now < target and not _fired("bedtime", now, noon):
+            extra = f" +{round(p['extra_min'])} min tonight to catch up." if p["extra_min"] > 0 else ""
+            _add("bedtime", "Wind down", f"In bed by {at('in_bed_by_min')} to be rested for {at('wake_min')}.{extra}", now)
+        return
+    if _fired("bedtime", now):
+        return
     w = bedtime_window(d)
     if w["status"] == "ok":
         target = noon + timedelta(minutes=w["start_min"])
@@ -219,7 +257,7 @@ def _strain(now: datetime, dates: set[date]) -> None:
     _add("strain", "Your body may be under strain", body, now)
 
 
-KINDS = ("readiness", "bedtime", "inactivity", "strain", "checkin", "weekly", "morning", "monthly")
+KINDS = ("readiness", "bedtime", "bedtime_soon", "inactivity", "strain", "checkin", "weekly", "morning", "monthly")
 
 
 def evaluate(dates: set[date]) -> None:

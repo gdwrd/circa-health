@@ -357,7 +357,11 @@ def test_sleep_debt_and_bedtime_fields(tmp_path, monkeypatch) -> None:
         s = c.get(f"/sleep?date={d}", headers=H).json()
         assert s["debt"] == debt and s["bedtime"] == window
         assert c.get(f"/sleep?date={d - timedelta(10)}", headers=H).json()["debt"] is None  # no sleep_min that week
-        assert c.get("/today", headers=H).json()["tonight"] == {"bedtime": window, "debt": debt}
+        assert c.get("/today", headers=H).json()["tonight"] == {"bedtime": window, "debt": debt, "plan": None}
+        c.patch("/settings", json={"wake_weekday": "07:00", "wake_weekend": "07:00"}, headers=H)
+        assert c.get(f"/sleep?date={d}", headers=H).json()["plan"] == {  # 1140 - 450 - 10 = 680, in bed 665 > window end 660
+            "asleep_by_min": 680.0, "in_bed_by_min": 665.0, "sleep_min": 460.0, "extra_min": 10, "wake_min": 1140,
+            "window": "later"}
 
 
 def test_month_shape_means_best_week_workouts_effects(tmp_path, monkeypatch) -> None:

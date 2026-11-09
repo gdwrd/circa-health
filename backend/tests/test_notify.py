@@ -1,4 +1,5 @@
 import re
+from contextlib import closing
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -361,3 +362,84 @@ def test_bad_muted_422() -> None:
             assert c.patch("/settings", json={"muted": bad}, headers=H).status_code == 422, bad
         assert c.patch("/settings", json={"muted": "monthly,checkin"}, headers=H).json()["muted"] == "monthly,checkin"
         assert c.patch("/settings", json={"muted": ""}, headers=H).json()["muted"] == ""
+
+
+def bed() -> list[tuple[str, str, str]]:
+    return [(n["kind"], n["title"], n["body"]) for n in notify.pending() if n["kind"].startswith("bedtime")]
+
+
+def test_tonight_weekday_vs_weekend() -> None:
+    db.set_settings({"wake_weekday": "06:00", "wake_weekend": "09:00"})
+    fri, thu, sun = date(2026, 11, 13), date(2026, 11, 12), date(2026, 11, 15)
+    assert notify.tonight(fri)["wake_min"] == 1260  # Friday evening → Saturday morning → weekend
+    assert notify.tonight(thu)["wake_min"] == notify.tonight(sun)["wake_min"] == 1080
+    p = notify.tonight(thu)
+    assert (p["asleep_by_min"], p["in_bed_by_min"], p["extra_min"], p["window"]) == (630, 615, 0, None)  # no debt yet
+    db.set_settings({"wake_weekday": ""})
+    assert notify.tonight(thu) is None and notify.tonight(fri) is not None
+
+
+def test_tonight_two_notifications_and_dedup(monkeypatch, env) -> None:
+    """Wake 07:00, need 450, no debt: asleep-by 23:30, in bed 23:15 → wind down 22:15-22:45, bed 22:45-23:30."""
+    db.set_settings({"wake_weekday": "07:00"})
+    at(monkeypatch, 22, 10)
+    notify.evaluate(set())
+    assert bed() == []
+    at(monkeypatch, 22, 20)
+    notify.evaluate(set())
+    at(monkeypatch, 22, 40)
+    notify.evaluate(set())
+    assert bed() == [("bedtime", "Wind down", "In bed by 23:15 to be rested for 07:00.")]
+    at(monkeypatch, 22, 50)
+    notify.evaluate(set())
+    at(monkeypatch, 23, 25)
+    notify.evaluate(set())
+    assert bed()[1:] == [("bedtime_soon", "Time for bed", "Lights out by 23:30 — 7 h 30 min before your 07:00 alarm.")]
+    at(monkeypatch, 23, 35)
+    notify.evaluate(set())
+    assert len(bed()) == 2
+
+
+def test_tonight_catch_up_and_late_sync(monkeypatch, env) -> None:
+    """3 nights of 410 min → debt 120, suggest 40: asleep-by 22:50, in bed 22:35."""
+    for i in range(3):
+        db.save_day(D - timedelta(i), (None, None, None), {"inputs": {"sleep_min": 410.0}}, {})
+    db.set_settings({"wake_weekday": "07:00"})
+    at(monkeypatch, 21, 40)
+    notify.evaluate(set())
+    assert bed() == [("bedtime", "Wind down", "In bed by 22:35 to be rested for 07:00. +40 min tonight to catch up.")]
+    with closing(db.connect()) as con, con:
+        con.execute("DELETE FROM notifications")
+    at(monkeypatch, 22, 30)  # first sync of the evening lands inside the second window
+    notify.evaluate(set())
+    assert bed() == [("bedtime_soon", "Time for bed", "Lights out by 22:50 — 8 h 10 min before your 07:00 alarm.")]
+
+
+def test_tonight_unset_keeps_old_rule(monkeypatch, env) -> None:
+    env["biometric_steps"] = {1.0: 100.0}
+    for i in range(14):
+        seed(D - timedelta(i))
+    db.set_settings({"wake_weekend": "07:00"})  # Monday evening uses the weekday time, which is unset
+    at(monkeypatch, 22, 40)
+    notify.evaluate(set())
+    assert kinds() == ["bedtime"] and notify.pending()[0]["body"] == "Your usual bedtime is 23:00."
+
+
+def test_wake_settings_patch() -> None:
+    with TestClient(app) as c:
+        assert c.get("/settings", headers=H).json()["wake_weekday"] == ""
+        for bad in ("7:00", "24:00", 700, None):
+            assert c.patch("/settings", json={"wake_weekday": bad}, headers=H).status_code == 422, bad
+        r = c.patch("/settings", json={"wake_weekday": "07:00", "wake_weekend": "09:30"}, headers=H).json()
+        assert (r["wake_weekday"], r["wake_weekend"]) == ("07:00", "09:30")
+        assert c.patch("/settings", json={"wake_weekend": ""}, headers=H).json()["wake_weekend"] == ""
+
+
+def test_tonight_across_midnight_fires_once(monkeypatch, env) -> None:
+    """Wake 08:00, need 455: asleep-by 00:25, in bed 00:10 → "Time for bed" window 23:40-00:25 spans midnight."""
+    db.set_settings({"wake_weekday": "08:00", "sleep_need_min": "455"})
+    at(monkeypatch, 23, 45)
+    notify.evaluate(set())
+    at(monkeypatch, 0, 5, day=D + timedelta(1))
+    notify.evaluate(set())
+    assert bed() == [("bedtime_soon", "Time for bed", "Lights out by 00:25 — 7 h 35 min before your 08:00 alarm.")]

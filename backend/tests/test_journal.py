@@ -69,7 +69,7 @@ def test_settings() -> None:
         s = c.get("/settings", headers=H).json()
         assert s == {"step_goal": 8000.0, "sleep_need_min": 450.0, "medication_started": "",
                      "medication_time": "08:00", "medication_window_h": 8.0, "birth_year": "",
-                     "low_step_kind": "workout", "muted": ""}
+                     "low_step_kind": "workout", "muted": "", "wake_weekday": "", "wake_weekend": ""}
         future = (datetime.now().date() + timedelta(1)).isoformat()
         for bad in ({}, {"x": 1}, {"step_goal": "9000"}, {"step_goal": True}, {"sleep_need_min": 100},
                     {"medication_started": future}, {"medication_started": "2026-13-01"},
