@@ -553,16 +553,6 @@ private fun JournalChip(text: String) {
     )
 }
 
-/** iOS tinted button: tint text on a faint tint fill. */
-@Composable
-private fun TintButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    val c = AppTheme.colors
-    Text(
-        text, style = AppType.headline, color = c.tint, textAlign = TextAlign.Center,
-        modifier = modifier.fillMaxWidth().clip(AppShape.small).background(c.tint.copy(alpha = 0.12f)).clickable(onClick = onClick).padding(vertical = AppSpace.m),
-    )
-}
-
 /** Writes go to [scope] (outlives the sheet) so a pending note or BP is saved when the sheet closes. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

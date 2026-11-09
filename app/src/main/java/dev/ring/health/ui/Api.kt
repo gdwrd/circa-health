@@ -55,6 +55,7 @@ object Api {
     suspend fun month(ctx: Context, ym: String) = get(ctx, "/month?month=$ym")
     suspend fun hr(ctx: Context, hours: Int) = get(ctx, "/hr?hours=$hours")
     suspend fun hr(ctx: Context, date: LocalDate) = get(ctx, "/hr?date=$date")
+    suspend fun activity(ctx: Context, date: LocalDate) = get(ctx, "/activity?date=$date")
     suspend fun stress(ctx: Context, date: LocalDate) = get(ctx, "/stress?date=$date")
     suspend fun journal(ctx: Context, days: Int) = get(ctx, "/journal?days=$days")
     suspend fun insights(ctx: Context) = get(ctx, "/journal/insights")

@@ -103,6 +103,27 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.roundToInt
+import kotlin.math.ceil
+import kotlin.math.floor
+import androidx.compose.material.icons.rounded.MonitorHeart
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLine
+import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLineCartesianLayer
+import com.patrykandpatrick.vico.compose.cartesian.rememberCartesianChart
+import com.patrykandpatrick.vico.compose.common.fill
+import com.patrykandpatrick.vico.core.cartesian.data.CartesianChartModelProducer
+import com.patrykandpatrick.vico.core.cartesian.data.CartesianLayerRangeProvider
+import com.patrykandpatrick.vico.core.cartesian.data.CartesianValueFormatter
+import com.patrykandpatrick.vico.core.cartesian.data.lineSeries
+import com.patrykandpatrick.vico.core.cartesian.decoration.Decoration
+import com.patrykandpatrick.vico.core.cartesian.layer.LineCartesianLayer
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.doubleOrNull
 
 /** One-file design system: iOS-style palette, type scale, shapes, spacing and the shared composables. */
 
@@ -489,4 +510,108 @@ fun DayPicker(date: LocalDate, onChange: (LocalDate) -> Unit) {
         Text(dayLabel(date), style = AppType.headline, textAlign = TextAlign.Center, modifier = Modifier.weight(1f))
         Chevron(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Next day", date.plusDays(1), date.isBefore(today))
     }
+}
+
+/** Card with a title above it (Heart, Activity). */
+@Composable
+internal fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+        Text(title, style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
+        InsetCard(content = content)
+    }
+}
+
+@Composable
+internal fun Value(v: Double, unit: String, color: Color) {
+    Text(
+        buildAnnotatedString {
+            append(v.roundToInt().toString())
+            withStyle(SpanStyle(fontSize = 17.sp, color = AppTheme.colors.secondaryLabel)) { append(" $unit") }
+        },
+        style = AppType.largeTitle, modifier = Modifier.padding(start = AppSpace.l),
+    )
+}
+
+/** iOS tinted button: tint text on a faint tint fill. */
+@Composable
+internal fun TintButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val c = AppTheme.colors
+    Text(
+        text, style = AppType.headline, color = c.tint, textAlign = TextAlign.Center,
+        modifier = modifier.fillMaxWidth().clip(AppShape.small).background(c.tint.copy(alpha = 0.12f)).clickable(onClick = onClick).padding(vertical = AppSpace.m),
+    )
+}
+
+internal class Trend(val first: LocalDate, val value: List<Pair<Double, Double>>, val base: List<Pair<Double, Double>>)
+
+/** `/trends` points as day offsets from the first date. */
+internal fun trend(json: JsonElement?): Trend? {
+    val pts = ((json as? JsonObject)?.get("points") as? JsonArray)?.mapNotNull { it as? JsonObject } ?: return null
+    val dates = pts.map { LocalDate.parse((it["date"] as JsonPrimitive).content) }
+    val first = dates.firstOrNull() ?: return null
+    fun col(k: String) = pts.mapIndexedNotNull { i, o -> (o[k] as? JsonPrimitive)?.doubleOrNull?.let { (dates[i].toEpochDay() - first.toEpochDay()).toDouble() to it } }
+    return Trend(first, col("value"), col("baseline"))
+}
+
+@Composable
+internal fun TrendCard(title: String, t: Trend?, unit: String, color: Color) {
+    val c = AppTheme.colors
+    Section(title) {
+        if (t == null || t.value.isEmpty()) return@Section EmptyState(Icons.Rounded.MonitorHeart, "Not enough data yet", "Keep the ring on; this fills in after a few syncs.")
+        Text(
+            "Latest", style = AppType.footnote, color = c.secondaryLabel,
+            modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.l),
+        )
+        Value(t.value.last().second, unit, color)
+        t.base.lastOrNull()?.let {
+            Text(
+                "Baseline ${it.second.roundToInt()} $unit", style = AppType.subhead, color = c.secondaryLabel,
+                modifier = Modifier.padding(start = AppSpace.l),
+            )
+        }
+        val fmt = DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
+        val byX = t.value.toMap()
+        Chart(
+            listOf(t.value, t.base), color, false, 7, 0,
+            marker = { x -> "${byX[x]?.roundToInt()?.let { "$it $unit" } ?: "—"} · ${t.first.plusDays(x.toLong()).format(fmt)}" },
+        ) { x -> t.first.plusDays(x.toLong()).format(fmt) }
+    }
+}
+
+/** [series] 0 is the main line with a faded area fill; series 1 (optional) is a wide translucent band. */
+@Composable
+internal fun Chart(
+    series: List<List<Pair<Double, Double>>>, color: Color, area: Boolean, spacing: Int, offset: Int,
+    second: Color? = null, x: ClosedFloatingPointRange<Double>? = null, decorations: List<Decoration> = emptyList(), height: Dp = 180.dp,
+    marker: (Double) -> CharSequence, label: (Double) -> String,
+) {
+    val producer = remember { CartesianChartModelProducer() }
+    LaunchedEffect(series) {
+        producer.runTransaction {
+            lineSeries { series.filter { it.isNotEmpty() }.forEach { s -> series(s.map { it.first }, s.map { it.second }) } }
+        }
+    }
+    val main = chartLine(color, area)
+    val band = if (second != null) chartLine(second) else LineCartesianLayer.rememberLine(
+        fill = LineCartesianLayer.LineFill.single(fill(color.copy(alpha = 0.18f))),
+        stroke = LineCartesianLayer.LineStroke.Continuous(thicknessDp = 22f),
+    )
+    val ys = series.flatten().map { it.second }
+    val span = ys.max() - ys.min()
+    val step = if (span > 60) 20.0 else if (span > 24) 10.0 else 5.0
+    val lo = floor((ys.min() - span * 0.1) / step) * step
+    val hi = ceil((ys.max() + span * 0.1) / step) * step
+    ScrubChartHost(
+        rememberCartesianChart(
+            rememberLineCartesianLayer(
+                LineCartesianLayer.LineProvider.series(main, band),
+                rangeProvider = CartesianLayerRangeProvider.fixed(minX = x?.start, maxX = x?.endInclusive, minY = lo, maxY = maxOf(hi, lo + step)),
+            ),
+            startAxis = startAxis(step),
+            bottomAxis = bottomAxis(CartesianValueFormatter { _, x, _ -> label(x) }, spacing, offset),
+            marker = rememberScrubMarker(color, marker),
+            decorations = decorations,
+        ),
+        producer, height,
+    )
 }

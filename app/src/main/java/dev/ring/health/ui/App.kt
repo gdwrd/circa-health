@@ -104,7 +104,7 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
             NavHost(nav, startDestination = TabItem.Today.route, modifier = Modifier.haze(haze)) {
                 composable(TabItem.Today.route) { TodayScreen(backend, { nav.navigate("settings") }, journalDate, onLinkHandled) }
                 composable(TabItem.Sleep.route) { SleepScreen(backend) }
-                composable(TabItem.Activity.route) { NoBackendTab("Activity", backend) } // B2 replaces with ActivityScreen
+                composable(TabItem.Activity.route) { ActivityScreen(backend) }
                 composable(TabItem.Body.route) { BodyScreen(backend) }
                 composable(TabItem.Trends.route) { TrendsScreen(backend, link?.first == "month", onLinkHandled) }
                 composable("settings") { SettingsScreen(hasPermissions, requestPermissions) { nav.popBackStack() } }
