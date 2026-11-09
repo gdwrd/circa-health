@@ -60,6 +60,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
@@ -110,6 +111,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     val ctx = LocalContext.current
     val activity = ctx as ComponentActivity
     val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
 
     var ring by remember { mutableStateOf(ctx.ringAddress ?: "") }
     var url by remember { mutableStateOf(ctx.vmUrl) }
@@ -234,7 +236,8 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
         item {
             Section("You", "Your birth year sets your maximum heart rate for cardio zones. Goals shape the Activity and Sleep scores." +
-                if (med != null) " Wake times set tonight's bedtime plan; weekends mean the nights before Saturday and Sunday." else "") {
+                if (med != null) " Wake times set tonight's bedtime plan; weekends mean the nights before Saturday and Sunday." +
+                    " Calm mode: words instead of numbers. Numbers stay one tap away." else "") {
                 // Birth year is stored by the backend; without one there are no cardio zones.
                 if (med != null) {
                     FieldRow("Birth year", birth, "Not set", KeyboardType.Number) {
@@ -258,6 +261,11 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                     listOf("wake_weekday" to "Wake up · weekdays", "wake_weekend" to "Wake up · weekends").forEach { (k, title) ->
                         Hairline(Modifier.padding(start = AppSpace.l))
                         ChevronRow(title, (s[k] as? JsonPrimitive)?.contentOrNull.orEmpty().ifEmpty { null }?.let(::clock) ?: "Off") { pickWake = k }
+                    }
+                    Hairline(Modifier.padding(start = AppSpace.l))
+                    SwitchRow("Calm mode", (s["calm"] as? JsonPrimitive)?.contentOrNull == "1") { on ->
+                        haptic.tick()
+                        patchMed("calm", JsonPrimitive(if (on) "1" else ""))
                     }
                 }
             }

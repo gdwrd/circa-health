@@ -9,6 +9,7 @@ import android.graphics.SweepGradient
 import android.text.format.DateFormat
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -45,6 +46,7 @@ import dev.ring.health.MainActivity
 import dev.ring.health.Prefs.todayJson
 import dev.ring.health.Prefs.todayJsonMs
 import dev.ring.health.ui.AppTheme
+import dev.ring.health.ui.calmWord
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.doubleOrNull
@@ -81,6 +83,9 @@ private fun Content(d: JsonObject?, ms: Long) {
     val size = LocalSize.current
     val footer = if (d != null && System.currentTimeMillis() - ms <= STALE_MS)
         "Updated " + DateFormat.getTimeFormat(ctx).format(Date(ms)) else "Open to sync"
+    // Calm mode (/today.calm): the open mark and a word per score, no numbers.
+    val calm = d?.get("calm")?.jsonPrimitive?.content == "true"
+    val medium = TextStyle(color = text, fontSize = 12.sp, fontWeight = FontWeight.Medium)
     val room = size.height - 24.dp - 40.dp // padding + two text lines
     Column(
         GlanceModifier.fillMaxSize().appWidgetBackground().cornerRadius(16.dp)
@@ -89,12 +94,13 @@ private fun Content(d: JsonObject?, ms: Long) {
         horizontalAlignment = Alignment.CenterHorizontally, verticalAlignment = Alignment.CenterVertically,
     ) {
         if (size.width >= 200.dp) {
-            val ring = minOf((size.width - 24.dp) / 3 - 12.dp, room).coerceIn(40.dp, 96.dp)
+            val ring = minOf((size.width - 24.dp) / 3 - 12.dp, room - if (calm) 16.dp else 0.dp).coerceIn(40.dp, 96.dp) // calm: one more text line
             Row(GlanceModifier.fillMaxWidth()) {
                 listOf(Triple("Sleep", "sleep", c.sleep), Triple("Readiness", "readiness", c.readiness), Triple("Activity", "activity", c.activity))
                     .forEach { (label, key, col) ->
                         Column(GlanceModifier.defaultWeight(), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Ring(d?.score(key), col, c.light(col), ring, text)
+                            Ring(d?.score(key), col, c.light(col), ring, text, calm)
+                            if (calm) Text(calmWord(key, d?.score(key)), style = medium)
                             Text(label, style = small)
                         }
                     }
@@ -103,18 +109,17 @@ private fun Content(d: JsonObject?, ms: Long) {
             val level = listOf("calm", "elevated", "high").indexOf((d?.get("signals") as? JsonObject)?.get("level")?.jsonPrimitive?.content)
             Row {
                 if (level >= 0) Text(
-                    "Body signals " + listOf("Calm", "Elevated", "High")[level] + " · ",
-                    style = TextStyle(color = text, fontSize = 12.sp, fontWeight = FontWeight.Medium),
+                    "Body signals " + listOf("Calm", "Elevated", "High")[level] + " · ", style = medium,
                 )
                 Text(footer, style = small)
             }
         } else {
             val ring = minOf(size.width - 24.dp, room).coerceIn(40.dp, 110.dp)
-            Ring(d?.score("readiness"), c.readiness, c.light(c.readiness), ring, text)
+            Ring(d?.score("readiness"), c.readiness, c.light(c.readiness), ring, text, calm)
             Spacer(GlanceModifier.height(4.dp))
             Text(
-                "Sleep ${d?.score("sleep") ?: "–"} · Activity ${d?.score("activity") ?: "–"}",
-                style = TextStyle(color = text, fontSize = 12.sp, fontWeight = FontWeight.Medium),
+                if (calm) calmWord("readiness", d?.score("readiness")) else "Sleep ${d?.score("sleep") ?: "–"} · Activity ${d?.score("activity") ?: "–"}",
+                style = medium,
             )
             Text(footer, style = small)
         }
@@ -123,12 +128,30 @@ private fun Content(d: JsonObject?, ms: Long) {
 
 /** ScoreRing's look as a bitmap (Glance has no Canvas): 12 % track, round-cap sweep gradient to the light partner. */
 @Composable
-private fun Ring(score: Int?, color: Color, light: Color, size: Dp, text: androidx.glance.unit.ColorProvider) {
+private fun Ring(score: Int?, color: Color, light: Color, size: Dp, text: androidx.glance.unit.ColorProvider, calm: Boolean) {
     val px = (size.value * LocalContext.current.resources.displayMetrics.density).roundToInt()
     Box(GlanceModifier.size(size), contentAlignment = Alignment.Center) {
-        Image(ImageProvider(ringBitmap(px, px * 0.12f, (score ?: 0) / 100f, color, light)), null, GlanceModifier.fillMaxSize())
-        Text(score?.toString() ?: "–", style = TextStyle(color = text, fontSize = (size.value * 0.3f).sp, fontWeight = FontWeight.Bold))
+        Image(ImageProvider(if (calm) markBitmap(px, px * 0.12f, color, light) else ringBitmap(px, px * 0.12f, (score ?: 0) / 100f, color, light)), null, GlanceModifier.fillMaxSize())
+        if (!calm) Text(score?.toString() ?: "–", style = TextStyle(color = text, fontSize = (size.value * 0.3f).sp, fontWeight = FontWeight.Bold))
     }
+}
+
+/** Calm mode: the open Circa mark as Today's CalmArc draws it (thin tail at 334.6° round to the thick head at 296°, dot in the gap). */
+private fun markBitmap(px: Int, head: Float, color: Color, light: Color): Bitmap {
+    val b = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
+    val cv = Canvas(b)
+    val r = RectF(head / 2, head / 2, px - head / 2, px - head / 2)
+    val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
+    repeat(90) { i ->
+        val t = i / 89f
+        p.color = lerp(color, light, t).toArgb()
+        p.strokeWidth = head * (4 + 5 * t) / 9
+        cv.drawArc(r, 334.6f + 321.4f * i / 90, 321.4f / 90, false, p)
+    }
+    p.style = Paint.Style.FILL
+    p.color = light.toArgb()
+    cv.drawCircle(px / 2f + r.width() / 2 * 0.724f, px / 2f - r.width() / 2 * 0.69f, head / 3, p)
+    return b
 }
 
 private fun ringBitmap(px: Int, stroke: Float, progress: Float, color: Color, light: Color): Bitmap {

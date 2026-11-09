@@ -31,6 +31,8 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -251,15 +253,18 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
             val r = d["readiness"].obj()
             val score = r?.get("score").num()?.roundToInt()
             val mood = when { score == null -> c.moodFair.copy(alpha = 0f); score >= 80 -> c.moodGood; score >= 60 -> c.moodFair; else -> c.moodLow }
+            val low = d["confidence"].obj()?.get("readiness").str() == "low"
             InsetCard {
                 Column(
                     Modifier.fillMaxWidth().background(Brush.radialGradient(listOf(mood, mood.copy(alpha = 0f))))
-                        .clickable { open = if (open == "readiness") null else "readiness" }.padding(AppSpace.xl),
+                        .clickable { haptic.tick(); open = if (open == "readiness") null else "readiness" }.padding(AppSpace.xl),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    ScoreRing((score ?: 0) / 100f, c.readiness, Modifier.size(220.dp), stroke = 20.dp) {
+                    // Calm mode: the word until the card is tapped open, then the number with its details.
+                    if (d["calm"].str() == "true" && open != "readiness") CalmArc(calmWord("readiness", score), if (low) 0.6f else 1f)
+                    else ScoreRing((score ?: 0) / 100f, c.readiness, Modifier.size(220.dp), stroke = 20.dp, alpha = if (low) 0.6f else 1f) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            if (score != null) CountUp(score, AppType.display) else Text("—", style = AppType.display)
+                            if (score != null) Row { if (low) Text("~", style = AppType.display); CountUp(score, AppType.display) } else Text("—", style = AppType.display)
                             Text("Readiness", style = AppType.subhead, color = c.secondaryLabel)
                         }
                     }
@@ -386,21 +391,36 @@ private fun SmallRings(d: JsonObject, open: String?, onOpen: (String?) -> Unit, 
     }
 }
 
-@OptIn(ExperimentalSharedTransitionApi::class)
+@OptIn(ExperimentalSharedTransitionApi::class, ExperimentalLayoutApi::class)
 @Composable
 private fun SmallRingsContent(d: JsonObject, open: String?, onOpen: (String?) -> Unit, medStarted: String?, animate: Boolean, s: SharedTransitionScope?, a: AnimatedVisibilityScope?) {
     val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
     val meta = mapOf("sleep" to ("Sleep" to c.sleep), "activity" to ("Activity" to c.activity))
     @Composable fun ring(key: String, size: Int, stroke: Int, number: TextStyle) {
         val score = d[key].obj()?.get("score").num()?.roundToInt()
+        val low = d["confidence"].obj()?.get(key).str() == "low"
         // Only while the expand runs: a lazy-list prefetch measures this item before SharedTransitionLayout is placed,
         // and a sharedElement measured then throws "Uninitialized LayoutCoordinates".
         val m = if (s == null || a == null || a.transition.currentState == a.transition.targetState) Modifier else with(s) { Modifier.sharedElement(rememberSharedContentState("ring-$key"), a) }
-        ScoreRing((score ?: 0) / 100f, meta.getValue(key).second, m.size(size.dp), stroke = stroke.dp, animate = animate) {
-            if (score != null) CountUp(score, number, animate = animate) else Text("—", style = number)
+        ScoreRing((score ?: 0) / 100f, meta.getValue(key).second, m.size(size.dp), stroke = stroke.dp, animate = animate, alpha = if (low) 0.6f else 1f) {
+            if (score != null) Row { if (low) Text("~", style = number); CountUp(score, number, animate = animate) } else Text("—", style = number)
         }
     }
-    if (open == null) Row(Modifier.padding(horizontal = AppSpace.m, vertical = AppSpace.l)) {
+    // Calm mode: word pills; a tap opens the same details, ring and number included.
+    if (open == null && d["calm"].str() == "true") FlowRow(
+        Modifier.fillMaxWidth().padding(AppSpace.l),
+        horizontalArrangement = Arrangement.spacedBy(AppSpace.s, Alignment.CenterHorizontally), verticalArrangement = Arrangement.spacedBy(AppSpace.s),
+    ) {
+        meta.forEach { (key, mt) ->
+            Text(
+                "${mt.first} · ${calmWord(key, d[key].obj()?.get("score").num()?.roundToInt())}",
+                style = AppType.subhead.copy(fontWeight = FontWeight.Medium), color = c.label,
+                modifier = Modifier.clip(RoundedCornerShape(50)).background(mt.second.copy(alpha = 0.14f))
+                    .clickable(role = Role.Button) { haptic.tick(); onOpen(key) }.padding(horizontal = AppSpace.l, vertical = AppSpace.m),
+            )
+        }
+    } else if (open == null) Row(Modifier.padding(horizontal = AppSpace.m, vertical = AppSpace.l)) {
         meta.forEach { (key, mt) ->
             Column(
                 Modifier.weight(1f).clip(AppShape.small).clickable { onOpen(key) }.padding(AppSpace.s),
@@ -436,6 +456,28 @@ private fun ScoreDetails(key: String, name: String, color: Color, d: JsonObject,
                 Text("What is $name?", style = AppType.headline)
                 Text(SCORE_INFO[key].orEmpty(), style = AppType.subhead, modifier = Modifier.padding(top = AppSpace.xs))
                 Text(SCORE_SCALE, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s))
+                // Days scored before the backend sent confidence have none: no row.
+                val level = d["confidence"].obj()?.get(key).str()
+                val bars = listOf("low", "medium", "high").indexOf(level) + 1
+                if (bars > 0) Row(Modifier.padding(top = AppSpace.s), verticalAlignment = Alignment.CenterVertically) {
+                    Canvas(Modifier.size(18.dp, 14.dp).semantics { contentDescription = "Confidence: $level." }) {
+                        val w = size.width / 5
+                        repeat(3) { i ->
+                            val h = size.height * (i + 1) / 3
+                            drawRoundRect(color.copy(alpha = if (i < bars) 1f else 0.2f), Offset(i * 2 * w, size.height - h), Size(w, h), CornerRadius(w / 2))
+                        }
+                    }
+                    val worn = d["wear"].obj()?.get("worn_hours").num()
+                    val awake = d["wear"].obj()?.get("awake_hours").num()
+                    // The wear sentence only when it agrees with the level (0.8 as backend scoring.confidence); a missing contributor can lower it too.
+                    val what = if (key == "activity" && worn != null && awake != null && awake > 0 && (worn / awake >= 0.8) == (level == "high"))
+                        "Ring worn ${worn.roundToInt()} of ${awake.roundToInt()} waking hours"
+                    else if (level == "high") "The ring data behind this score is nearly complete" else "Some of the ring data behind this score is missing"
+                    Text(
+                        "$what, so this is a ${listOf("rough", "fair", "solid")[bars - 1]} estimate.",
+                        style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.s),
+                    )
+                }
             }
             (d[key].obj()?.get("contributors").obj() ?: JsonObject(emptyMap())).forEach { (n, v) ->
                 Hairline(Modifier.padding(start = AppSpace.l))
@@ -449,6 +491,46 @@ private fun ScoreDetails(key: String, name: String, color: Color, d: JsonObject,
                     style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l, vertical = AppSpace.m),
                 )
             }
+        }
+    }
+}
+
+// Calm-mode words per score: 85 or more, 70–84, below 70 (readiness as backend notify's band words).
+private val CALM = mapOf(
+    "readiness" to listOf("Ready", "Steady", "Take it easy"), "sleep" to listOf("Solid", "Fair", "Light"),
+    "activity" to listOf("Active", "Moderate", "Light"),
+)
+
+/** The word shown instead of a score in calm mode (Today and the widget); "—" without a score. */
+internal fun calmWord(key: String, score: Int?): String =
+    if (score == null) "—" else CALM.getValue(key)[if (score >= 85) 0 else if (score >= 70) 1 else 2]
+
+/** Calm hero in the ring's 220 dp footprint: the open Circa mark (thin tail round to a thick head, dot in the gap) breathing as the Breathe orb idles, [word] instead of a number. */
+@Composable
+private fun CalmArc(word: String, alpha: Float) {
+    val c = AppTheme.colors
+    val breath = if (LocalReduceMotion.current) null
+        else rememberInfiniteTransition(label = "calm").animateFloat(0.97f, 1f, infiniteRepeatable(tween(4000, easing = EaseInOut), RepeatMode.Reverse), label = "calm")
+    Box(Modifier.size(220.dp), contentAlignment = Alignment.Center) {
+        Canvas(
+            Modifier.fillMaxSize().graphicsLayer { val k = breath?.value ?: 1f; scaleX = k; scaleY = k; this.alpha = alpha }
+                .semantics { contentDescription = "Readiness: $word." },
+        ) {
+            val head = 20.dp.toPx()
+            val tail = head * 4 / 9
+            val r = (size.minDimension - head) / 2
+            val box = Size(2 * r, 2 * r)
+            // As the launcher mark (0° = 3 o'clock, clockwise): tail at 334.6°, head at 296°, dot at 316.4°.
+            // Short round-capped pieces of growing width make the taper.
+            repeat(90) { i ->
+                val t = i / 89f
+                drawArc(lerp(c.readiness, c.readinessLight, t), 334.6f + 321.4f * i / 90, 321.4f / 90, false, center - Offset(r, r), box, style = Stroke(tail + (head - tail) * t, cap = StrokeCap.Round))
+            }
+            drawCircle(c.readinessLight, head / 3, center + Offset(r * 0.724f, r * -0.69f))
+        }
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(word, style = AppType.largeTitle, textAlign = TextAlign.Center, modifier = Modifier.width(150.dp))
+            Text("Readiness", style = AppType.subhead, color = c.secondaryLabel)
         }
     }
 }

@@ -350,7 +350,7 @@ fun InsetCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.()
     )
 }
 
-/** Activity-style ring: faint track, sweep-gradient arc (light end at the head) that springs to [progress] (0..1), or starts there when ![animate]; blurred glow when >= 120 dp. */
+/** Activity-style ring: faint track, sweep-gradient arc (light end at the head) that springs to [progress] (0..1), or starts there when ![animate]; blurred glow when >= 120 dp. [alpha] fades the whole ring (0.6 = low confidence). */
 @Composable
 fun ScoreRing(
     progress: Float,
@@ -358,6 +358,7 @@ fun ScoreRing(
     modifier: Modifier = Modifier.size(96.dp),
     stroke: Dp = 12.dp,
     animate: Boolean = true,
+    alpha: Float = 1f,
     content: @Composable BoxScope.() -> Unit = {},
 ) {
     val p = remember { Animatable(if (animate) 0f else progress.coerceIn(0f, 1f)) }
@@ -371,7 +372,7 @@ fun ScoreRing(
             val w = stroke.toPx()
             val topLeft = Offset(w / 2, w / 2)
             val arc = Size(size.width - w, size.height - w)
-            drawArc(color.copy(alpha = 0.12f), 0f, 360f, false, topLeft, arc, style = Stroke(w))
+            drawArc(color.copy(alpha = 0.12f * alpha), 0f, 360f, false, topLeft, arc, style = Stroke(w))
             val v = p.value
             if (v > 0f) rotate(-90f) {
                 val sweep = 360f * v
@@ -381,7 +382,7 @@ fun ScoreRing(
                         style = android.graphics.Paint.Style.STROKE
                         strokeWidth = w
                         strokeCap = android.graphics.Paint.Cap.ROUND
-                        this.color = color.copy(alpha = colors.glow).toArgb()
+                        this.color = color.copy(alpha = colors.glow * alpha).toArgb()
                         maskFilter = BlurMaskFilter(w * 1.2f, BlurMaskFilter.Blur.NORMAL)
                     }
                     canvas.nativeCanvas.drawArc(topLeft.x, topLeft.y, topLeft.x + arc.width, topLeft.y + arc.height, 0f, sweep, false, glow)
@@ -389,7 +390,7 @@ fun ScoreRing(
                 // Gradient returns to the base colour after the head so the start cap does not pick up the light end;
                 // a full ring peaks halfway and ends on the base colour so 12 o'clock has no seam.
                 val stops = if (v < 0.999f) arrayOf(0f to color, v to light, 1f to color) else arrayOf(0f to color, 0.5f to light, 1f to color)
-                drawArc(Brush.sweepGradient(*stops, center = center), 0f, sweep, false, topLeft, arc, style = Stroke(w, cap = StrokeCap.Round))
+                drawArc(Brush.sweepGradient(*stops, center = center), 0f, sweep, false, topLeft, arc, alpha = alpha, style = Stroke(w, cap = StrokeCap.Round))
             }
         }
         content()
