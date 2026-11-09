@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta
 import httpx
 from fastapi.testclient import TestClient
 
-from app import db, main, scoring, vm
+from app import cardio, db, main, scoring, vm
 from app.main import app
 
 H = {"Authorization": "Bearer secret"}
@@ -50,7 +50,8 @@ def test_ingest_rescores_and_today_has_sleep_score(monkeypatch) -> None:
         j = c.get("/today", headers=H).json()
         print(j)
         assert j["sleep"]["score"] is not None and j["status"] == "learning" and j["baseline_days"] == "1/14"
-        assert j["activity"]["score"] is not None and j["vitals"]["hr"] == 70
+        asleep_now = ss <= datetime.now().timestamp() <= es  # latest fake sample is "now"
+        assert j["activity"]["score"] is not None and j["vitals"]["hr"] == (54 if asleep_now else 70)
         assert b"score_sleep" in sent[-1]
         s = c.get("/sleep", headers=H).json()
         assert s["session"]["total_min"] == 420 and s["stages"]
@@ -270,3 +271,63 @@ def test_week_shape_means_nights_and_previous(tmp_path, monkeypatch) -> None:
         assert e["scored_days"] == 0 and e["best_night"] is None and e["steps_total"] is None
         assert c.get("/week", headers=H).json()["end"] == date.today().isoformat()
         assert c.get("/week?end=bogus", headers=H).status_code == 422
+
+
+def test_cardio_settings_today_and_workout_relabel(tmp_path, monkeypatch) -> None:
+    """Yesterday, no night: 54 bpm all day, 10:00-10:30 at 150 bpm (zone 3) with 200 steps that hour."""
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "f1.db"))
+    monkeypatch.delenv("TZ", raising=False)
+    db.init()
+    d = date.today() - timedelta(1)
+    m = vm.midnight(d).timestamp()
+    w0 = m + 10 * 3600
+    data = {"biometric_hr_bpm": {m + i * 300: 150.0 if w0 <= m + i * 300 < w0 + 1800 else 54.0 for i in range(288)},
+            "biometric_steps": {w0: 200.0}}
+    monkeypatch.setattr(vm, "series", lambda e, s, en, st: {t: v for t, v in data.get(e, {}).items()
+                                                            if s.timestamp() <= t <= en.timestamp()})
+    monkeypatch.setattr(vm, "forward_import", lambda b: httpx.Response(204))
+    monkeypatch.setattr(main, "_vitals", lambda: {})
+
+    def prior(load: float | None) -> None:
+        for i in range(1, 15):
+            db.save_day(d - timedelta(i), (None, None, None), {"inputs": {"rhr": 50.0, "cardio_load": load}}, {})
+
+    prior(None)
+    with TestClient(app) as c:
+        s = c.get("/settings", headers=H).json()
+        assert s["birth_year"] == "" and s["low_step_kind"] == "workout"
+        for bad in ({"birth_year": 1899}, {"birth_year": date.today().year + 1}, {"birth_year": "85"},
+                    {"birth_year": True}, {"birth_year": 1990.5}, {"low_step_kind": "run"}, {"low_step_kind": "walk"}):
+            assert c.patch("/settings", json=bad, headers=H).status_code == 422, bad
+        main._score_day(d)
+        j = c.get(f"/today?date={d}", headers=H).json()
+        assert j["cardio"] == {"status": "needs_age", "load": None, "minutes": None, "target": None, "days": 0}
+        assert j["workouts"] == [] and j["inputs"]["restorative_min"] > 0 and j["inputs"]["fitness"] is None
+        assert c.patch("/settings", json={"birth_year": "1985"}, headers=H).json()["birth_year"] == "1985"
+        r = c.patch("/settings", json={"birth_year": 1990, "low_step_kind": "ride"}, headers=H).json()
+        assert r["birth_year"] == "1990" and r["low_step_kind"] == "ride"
+        main._score_day(d)
+        j = c.get(f"/today?date={d}", headers=H).json()
+        assert j["cardio"] == {"status": "learning", "load": 9.0, "minutes": [0, 0, 30, 0, 0], "target": None, "days": 0}
+        (w,) = j["workouts"]
+        assert (w["start"], w["end"], w["kind"], w["confirmed"]) == (int(w0), int(w0) + 1800, "ride", False)
+        assert j["inputs"]["fitness"] == cardio.fitness(cardio.max_hr(1990, d), 50.0)
+        assert c.get("/trends?metric=cardio_load&days=2", headers=H).json()["points"][-1]["value"] == 9.0
+
+        prior(10.0)
+        main._score_day(d)
+        row = db.days(d, d)[0]
+        db.save_day(d, (None, 85, None), row["c"], {})  # a scored readiness gives the target band
+        j = c.get(f"/today?date={d}", headers=H).json()["cardio"]
+        assert j["status"] == "ok" and j["days"] == 14 and j["target"] == {"lo": 11, "hi": 14, "band": "recovered"}
+        assert c.get("/trends?metric=cardio_load&days=2", headers=H).json()["points"][-1]["baseline"] == 10.0
+
+        r = c.patch("/workouts", json={"date": d.isoformat(), "start": int(w0) - 300, "kind": "walk"}, headers=H)
+        assert [(x["kind"], x["confirmed"]) for x in r.json()["workouts"]] == [("walk", True)]
+        main._score_day(d)  # the label survives a rescore
+        assert [(x["kind"], x["confirmed"]) for x in db.days(d, d)[0]["c"]["workouts"]] == [("walk", True)]
+        for bad in ({"date": d.isoformat(), "start": int(w0), "kind": "run"},
+                    {"date": "bogus", "start": int(w0), "kind": "walk"},
+                    {"start": int(w0), "kind": "walk"}, {"date": d.isoformat(), "start": "x", "kind": "walk"}):
+            assert c.patch("/workouts", json=bad, headers=H).status_code == 422, bad
+        assert c.patch("/settings", json={"birth_year": ""}, headers=H).json()["birth_year"] == ""

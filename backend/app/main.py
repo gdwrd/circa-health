@@ -11,7 +11,7 @@ from statistics import mean, median
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from . import db, insights, notify, scoring, vm
+from . import cardio, db, insights, notify, scoring, vm
 
 log = logging.getLogger("ring")
 
@@ -62,7 +62,8 @@ def _score_day(d: date) -> None:
     def val(i: dict, k: str) -> float | None:  # sleep balance counts naps
         return i["sleep_min"] + (i.get("nap_min") or 0) if k == "sleep_min" and i.get(k) is not None else i.get(k)
 
-    base = {k: scoring.baseline([val(p["inputs"], k) for p in prior]) for k in ("rhr", "hrv", "sleep_min", "steps")}
+    base = {k: scoring.baseline([val(p["inputs"], k) for p in prior])
+            for k in ("rhr", "hrv", "sleep_min", "steps", "cardio_load")}
     week = [p["inputs"] for p in prior if p["date"] >= d - timedelta(7)]
     now = datetime.now(vm.tz())
     ss = _sessions(d)
@@ -103,8 +104,9 @@ def _score_day(d: date) -> None:
         ready = scoring.readiness_score(night, base, sum(y.values()) if y else None, goal)
 
     end = vm.midnight(d + timedelta(1)) - timedelta(seconds=1)
-    worn = {datetime.fromtimestamp(t, vm.tz()).hour for t, v in vm.series("biometric_hr_bpm", vm.midnight(d), end, "5m").items()
-            if v > 0 and t <= now.timestamp()}
+    raw = vm.series("biometric_hr_bpm", vm.midnight(d), end, "5m")
+    worn = {datetime.fromtimestamp(t, vm.tz()).hour for t, v in raw.items() if v > 0 and t <= now.timestamp()}
+    day_hr = {t: v for t, v in raw.items() if v > 0 and awake(t)}
     awake_h = [h for h in range(24) if awake((vm.midnight(d) + timedelta(hours=h)).timestamp())]
     inputs["worn_hours"] = len(worn)
     wear = {"worn_hours": sum(h in worn for h in awake_h), "awake_hours": len(awake_h)}  # both over awake hours
@@ -124,7 +126,21 @@ def _score_day(d: date) -> None:
     zones = scoring.stress_zones(st) if st else None
     inputs["stress_load"] = zones and zones["stressed_hours"]
 
-    med = db.settings()["medication_started"]  # rhr/hrv baselines use only days on medication (new normal)
+    cfg = db.settings()
+    mh = cardio.max_hr(int(cfg["birth_year"]), d) if cfg["birth_year"] else None
+    bounds = cardio.zones(mh, base["rhr"]) if mh and base["rhr"] else None
+    steps_h = {int(vm.midnight(d).timestamp()) + 3600 * h: v for h, v in steps.items()}  # cardio keys by hour start
+    load = cardio.load(list(day_hr.values()), bounds) | {"bounds": bounds} if bounds else None
+    workouts = cardio.workouts(day_hr, steps_h, bounds, awake, cfg["low_step_kind"]) if bounds else []
+    for start, kind in db.workout_kinds(d).items():  # the user's label beats the guess, across rescores
+        for w in workouts:
+            if w["start"] - 600 <= start <= w["end"]:
+                w["kind"], w["confirmed"] = kind, True
+                break
+    inputs |= {"cardio_load": load and load["load"], "fitness": cardio.fitness(mh, base["rhr"]),
+               "restorative_min": cardio.restorative(day_hr, inputs.get("rhr") or base["rhr"], steps_h, awake)}
+
+    med = cfg["medication_started"]  # rhr/hrv baselines use only days on medication (new normal)
     window = {k: [p["inputs"].get(k) for p in prior if not med or k not in ("rhr", "hrv") or p["date"].isoformat() >= med]
               for k in scoring.DIRS}
     rb = {k: scoring.robust(v, scoring.FLOORS.get(k, 0.0)) for k, v in window.items()}
@@ -138,7 +154,7 @@ def _score_day(d: date) -> None:
     scores = tuple(r and r["score"] for r in (sleep, ready, activity))
     contributors = {"sleep": sleep and sleep["contributors"], "readiness": ready and ready["contributors"],
                     "activity": activity and activity["contributors"], "inputs": inputs, "stress": zones, "session": n,
-                    "signals": sig, "sleep_extra": extra, "wear": wear}
+                    "signals": sig, "sleep_extra": extra, "wear": wear, "cardio": load, "workouts": workouts}
     kept = {k: v for k, v in base.items() if v is not None}
     db.save_day(d, scores, contributors, kept)
     vals = {"score_sleep": scores[0], "score_readiness": scores[1], "score_activity": scores[2],
@@ -221,6 +237,8 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
     n = sum(1 for r in rows if r["inputs"].get("sleep_min") is not None)
     row = next((r for r in rows if r["date"] == d), None) or {"c": {}, "inputs": {}}
     sig = row["c"].get("signals") or {"index": None, "level": None, "flags": {}, "streak": 0, "reason": "baseline"}
+    m, days = notify.cardio_base(d)
+    status = "needs_age" if not db.settings()["birth_year"] else "learning" if m is None else "ok"
     return {
         "status": "ok" if n >= 5 else "learning", "date": d.isoformat(), "baseline_days": f"{n}/14",
         **{k: {"score": row.get(f"{k}_score"), "contributors": row["c"].get(k)} for k in ("sleep", "readiness", "activity")},
@@ -231,6 +249,10 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
         "wear": row["c"].get("wear"),
         "signals": {**sig, "status": "learning" if sig["reason"] else "ok", "explain": notify.explain(_today())},
         "inputs": row["inputs"],
+        "cardio": {"status": status, "load": row["inputs"].get("cardio_load"),
+                   "minutes": (row["c"].get("cardio") or {}).get("minutes"), "days": days,
+                   "target": cardio.target(row.get("readiness_score"), m) if status == "ok" else None},
+        "workouts": row["c"].get("workouts", []),
     }
 
 
@@ -255,7 +277,7 @@ def sleep(day: str | None = Query(None, alias="date")) -> dict:
 
 
 SCORES = {"sleep": "sleep_score", "readiness": "readiness_score", "activity": "activity_score"}
-INPUTS = ("rhr", "hrv", "steps", "sleep_min", "stress_load", "bed_start")
+INPUTS = ("rhr", "hrv", "steps", "sleep_min", "stress_load", "bed_start", "cardio_load", "restorative_min", "fitness")
 
 
 @api.get("/trends")
@@ -400,7 +422,16 @@ def _settings_out() -> dict:
     s = db.settings()
     return {"step_goal": float(s["step_goal"]), "sleep_need_min": float(s["sleep_need_min"]),
             "medication_started": s["medication_started"], "medication_time": s["medication_time"],
-            "medication_window_h": float(s["medication_window_h"])}
+            "medication_window_h": float(s["medication_window_h"]), "birth_year": s["birth_year"],
+            "low_step_kind": s["low_step_kind"]}
+
+
+def _year_ok(v: object) -> bool:
+    if v == "":
+        return True
+    if isinstance(v, str) and re.fullmatch(r"\d{4}", v):
+        v = int(v)
+    return isinstance(v, int) and not isinstance(v, bool) and 1900 <= v <= _today().year
 
 
 def _started_ok(v: object) -> bool:
@@ -414,7 +445,8 @@ def _started_ok(v: object) -> bool:
 
 SETTINGS = {"step_goal": lambda v: _num(v, 1000, 100000), "sleep_need_min": lambda v: _num(v, 240, 720),
             "medication_started": _started_ok, "medication_time": lambda v: isinstance(v, str) and HHMM.fullmatch(v),
-            "medication_window_h": lambda v: _num(v, 1, 24)}
+            "medication_window_h": lambda v: _num(v, 1, 24), "birth_year": _year_ok,
+            "low_step_kind": lambda v: v in ("ride", "workout")}
 
 
 @api.get("/settings")
@@ -428,6 +460,16 @@ def patch_settings(body: dict = Body(...)) -> dict:
         raise HTTPException(422, "bad settings")
     db.set_settings({k: str(v) for k, v in body.items()})
     return _settings_out()
+
+
+@api.patch("/workouts")
+def patch_workouts(body: dict = Body(...)) -> dict:
+    d, start, kind = _day(str(body.get("date"))), body.get("start"), body.get("kind")
+    if not isinstance(start, int) or isinstance(start, bool) or kind not in ("walk", "ride", "workout"):
+        raise HTTPException(422, "bad start or kind")
+    db.set_workout_kind(d, start, kind)
+    _score_day(d)
+    return {"workouts": db.days(d, d)[0]["c"]["workouts"]}
 
 
 @api.get("/notifications/pending")

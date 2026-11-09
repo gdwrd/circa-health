@@ -52,6 +52,17 @@ def test_readiness_once(monkeypatch) -> None:
     assert kinds() == ["readiness"]
 
 
+def test_readiness_appends_cardio_target(monkeypatch) -> None:
+    seed(D, 70, {"resting_hr": 90.0})
+    for i in range(1, 15):
+        db.save_day(D - timedelta(i), (None, None, None), {"inputs": {"cardio_load": 10.0}}, {})
+    db.set_settings({"birth_year": "1990"})
+    at(monkeypatch, 8)
+    notify.evaluate({D})
+    (n,) = notify.pending()
+    assert n["body"] == "Lowest factor: resting heart rate (90). Cardio target 8–11."
+
+
 def test_bedtime_window_and_dedup(monkeypatch, env) -> None:
     env["biometric_steps"] = {1.0: 100.0}
     for i in range(14):

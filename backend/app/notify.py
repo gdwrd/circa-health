@@ -4,7 +4,7 @@ from contextlib import closing
 from datetime import date, datetime, timedelta
 from statistics import median
 
-from . import db, scoring, vm
+from . import cardio, db, scoring, vm
 
 log = logging.getLogger("ring")
 
@@ -35,6 +35,12 @@ def _fired(kind: str, now: datetime) -> bool:
                          (kind, now.date().isoformat())))
 
 
+def cardio_base(d: date) -> tuple[float | None, int]:
+    """14-day mean cardio load (None under 5 days) and how many of the 14 prior days have one."""
+    v = [r["inputs"].get("cardio_load") for r in db.days(d - timedelta(14), d - timedelta(1))]
+    return scoring.baseline(v), sum(x is not None for x in v)
+
+
 def _readiness(now: datetime, dates: set[date]) -> None:
     d = now.date()
     if d not in dates or _fired("readiness", now):
@@ -45,6 +51,9 @@ def _readiness(now: datetime, dates: set[date]) -> None:
     c = {k: v for k, v in (row["c"].get("readiness") or {}).items() if v is not None}
     low = min(c, key=lambda k: c[k], default=None)
     body = f"Lowest factor: {WORDS.get(low, low)} ({round(c[low])})." if low else "Based on last night's sleep."
+    t = cardio.target(row["readiness_score"], cardio_base(d)[0]) if db.settings()["birth_year"] else None
+    if t:
+        body += f" Cardio target {t['lo']}–{t['hi']}."
     _add("readiness", f"Readiness {row['readiness_score']}", body, now)
 
 
