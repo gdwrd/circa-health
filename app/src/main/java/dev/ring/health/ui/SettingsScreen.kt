@@ -7,6 +7,8 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.content.Context
 import android.content.pm.PackageManager
+import android.content.Intent
+import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -82,6 +84,7 @@ import dev.ring.health.Prefs.lastCharging
 import dev.ring.health.Prefs.lastSyncMs
 import dev.ring.health.Prefs.ringAddress
 import dev.ring.health.Prefs.sleepNeedHours
+import dev.ring.health.Prefs.usageAccess
 import dev.ring.health.Prefs.stepGoal
 import dev.ring.health.Prefs.syncIntervalMin
 import dev.ring.health.Prefs.vmUrl
@@ -116,6 +119,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var interval by remember { mutableIntStateOf(ctx.syncIntervalMin) }
     var batteryOk by remember { mutableStateOf(MainActivity.isIgnoringBatteryOptimizations(ctx)) }
     fun notifyOk() = ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+    var usageOk by remember { mutableStateOf(ctx.usageAccess) }
     var notifyGranted by remember { mutableStateOf(notifyOk()) }
     var pickInterval by remember { mutableStateOf(false) }
     var showLog by remember { mutableStateOf(false) }
@@ -125,6 +129,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 lastSync = ctx.lastSyncMs
                 batteryOk = MainActivity.isIgnoringBatteryOptimizations(ctx)
                 notifyGranted = notifyOk()
+                usageOk = ctx.usageAccess
             }
         }
         activity.lifecycle.addObserver(obs)
@@ -208,6 +213,11 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 ChevronRow("Sync every", intervalLabel(interval) + stretch) { pickInterval = true }
                 Hairline(Modifier.padding(start = AppSpace.l))
                 ChevronRow("Sync log", "") { showLog = true }
+            }
+        }
+        item {
+            Section("Phone", "Screen on/off times fix nights where you scrolled in bed. Only the times are sent.") {
+                ChevronRow("Phone as sleep sensor", if (usageOk) "On" else "Off") { ctx.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
             }
         }
         item {

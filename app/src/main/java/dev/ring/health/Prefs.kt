@@ -1,5 +1,6 @@
 package dev.ring.health
 
+import android.app.AppOpsManager
 import android.content.Context
 import android.content.SharedPreferences
 
@@ -13,6 +14,7 @@ object Prefs {
     private const val KEY_SLEEP_NEED_H    = "sleep_need_h"
     private const val KEY_LAST_SYNC_MS    = "last_sync_ms"
     private const val KEY_LAST_SLEEP_MS   = "last_sleep_ms"
+    private const val KEY_LAST_SCREEN_MS  = "last_screen_ms"
     private const val KEY_SLEEP_SCHEMA    = "sleep_schema"
     private const val KEY_SYNC_INTERVAL   = "sync_interval_min"
     private const val KEY_ASKED_BATTERY   = "asked_battery"
@@ -58,6 +60,16 @@ object Prefs {
     var Context.lastSleepMs: Long
         get() = prefs(this).getLong(KEY_LAST_SLEEP_MS, 0L)
         set(v) = prefs(this).edit().putLong(KEY_LAST_SLEEP_MS, v).apply()
+
+    /** Newest phone screen on/off event already stored; 0 = never read (first read starts 7 days back). */
+    var Context.lastScreenMs: Long
+        get() = prefs(this).getLong(KEY_LAST_SCREEN_MS, 0L)
+        set(v) = prefs(this).edit().putLong(KEY_LAST_SCREEN_MS, v).apply()
+
+    /** Usage access, granted by the user in system Settings; needed to read screen on/off events. */
+    val Context.usageAccess: Boolean
+        get() = (getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager)
+            .unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
 
     /** Minutes between background syncs (ring read + push); 0 = background sync off. */
     var Context.syncIntervalMin: Int

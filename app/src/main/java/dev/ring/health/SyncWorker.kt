@@ -5,6 +5,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.Manifest
 import android.app.PendingIntent
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -37,7 +39,9 @@ import dev.ring.health.Prefs.chargedTold
 import dev.ring.health.Prefs.lastBatteryPct
 import dev.ring.health.Prefs.lastCharging
 import dev.ring.health.Prefs.lastDeepSyncDay
+import dev.ring.health.Prefs.lastScreenMs
 import dev.ring.health.Prefs.lastSleepMs
+import dev.ring.health.Prefs.usageAccess
 import dev.ring.health.Prefs.staleWarned
 import dev.ring.health.Prefs.sleepSchema
 import dev.ring.health.Prefs.syncIntervalMin
@@ -202,7 +206,11 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
             // Everything read is kept on the phone; every unsent row goes out, so a failed push is retried with no age limit.
             val store = SampleStore.get(applicationContext)
-            store.add(metrics)
+            val ctx = applicationContext
+            val now = System.currentTimeMillis()
+            val screen = if (ctx.usageAccess) screenMetrics(ctx, if (ctx.lastScreenMs == 0L) now - 7 * 86_400_000L else ctx.lastScreenMs, now) else emptyList()
+            store.add(metrics + screen)
+            if (ctx.usageAccess) ctx.lastScreenMs = screen.maxOfOrNull { it.timestampMs } ?: now
             val pusher = MetricsPusher(vmUrl, applicationContext.apiToken)
             var sent = 0
             while (true) {
@@ -373,6 +381,20 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         collectBigData(conn, ColmiProtocol.BIG_DATA_TYPE_SLEEP, "sleep")?.let(ColmiProtocol::parseSleepPacket) ?: emptyList()
 
     // ── Metric computation ─────────────────────────────────────────────────
+
+    /** Phone screen on/off moments (1.0 / 0.0); only times, never app names. */
+    private fun screenMetrics(ctx: Context, from: Long, to: Long): List<Metric> {
+        val labels = mapOf("device" to "colmi_r02")
+        val ev = (ctx.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager).queryEvents(from, to)
+        val e = UsageEvents.Event()
+        val out = mutableListOf<Metric>()
+        while (ev.hasNextEvent()) {
+            ev.getNextEvent(e)
+            if (e.eventType == UsageEvents.Event.SCREEN_INTERACTIVE) out += Metric("biometric_screen_on", labels, 1.0, e.timeStamp)
+            else if (e.eventType == UsageEvents.Event.SCREEN_NON_INTERACTIVE) out += Metric("biometric_screen_on", labels, 0.0, e.timeStamp)
+        }
+        return out
+    }
 
     private fun buildMetrics(
         ctx: Context,

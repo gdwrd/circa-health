@@ -18,6 +18,9 @@
     <!-- Lets the app ask to skip battery optimisation so 5-minute syncs keep their pace -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        xmlns:tools="http://schemas.android.com/tools" tools:ignore="ProtectedPermissions" />
+
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
     <application
