@@ -114,6 +114,33 @@ def bedtime_window(nights: list[tuple[float, float]]) -> dict:
             "score_out": round(mean(out)), "nights": len(nights), "nights_in": best[2]}
 
 
+def social_jetlag(nights: list[tuple[int, float]]) -> dict | None:
+    """nights: (weekday of the wake date, sleep midpoint in minutes after noon), last 28 days.
+    Median of Sat/Sun wake dates minus median of the rest; None under 4 weekday or 2 weekend nights."""
+    week, end = [m for wd, m in nights if wd < 5], [m for wd, m in nights if wd >= 5]
+    if len(week) < 4 or len(end) < 2:
+        return None
+    return {"delta_min": round(median(end) - median(week)), "weekday_min": median(week), "weekend_min": median(end),
+            "weekdays": len(week), "weekends": len(end)}
+
+
+def wind_down(hr: list[tuple[float, float]], rhr: float) -> float | None:
+    """hr: (minutes after noon, bpm) up to sleep start, ascending. Start of the last run of samples <= 1.2 x rhr
+    that reaches sleep start (one higher sample allowed), from 18:00 on; None when there is none.
+
+    shortcut: HR is logged every 5-15 min, so this is accurate to about 15 min; upgrade if the ring logs HR more often.
+    """
+    start, high = None, 0
+    for t, v in reversed(hr):
+        if t < 360:  # 18:00
+            break
+        if v <= 1.2 * rhr:
+            start = t
+        elif (high := high + 1) > 1:
+            break
+    return start
+
+
 def low_index(hr: list[float]) -> int:
     """Index of the first sample within 5 % of the minimum (night HR near its low)."""
     return next(i for i, v in enumerate(hr) if v <= min(hr) * 1.05)

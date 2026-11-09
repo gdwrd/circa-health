@@ -146,6 +146,11 @@ def _score_day(d: date) -> None:
         inputs |= {"rhr": night["hr_p10"], "hrv": night["hrv_mean"], "awake": n["awake_min"],
                    "recovery": night["recovery_frac"], "spo2": min(sp) if sp else None,
                    "bed_start": _after_noon(n["start"]), "bed_end": _after_noon(n["end"])}
+        # evening HR from the noon before sleep start (after-noon minutes stay ascending); evidence only, never scored
+        eve = samples.raw("biometric_hr_bpm", s - timedelta(minutes=inputs["bed_start"]), s)
+        rhr = inputs["rhr"] or base["rhr"]
+        inputs["wind_down"] = rhr and scoring.wind_down(
+            [(_after_noon(t), v) for t, v in eve.items() if v > 0 and t < n["start"]], rhr)
         y = _hourly("biometric_steps", d - timedelta(1))
         ready = scoring.readiness_score(night, base, sum(y.values()) if y else None, goal)
 
@@ -302,6 +307,7 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
     mins = lambda xs: round(sum((b["end"] - b["start"]) / 60 for b in xs), 1)
     cfg = db.settings()
     status = "needs_age" if not cfg["birth_year"] else "learning" if m is None else "ok"
+    wd = [v for r in db.days(_today() - timedelta(13), _today()) if (v := r["inputs"].get("wind_down")) is not None]
     return {
         "status": "ok" if n >= 5 else "learning", "date": d.isoformat(), "baseline_days": f"{n}/14",
         "calm": cfg["calm"] == "1", "confidence": row["c"].get("confidence"),
@@ -319,7 +325,8 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
         "workouts": row["c"].get("workouts", []),
         **({"breathe": {"today_min": mins([b for b in wk if _dt(b["start"]).date() == d]), "week_min": mins(wk),
                         "sessions": len(wk)}} if wk or db.query("SELECT 1 FROM breath_session LIMIT 1") else {}),
-        "tonight": {"bedtime": notify.bedtime_window(_today()), "debt": debt(_today()), "plan": notify.tonight(_today())},
+        "tonight": {"bedtime": notify.bedtime_window(_today()), "debt": debt(_today()), "plan": notify.tonight(_today()),
+                    "wind_down_usual": median(wd) if len(wd) >= 5 else None},  # minutes after noon, 14 nights
     }
 
 
@@ -334,11 +341,14 @@ def sleep(day: str | None = Query(None, alias="date")) -> dict:
         s, e = (datetime.fromtimestamp(n[k], samples.tz()) for k in ("start", "end"))
         stages = [{"t": t, "stage": int(v)} for t, v in samples.grid("biometric_sleep_stage", s, e, 300, 10800).items() if n["start"] <= t < n["end"]]
         hr = [{"t": t, "bpm": v} for t, v in samples.raw("biometric_hr_bpm", s, e).items() if v > 0]  # as _score_day
+    mids = [(r["date"].weekday(), (i["bed_start"] + i["bed_end"]) / 2) for r in db.days(d - timedelta(27), d)
+            if (i := r["inputs"]).get("bed_start") is not None]
     return {"date": d.isoformat(), "status": "ok" if n else "learning", "score": row.get("sleep_score"),
             "contributors": row["c"].get("sleep"), "session": n, "stages": stages,
             "naps": (row["c"].get("sleep_extra") or {}).get("naps", []), "hr": hr, "sleep_extra": row["c"].get("sleep_extra"),
             "hr_low": hr[scoring.low_index([p["bpm"] for p in hr])] if hr else None,
             "debt": debt(d), "bedtime": notify.bedtime_window(_today()), "plan": notify.tonight(_today()),
+            "jetlag": scoring.social_jetlag(mids),
             "edited": db.sleep_override(d) is not None, "phone_min": round(n.get("phone_min", 0)) if n else 0}
 
 

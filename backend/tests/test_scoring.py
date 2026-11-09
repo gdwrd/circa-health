@@ -4,7 +4,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.scoring import (activity_score, baseline, bedtime_window, confidence, low_index, readiness_score, regularity,
-                         resilience, robust, sleep_debt, sleep_score, strain, stress_zones, tonight)
+                         resilience, robust, sleep_debt, sleep_score, social_jetlag, strain, stress_zones, tonight,
+                         wind_down)
 
 GOOD = {"total_min": 480, "awake_min": 8, "rem_min": 100, "deep_min": 100, "midpoint_h": 2.0, "regularity_sd": 20}
 SHORT = {"total_min": 240, "awake_min": 20, "rem_min": 40, "deep_min": 30, "midpoint_h": 1.0}
@@ -144,3 +145,21 @@ def test_confidence_thresholds() -> None:
     assert confidence(0.49, 7, 7) == "low" and confidence(1.0, 3, 7) == "low"  # either one alone makes it low
     assert confidence(1.0, 5, 7) == "high" and confidence(1.0, 3, 4) == "high"
     assert confidence(1.0, 0, 0) == "low"  # no contributors at all
+
+
+def test_social_jetlag_needs_four_weekday_and_two_weekend_nights() -> None:
+    week, end = [(i, 900.0) for i in range(4)], [(5, 1000.0), (6, 1010.0)]  # (weekday, midpoint after noon)
+    assert social_jetlag(week[:3] + end) is None and social_jetlag(week + end[:1]) is None
+    assert social_jetlag(week + end) == {"delta_min": 105, "weekday_min": 900.0, "weekend_min": 1005.0,
+                                         "weekdays": 4, "weekends": 2}
+    assert social_jetlag([(0, 960.0)] * 4 + [(6, 900.0)] * 2)["delta_min"] == -60  # earlier weekends are negative
+
+
+def test_wind_down_last_run_one_outlier_from_18() -> None:
+    hr = [(300, 60), (420, 90), (480, 62), (495, 80), (510, 61), (525, 66)]  # rhr 55 -> settled at <= 66
+    assert wind_down(hr, 55) == 480  # 495 is the one higher sample allowed; the second (420) ends the run
+    assert wind_down(hr[:4], 55) == 480  # a higher last sample is that one outlier
+    assert wind_down([(400, 60), (420, 90), (440, 90), (480, 60)], 55) == 480
+    assert wind_down([(300, 60), (345, 60), (380, 60)], 55) == 380  # nothing before 18:00 (360) counts
+    assert wind_down([], 55) is None and wind_down([(300, 60), (345, 60)], 55) is None
+    assert wind_down([(400, 60), (480, 90), (500, 90)], 55) is None  # not settled before sleep

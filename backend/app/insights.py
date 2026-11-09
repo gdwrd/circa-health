@@ -7,14 +7,14 @@ from . import samples
 
 DAYS, MIN_N = 90, 3
 NIGHT_KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "stress", "travel", "breathe", "phone_in_bed")
-NIGHT = ("sleep_score", "deep_min", "rem_min", "hrv", "rhr", "total_min", "awake_min", "bed_start")
+NIGHT = ("sleep_score", "deep_min", "rem_min", "hrv", "rhr", "total_min", "awake_min", "bed_start", "wind_down")
 EXPERIMENT_KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "breathe", "phone_in_bed")
 MED = ("day_hr", "rhr", "hrv", "bed_start", "total_min", "sleep_score")
 UNITS = {"sleep_score": "pts", "readiness_score": "pts", "deep_min": "min", "rem_min": "min", "total_min": "min", "awake_min": "min",
-         "bed_start": "min", "hrv": "ms", "rhr": "bpm", "day_hr": "bpm", "strain": "pts"}
+         "bed_start": "min", "wind_down": "min", "hrv": "ms", "rhr": "bpm", "day_hr": "bpm", "strain": "pts"}
 FLOORS = {"rhr": 1.5, "day_hr": 1.5, "hrv": 5.0, "awake_min": 10.0,  # same floors as scoring.FLOORS
           # minimum spreads so near-identical values (5 min grid bed times) are never "strong"
-          "bed_start": 15.0, "total_min": 15.0, "deep_min": 5.0, "rem_min": 5.0, "sleep_score": 3.0, "readiness_score": 3.0,
+          "bed_start": 15.0, "wind_down": 15.0, "total_min": 15.0, "deep_min": 5.0, "rem_min": 5.0, "sleep_score": 3.0, "readiness_score": 3.0,
           "strain": 5.0}
 
 
@@ -43,6 +43,8 @@ def nights(rows: list[dict]) -> dict[date, dict]:
                           **{k: s[k] for k in ("deep_min", "rem_min", "total_min", "awake_min")},
                           # minutes from midnight, 23:30 -> -30. shortcut: 5 min grid start, upgrade with C1 inputs.bed_start
                           "bed_start": st.hour * 60 + st.minute - (1440 if st.hour >= 12 else 0),
+                          # inputs.wind_down is minutes after noon; - 720 puts it on the bed_start scale
+                          "wind_down": None if (w := r["inputs"].get("wind_down")) is None else w - 720,
                           "strain": (r["c"].get("signals") or {}).get("index")}
     return out
 
@@ -57,7 +59,7 @@ def compare(w: list[dict], wo: list[dict], metrics: tuple[str, ...]) -> dict:
         e = effect([o[m] for o in w if o.get(m) is not None], [o[m] for o in wo if o.get(m) is not None],
                    FLOORS.get(m, 0.0))
         if e:
-            if m == "bed_start":
+            if m in ("bed_start", "wind_down"):
                 e["pct"] = None  # a percent of clock time means nothing
             effects.append({"metric": m, "unit": UNITS[m], **e})
     top = sorted((e for e in effects if e["strong"]), key=lambda e: -abs(e["z"]))[:2]
@@ -81,6 +83,20 @@ def experiment(plan: str, start: date, nt: dict[date, dict], logged: set[date], 
     return {"status": "done" if i >= days else "running", "day": min(i + 1, days), "days": days,
             "today": None if i >= days else "on" if plan[i] == "1" else "off",
             "kept": kept, "skipped": [j for j in past if j not in kept], "result": compare(side("1"), side("0"), (metric,))}
+
+
+def lead_time(sick: set[date], strain: dict[date, float | None]) -> dict | None:
+    """Per sick episode (first day of a run): consecutive days before it with strain index >= 25, up to 7.
+    An episode with no index the day before is left out (unknown, not zero). None under 2 episodes."""
+    leads = []
+    for d in sick:
+        if d - timedelta(1) in sick or strain.get(d - timedelta(1)) is None:
+            continue
+        n = 0
+        while n < 7 and (strain.get(d - timedelta(n + 1)) or 0) >= 25:
+            n += 1
+        leads.append(n)
+    return {"days": median(leads), "n": len(leads)} if len(leads) >= 2 else None
 
 
 def _hhmm(m: float) -> str:
@@ -115,6 +131,7 @@ def kinds(rows: list[dict], entries: list[dict], today: date, day_hr: dict[date,
     out["sick"] = compare([{"strain": mean(v)} for d in days if d in sick and (v := win(d))],
                           [nt[d] for d in days if d not in near and d in nt and nt[d]["strain"] is not None],
                           ("strain",))
+    out["sick"]["lead"] = lead_time(sick, {d: o["strain"] for d, o in nt.items()})
 
     def med(d: date) -> dict | None:  # same day (day_hr) + that night (row d+1)
         o = {**nt.get(d + timedelta(1), {}), "day_hr": day_hr.get(d)}

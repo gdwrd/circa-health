@@ -2,8 +2,9 @@ from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
 
-from app import db, insights, main, samples
+from app import db, insights, main, notify, samples
 from app.main import app
+from conftest import load
 
 H = {"Authorization": "Bearer secret"}
 TODAY = date(2026, 11, 8)
@@ -149,3 +150,59 @@ def test_experiment_route_done_counts_journal_and_nights() -> None:
         j = c.post("/experiments", json={"kind": "workout", "metric": "hrv", "days": 10}, headers=H).json()
         assert j["active"]["kind"] == "workout" and [(p["kind"], p["ended"], p["status"]) for p in j["past"]] == [
             ("alcohol", d.isoformat(), "done")]
+
+
+def test_lead_time_median_over_episodes_none_under_two() -> None:
+    a, b, c = (TODAY - timedelta(i) for i in (40, 20, 5))
+    strain = {a - timedelta(i): 30 for i in range(1, 11)} | {b - timedelta(i): 25 for i in (1, 2, 3)} | {
+        b - timedelta(4): 24, c - timedelta(1): 40, c - timedelta(2): None, c - timedelta(3): 40}
+    assert insights.lead_time({a, a + timedelta(1), b, c}, strain) == {"days": 3, "n": 3}  # 7 (cap), 3, 1
+    assert insights.lead_time({b, c}, strain) == {"days": 2, "n": 2}
+    assert insights.lead_time({a, a + timedelta(1)}, strain) is None  # one episode: day 2 of a run is not a new one
+    assert insights.lead_time({b, c, TODAY}, strain) == {"days": 2, "n": 2}  # no index the day before: left out
+    assert insights.lead_time({b, c, a + timedelta(5)}, {**strain, a + timedelta(4): 10})["days"] == 1  # 3, 1, 0
+
+
+def test_wind_down_is_a_clock_metric_on_the_bed_start_scale() -> None:
+    alc = [TODAY - timedelta(i) for i in (3, 6, 9)]
+    rows = [row(TODAY - timedelta(i)) for i in range(20)]
+    for r in rows:
+        r["inputs"]["wind_down"] = 660 if r["date"] - timedelta(1) in alc else 600  # minutes after noon
+    k = insights.kinds(rows, [entry(d, "alcohol") for d in alc], TODAY, {}, "", [])
+    e = {x["metric"]: x for x in k["alcohol"]["all"]}["wind_down"]
+    assert (e["unit"], e["delta"], e["pct"], e["with"], e["without"], e["strong"]) == ("min", 60, None, -60, -120, True)
+    assert k["sick"]["lead"] is None and k["sick"]["status"] == "learning"
+
+
+def test_k1_routes_and_strain_sentence() -> None:
+    with TestClient(app) as c:
+        d = main._today()
+        assert c.get("/sleep", headers=H).json()["jetlag"] is None
+        assert c.get("/today", headers=H).json()["tonight"]["wind_down_usual"] is None
+        sick = [d - timedelta(i) for i in (4, 12)]
+        for i in range(21):  # three weeks: 15 weekday + 6 weekend wake dates, weekends an hour later
+            x = d - timedelta(i)
+            r, late = row(x, strain=40 if any(0 < (s - x).days <= 2 for s in sick) else 10), 60 if x.weekday() >= 5 else 0
+            if x == d:
+                r["c"]["signals"] = {"index": 40, "level": "elevated", "streak": 2, "flags": {"recovery": 2.0},
+                                     "reason": None}
+            inputs = {**r["inputs"], "bed_start": 690 + late, "bed_end": 1170 + late, "wind_down": 600 + late}
+            db.save_day(x, (80, 70, 60), {**r["c"], "inputs": inputs}, {})
+        for s in sick:
+            db.add_journal(s.isoformat(), "sick", None, None, 1)
+        assert c.get("/sleep", headers=H).json()["jetlag"] == {"delta_min": 60, "weekday_min": 930.0, "weekend_min": 990.0,
+                                                               "weekdays": 15, "weekends": 6}
+        t = c.get("/today", headers=H).json()
+        assert t["tonight"]["wind_down_usual"] == 600 and t["inputs"]["wind_down"] in (600, 660)
+        assert c.get("/journal/insights", headers=H).json()["kinds"]["sick"]["lead"] == {"days": 2, "n": 2}
+        notify._strain(notify._now(), set())
+        assert notify.pending()[-1]["body"].endswith(" Last times this came about 2 days before you logged feeling sick.")
+
+
+def test_score_day_stores_wind_down() -> None:
+    d = main._today() - timedelta(1)
+    t = lambda h, m=0: (samples.midnight(d) + timedelta(hours=h, minutes=m)).timestamp()
+    load({"biometric_sleep_total_min": {t(-1): 420}, "biometric_sleep_end_ts": {t(-1): t(6, 30)},  # asleep 23:00
+          "biometric_hr_bpm": {t(-4): 90, t(-3): 90, t(-3, 30): 60, t(-2): 62, t(-2, 30): 61, **{t(h): 52 for h in range(6)}}})
+    main._score_day(d)
+    assert db.days(d, d)[0]["inputs"]["wind_down"] == 570  # 21:30: night p10 52 -> settled at <= 62.4

@@ -289,6 +289,11 @@ def _strain(now: datetime, dates: set[date]) -> None:
     logged = explain(d)
     if logged:
         body += f" You logged {_join([LOGGED[k] for k in logged])} yesterday, which can cause this."
+    start = d - timedelta(insights.DAYS)  # same call as /journal/insights, so the number matches the app
+    lead = insights.kinds(db.days(start, d), db.journal(start.isoformat()), d, {}, db.settings()["medication_started"],
+                          db.breaths(start, d))["sick"]["lead"]
+    if lead and (n := round(lead["days"])):
+        body += f" Last times this came about {n} day{'s' if n > 1 else ''} before you logged feeling sick."
     _add("strain", "Your body may be under strain", body, now)
 
 
