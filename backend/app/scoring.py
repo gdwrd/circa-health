@@ -47,9 +47,11 @@ def _on_min(intervals: list[tuple[float, float]], lo: float, hi: float) -> float
     return sum(max(min(off, hi) - max(on, lo), 0.0) for on, off in intervals) / 60
 
 
-def clip_night(start: float, end: float, awake_min: float, intervals: list[tuple[float, float]]
-               ) -> tuple[float, float, float, float]:
+def clip_night(start: float, end: float, awake_min: float, intervals: list[tuple[float, float]],
+               ring_awake: list[tuple[float, float]]) -> tuple[float, float, float, float]:
     """Screen-on (on, off) epoch seconds -> (start, end, awake_min, phone_min) of a night.
+
+    Awake is a union: screen-on minutes the ring already marked awake (ring_awake intervals) add nothing.
 
     shortcut: screen-on means someone used this phone, not necessarily the user; upgrade with an unlock/usage signal.
     """
@@ -58,7 +60,10 @@ def clip_night(start: float, end: float, awake_min: float, intervals: list[tuple
     e = next((on for on, off in intervals if off - on >= 180 and end - 3600 <= on < end), end)
     if s >= e:
         return start, end, awake_min, phone
-    return s, e, min(awake_min + _on_min(intervals, s, e), (e - s) / 60), phone
+    extra = _on_min(intervals, s, e) - sum(_on_min([(max(on, rs), min(off, ro))], s, e)
+                                           for on, off in intervals for rs, ro in ring_awake if min(off, ro) > max(on, rs))
+    cut = _on_min(ring_awake, start, end) - _on_min(ring_awake, s, e)  # ring-awake minutes the clip removed from the span
+    return s, e, min(max(awake_min - cut, 0.0) + extra, (e - s) / 60), phone
 
 
 def regularity(midpoints_min: list[float]) -> float | None:

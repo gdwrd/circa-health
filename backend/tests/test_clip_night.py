@@ -13,17 +13,23 @@ S, E = 0.0, 480 * M  # an 8 h night
 
 
 def test_clip_night() -> None:
-    assert scoring.clip_night(S, E, 20.0, []) == (S, E, 20.0, 0.0)
+    assert scoring.clip_night(S, E, 20.0, [], []) == (S, E, 20.0, 0.0)
     # scroll 10 min after getting in bed, then sleep: onset = phone put down; 6 min of the wake-up scroll too
-    s, e, a, p = scoring.clip_night(S, E, 20.0, [(-30 * M, 40 * M), (E - 6 * M, E + 10 * M)])
+    s, e, a, p = scoring.clip_night(S, E, 20.0, [(-30 * M, 40 * M), (E - 6 * M, E + 10 * M)], [])
     assert (s, e) == (40 * M, E - 6 * M) and a == 20.0 and p == 76.0
     # woke at 3 h, scrolled 10 min, slept again: neither end moves, the scroll counts as awake
-    s, e, a, p = scoring.clip_night(S, E, 20.0, [(180 * M, 190 * M)])
+    s, e, a, p = scoring.clip_night(S, E, 20.0, [(180 * M, 190 * M)], [])
     assert (s, e, a, p) == (S, E, 30.0, 10.0)
+    # the ring already marked 180-190 awake: the same scroll adds nothing; 10 min beyond it adds 10
+    ra = [(180 * M, 190 * M)]
+    assert scoring.clip_night(S, E, 20.0, [(180 * M, 190 * M)], ra)[2] == 20.0
+    assert scoring.clip_night(S, E, 20.0, [(180 * M, 200 * M)], ra)[2] == 30.0
+    # ring saw the first 15 min awake while scrolling; clipping them off the span also drops them from awake
+    assert scoring.clip_night(S, E, 20.0, [(-10 * M, 15 * M)], [(S, 15 * M)])[2] == 5.0
     # short glances (< 1 min at start, < 3 min at the end) do not clip
-    assert scoring.clip_night(S, E, 0.0, [(M, 1.5 * M), (E - 20 * M, E - 18 * M)])[:2] == (S, E)
+    assert scoring.clip_night(S, E, 0.0, [(M, 1.5 * M), (E - 20 * M, E - 18 * M)], [])[:2] == (S, E)
     # span would vanish: unchanged, phone still reported
-    assert scoring.clip_night(S, 60 * M, 5.0, [(0.0, 70 * M)]) == (S, 60 * M, 5.0, 60.0)
+    assert scoring.clip_night(S, 60 * M, 5.0, [(0.0, 70 * M)], []) == (S, 60 * M, 5.0, 60.0)
 
 
 def test_phone_in_bed_journal_upsert_delete_and_route() -> None:
