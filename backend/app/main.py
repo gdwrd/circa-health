@@ -52,6 +52,11 @@ def _sessions(d: date) -> list[dict]:
     for s in sorted(out, key=lambda s: -s["total_min"]):
         if all(s["end"] <= k["start"] or s["start"] >= k["end"] for k in kept):  # overlap = re-sent copy, not a nap
             kept.append(s)
+    if o := db.sleep_override(d):  # the user's bed/wake times replace the main session; naps untouched
+        span = (o[1] - o[0]) / 60
+        n = kept[0] if kept else {"awake_min": 0.0, "rem_min": 0.0, "deep_min": 0.0}
+        cap = {k: min(n[k], span) for k in ("awake_min", "rem_min", "deep_min")}
+        kept[:1] = [{"start": o[0], "end": o[1], "total_min": max(span - cap["awake_min"], 0.0), **cap}]
     return kept
 
 
@@ -266,23 +271,40 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
 
 @api.get("/sleep")
 def sleep(day: str | None = Query(None, alias="date")) -> dict:
-    try:
-        d = date.fromisoformat(day) if day else _today()
-    except ValueError:
-        raise HTTPException(422, "bad date")
+    d = _day(day)
     row = next(iter(db.days(d, d)), {"c": {}})
     n = row["c"].get("session")
     stages: list[dict] = []
     hr: list[dict] = []
     if n:
         s, e = (datetime.fromtimestamp(n[k], vm.tz()) for k in ("start", "end"))
-        stages = [{"t": t, "stage": int(v)} for t, v in vm.series("last_over_time(biometric_sleep_stage[3h])", s, e, "5m").items() if t < n["end"]]
+        stages = [{"t": t, "stage": int(v)} for t, v in vm.series("last_over_time(biometric_sleep_stage[3h])", s, e, "5m").items() if n["start"] <= t < n["end"]]
         hr = [{"t": t, "bpm": v} for t, v in vm.series("biometric_hr_bpm", s, e, "5m").items() if v > 0]  # as _score_day
     return {"date": d.isoformat(), "status": "ok" if n else "learning", "score": row.get("sleep_score"),
             "contributors": row["c"].get("sleep"), "session": n, "stages": stages,
             "naps": (row["c"].get("sleep_extra") or {}).get("naps", []), "hr": hr, "sleep_extra": row["c"].get("sleep_extra"),
             "hr_low": hr[scoring.low_index([p["bpm"] for p in hr])] if hr else None,
-            "debt": _debt(d), "bedtime": notify.bedtime_window(_today())}
+            "debt": _debt(d), "bedtime": notify.bedtime_window(_today()), "edited": db.sleep_override(d) is not None}
+
+
+@api.patch("/sleep")
+def patch_sleep(body: dict = Body(...)) -> dict:
+    d, start, end = _day(str(body.get("date"))), body.get("start"), body.get("end")
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (start, end)) or not 0 < end - start <= 16 * 3600:
+        raise HTTPException(422, "bad start or end")
+    if datetime.fromtimestamp(end, vm.tz()).date() != d:  # the night belongs to the day it ends on, as _sessions
+        raise HTTPException(422, "end not on date")
+    db.set_sleep_override(d, start, end)
+    _score_day(d)
+    return sleep(d.isoformat())
+
+
+@api.delete("/sleep")
+def delete_sleep(day: str = Query(..., alias="date")) -> dict:
+    d = _day(day)
+    db.delete_sleep_override(d)
+    _score_day(d)
+    return sleep(d.isoformat())
 
 
 SCORES = {"sleep": "sleep_score", "readiness": "readiness_score", "activity": "activity_score"}

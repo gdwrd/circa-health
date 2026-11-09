@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 INSERT OR IGNORE INTO settings VALUES('step_goal','8000'),('sleep_need_min','450'),('medication_started',''),
   ('medication_time','08:00'),('medication_window_h','8'),('birth_year',''),('low_step_kind','workout'),('muted','');
 CREATE TABLE IF NOT EXISTS workout_kind(date TEXT, start INTEGER, kind TEXT, PRIMARY KEY(date, start));
+CREATE TABLE IF NOT EXISTS sleep_override(date TEXT PRIMARY KEY, start INTEGER, "end" INTEGER);
 """
 
 
@@ -124,3 +125,18 @@ def workout_kinds(d: date) -> dict[int, str]:
 def set_workout_kind(d: date, start: int, kind: str) -> None:
     with closing(connect()) as con, con:
         con.execute("INSERT OR REPLACE INTO workout_kind VALUES(?,?,?)", (d.isoformat(), start, kind))
+
+
+def sleep_override(d: date) -> tuple[int, int] | None:
+    r = query('SELECT start, "end" FROM sleep_override WHERE date=?', (d.isoformat(),))
+    return (r[0][0], r[0][1]) if r else None
+
+
+def set_sleep_override(d: date, start: int, end: int) -> None:
+    with closing(connect()) as con, con:
+        con.execute("INSERT OR REPLACE INTO sleep_override VALUES(?,?,?)", (d.isoformat(), start, end))
+
+
+def delete_sleep_override(d: date) -> None:
+    with closing(connect()) as con, con:
+        con.execute("DELETE FROM sleep_override WHERE date=?", (d.isoformat(),))

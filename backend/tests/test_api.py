@@ -108,6 +108,7 @@ def test_day_history_routes(tmp_path, monkeypatch) -> None:
 
 def test_night_without_end_ts(monkeypatch) -> None:
     """Sessions pushed by app v1.0 carry only *_min series; the night still resolves."""
+    db.init()  # _sessions reads sleep_override
     d = date.today()
     t0 = (vm.midnight(d) - timedelta(minutes=30)).timestamp()
     monkeypatch.setattr(vm, "series", lambda expr, s, e, step: {t0: 420.0} if expr == "biometric_sleep_total_min" else {})
@@ -393,3 +394,62 @@ def test_month_shape_means_best_week_workouts_effects(tmp_path, monkeypatch) -> 
         assert c.get("/month", headers=H).json()["month"] == date.today().strftime("%Y-%m")
         for bad in ("2026-13", "bogus", "2026-1", "2026-10-01"):
             assert c.get(f"/month?month={bad}", headers=H).status_code == 422, bad
+
+
+def test_sleep_override_edit_rescore_delete(tmp_path, monkeypatch) -> None:
+    """Ring night 23:00-06:20 (420 total, 20 awake, 90 rem, 80 deep) edited to 23:30-05:00; the day before has no night."""
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "so.db"))
+    monkeypatch.delenv("TZ", raising=False)
+    db.init()
+    d = date.today() - timedelta(1)
+    m = int(vm.midnight(d).timestamp())
+    t0 = m - 3600
+    data = {"biometric_sleep_end_ts": {t0: t0 + 440 * 60}, "biometric_sleep_total_min": {t0: 420.0},
+            "biometric_sleep_awake_min": {t0: 20.0}, "biometric_sleep_rem_min": {t0: 90.0},
+            "biometric_sleep_deep_min": {t0: 80.0}, "biometric_hr_bpm": {t0 + i * 300: 55.0 for i in range(80)}}
+    stages = {t0 + 300: 1.0, m - 900: 2.0, m + 6 * 3600: 3.0}  # before / inside / after the edited span
+
+    def series(e: str, s: datetime, en: datetime, st: str) -> dict:
+        if e.startswith("last_over_time"):
+            return stages  # unfiltered, so /sleep has to clip both ends
+        return {t: v for t, v in data.get(e, {}).items() if s.timestamp() <= t <= en.timestamp()}
+
+    monkeypatch.setattr(vm, "series", series)
+    monkeypatch.setattr(vm, "forward_import", lambda b: httpx.Response(204))
+    monkeypatch.setattr(main, "_vitals", lambda: {})
+    main._score_day(d)
+    with TestClient(app) as c:
+        ring = c.get(f"/sleep?date={d}", headers=H).json()
+        assert ring["edited"] is False and ring["session"]["total_min"] == 420
+        assert [p["t"] for p in ring["stages"]] == [t0 + 300, m - 900, m + 6 * 3600]
+        start, end = m - 1800, m + 5 * 3600
+        s = c.patch("/sleep", json={"date": d.isoformat(), "start": start, "end": end}, headers=H).json()
+        n = s["session"]
+        assert s["edited"] is True and (n["start"], n["end"]) == (start, end)
+        assert (n["total_min"], n["awake_min"], n["rem_min"], n["deep_min"]) == (310, 20, 90, 80)
+        assert s["score"] != ring["score"] and [p["t"] for p in s["stages"]] == [m - 900]
+        assert db.days(d, d)[0]["inputs"]["sleep_min"] == 310
+        body = f"biometric_steps 5 {(m + 12 * 3600) * 1000}\n"  # a re-ingest rescores d; the edit holds
+        assert c.post("/api/v1/import/prometheus", content=body, headers=H).status_code == 204
+        assert c.get(f"/sleep?date={d}", headers=H).json()["session"] == n
+        short = c.patch("/sleep", json={"date": d.isoformat(), "start": end - 3600, "end": end}, headers=H).json()
+        assert [short["session"][k] for k in ("total_min", "awake_min", "rem_min", "deep_min")] == [40, 20, 60, 60]
+        back = c.delete(f"/sleep?date={d}", headers=H).json()
+        assert back["edited"] is False and back["session"] == ring["session"] and back["score"] == ring["score"]
+
+        p = d - timedelta(1)  # no ring night: the edit is the whole session
+        pm = int(vm.midnight(p).timestamp())
+        e = c.patch("/sleep", json={"date": p.isoformat(), "start": pm - 3600, "end": pm + 6 * 3600}, headers=H).json()
+        assert e["edited"] is True and e["score"] is not None
+        assert [e["session"][k] for k in ("total_min", "awake_min", "rem_min", "deep_min")] == [420, 0, 0, 0]
+
+        for bad in ({"date": "bogus", "start": start, "end": end}, {"start": start, "end": end},
+                    {"date": d.isoformat(), "start": "x", "end": end}, {"date": d.isoformat(), "start": True, "end": end},
+                    {"date": d.isoformat(), "start": float(start), "end": end},
+                    {"date": d.isoformat(), "start": end, "end": end},
+                    {"date": d.isoformat(), "start": end - 16 * 3600 - 1, "end": end},
+                    {"date": d.isoformat(), "start": start, "end": m + 86400 + 3600}):
+            assert c.patch("/sleep", json=bad, headers=H).status_code == 422, bad
+        assert c.delete("/sleep?date=bogus", headers=H).status_code == 422
+        assert c.delete("/sleep", headers=H).status_code == 422
+        assert c.get(f"/sleep?date={d}", headers=H).json()["edited"] is False
