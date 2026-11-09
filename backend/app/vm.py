@@ -33,17 +33,20 @@ def dates_in_body(body: bytes) -> set[date]:
     return out
 
 
-def query_range(expr: str, start: datetime, end: datetime, step: str) -> list[dict]:
+def query_range(expr: str, start: datetime, end: datetime, step: str, lookback: str | None = None) -> list[dict]:
+    params = {"query": expr, "start": start.timestamp(), "end": end.timestamp(), "step": step}
+    if lookback:
+        params["max_lookback"] = lookback
     r = httpx.get(
         f"{_vm()}/api/v1/query_range",
-        params={"query": expr, "start": start.timestamp(), "end": end.timestamp(), "step": step},
+        params=params,
         timeout=30,
     )
     r.raise_for_status()
     return r.json()["data"]["result"]
 
 
-def series(expr: str, start: datetime, end: datetime, step: str) -> dict[float, float]:
+def series(expr: str, start: datetime, end: datetime, step: str, lookback: str | None = None) -> dict[float, float]:
     """First result series as {unix_ts: value}, ascending."""
-    res = query_range(expr, start, end, step)
+    res = query_range(expr, start, end, step, lookback)
     return {float(t): float(v) for t, v in res[0]["values"]} if res else {}

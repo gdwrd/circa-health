@@ -141,7 +141,7 @@ def _inactivity(now: datetime, dates: set[date]) -> None:
         s = r["c"].get("session")
         if s and s["start"] < end.timestamp() and s["end"] > start.timestamp():
             return
-    if sum(vm.series("biometric_steps", start, end - timedelta(seconds=1), "1h").values()) == 0:
+    if sum(vm.series("biometric_steps", start, end - timedelta(seconds=1), "1h", "59m").values()) == 0:
         _add("inactivity", "Time to move", "No steps in the last 2 hours.", now)
 
 

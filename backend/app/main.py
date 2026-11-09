@@ -27,7 +27,8 @@ def auth(cred: HTTPAuthorizationCredentials | None = Depends(bearer)) -> None:
 
 def _hourly(metric: str, d: date) -> dict[int, float]:
     end = vm.midnight(d + timedelta(1)) - timedelta(seconds=1)  # exclude next midnight's lookback
-    return {datetime.fromtimestamp(t, vm.tz()).hour: v for t, v in vm.series(metric, vm.midnight(d), end, "1h").items()}
+    # max_lookback 59m: an hour with no sample stays empty instead of repeating the previous hour's value.
+    return {datetime.fromtimestamp(t, vm.tz()).hour: v for t, v in vm.series(metric, vm.midnight(d), end, "1h", "59m").items()}
 
 
 def _after_noon(ts: float) -> int:

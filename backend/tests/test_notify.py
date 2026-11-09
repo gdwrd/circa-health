@@ -20,7 +20,7 @@ def env(tmp_path, monkeypatch) -> dict:
     monkeypatch.delenv("TZ", raising=False)
     db.init()
     series: dict = {}
-    monkeypatch.setattr(vm, "series", lambda e, s, en, st: series.get(e, {}))
+    monkeypatch.setattr(vm, "series", lambda e, s, en, st, lb=None: series.get(e, {}))
     monkeypatch.setattr(notify, "_checkin", lambda now, dates: None)  # 08-11 rule; on only in its own tests
     return series
 
