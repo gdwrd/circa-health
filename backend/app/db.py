@@ -1,8 +1,10 @@
 import json
 import os
+import re
 import sqlite3
 from contextlib import closing
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from . import samples
 
@@ -35,6 +37,26 @@ def connect() -> sqlite3.Connection:
     con = sqlite3.connect(os.environ.get("DB_PATH", "/data/ring.db"))
     con.row_factory = sqlite3.Row
     return con
+
+
+BACKUP = re.compile(r"ring-(\d{4}-\d{2}-\d{2})\.db")
+
+
+def backup() -> None:
+    """Dated copy of ring.db next to it; keeps 14 days, judged by the date in the name (other files are never touched)."""
+    folder = Path(os.environ.get("DB_PATH", "/data/ring.db")).parent / "backups"
+    today = datetime.now(samples.tz()).date()
+    target = folder / f"ring-{today.isoformat()}.db"
+    if not target.exists():
+        folder.mkdir(exist_ok=True)
+        tmp = target.with_suffix(".tmp")
+        with closing(connect()) as src, closing(sqlite3.connect(tmp)) as dst:
+            src.backup(dst)
+        tmp.replace(target)
+    for f in folder.iterdir():
+        m = BACKUP.fullmatch(f.name)
+        if m and date.fromisoformat(m[1]) < today - timedelta(14):
+            f.unlink()
 
 
 KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "sick", "travel", "stress", "medication", "bp", "note", "breathe")

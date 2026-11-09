@@ -177,6 +177,10 @@ def _score_day(d: date) -> None:
 
 
 def rescore(dates: set[date]) -> None:
+    try:
+        db.backup()  # a failed backup never blocks scoring
+    except Exception:
+        log.exception("backup failed")
     for d in sorted(dates):
         try:
             _score_day(d)

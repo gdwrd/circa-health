@@ -91,8 +91,8 @@ docker compose up -d
 The backend listens on `:8429`. Point the app at `http://<server-ip>:8429` plus
 `API_TOKEN` from `infra/.env` (app v2 or newer; the backend is required).
 
-**Backup**: copy `ring.db` out of the backend volume, e.g.
-`docker cp ring-backend:/data/ring.db .`.
+**Backup**: the backend writes a dated copy nightly to `/data/backups/ring-YYYY-MM-DD.db`
+(kept 14 days). To copy out the live db: `docker cp ring-backend:/data/ring.db .`.
 
 Moving off an old VictoriaMetrics stack? `backend/migrate_vm.py` copies its
 history into `ring.db` (`python migrate_vm.py` in the backend container, with

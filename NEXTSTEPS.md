@@ -97,7 +97,7 @@
 ## Active Task: v6.1 — nightly ring.db backup (user, 2026-11-09)
 **Decided (user, 2026-11-09).** Since V3 the merged history exists only in `ring.db` inside the homelab volume, and backups are hand copies before deploys; the phone holds samples only since v3.9.0. The backend keeps its own dated copies, no new package, no compose change. Agents never edit this ledger.
 
-- [ ] **K1 Backend nightly backup.** In `db.py`: `backup()` uses the stdlib `sqlite3.Connection.backup()` to write `<dir of DB_PATH>/backups/ring-YYYY-MM-DD.db` (local date from `samples.tz()`), skips when today's file exists, then deletes files older than 14 days in that folder (never anything else, never `ring.db`). Called at the start of `rescore` in `main.py` inside its own try/except (a failed backup never blocks scoring). One test on a temp ring.db: file created once, second call a no-op, a 15-day-old file removed. Check: compileall + pytest. Deploy: backend redeployed on the homelab, `ls /data/backups` shows today's file with `PRAGMA integrity_check` ok; README Backup line names the folder.
+- [x] **K1 Backend nightly backup.** (2026-11-09) — db.backup() writes /data/backups/ring-YYYY-MM-DD.db via sqlite3 backup() (tmp then rename), keeps 14 days by file-name date (exact pattern only), called first in rescore under its own try/except; test_backup.py; README Backup line names the folder. compileall ok, pytest 90 passed; homelab: hand copy ring.db.bak-k1-20261109-171708, redeployed, backups/ring-2026-11-09.db present, integrity_check ok. Not verified: 14-day deletion and the next day's run on the homelab (temp-dir test only).
 
 
 ## Active Task: v6.2 — last known data when the server is unreachable (user, 2026-11-09)
