@@ -660,8 +660,38 @@ private fun BloodOxygen(sp: JsonObject?, past: Boolean) {
                         if (low == 0) "No dips below 90 %" else "$low ${if (low == 1) "dip" else "dips"} below 90 %",
                         style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.xs),
                     )
+                    val n = sp["n"].num()?.roundToInt() ?: 0
+                    if (n > 0) Spo2Dots(n, low.coerceAtMost(n))
                 }
             }
+        }
+    }
+}
+
+/** One dot per hourly reading of the night; those under 90 % settle below the dashed line. `/sleep` gives counts, not hours, so the dips sit last, not at their time. */
+@Composable
+private fun Spo2Dots(n: Int, low: Int) {
+    val c = AppTheme.colors
+    val reduce = LocalReduceMotion.current
+    // One 600 ms ease: the dips drop under the line.
+    val drop = remember(n, low) { Animatable(if (reduce) 1f else 0f) }
+    LaunchedEffect(drop) { drop.animateTo(1f, tween(600)) }
+    val measurer = rememberTextMeasurer()
+    val label = AppType.footnote.copy(color = c.secondaryLabel)
+    Canvas(
+        Modifier.padding(top = AppSpace.m).fillMaxWidth().height(36.dp)
+            .semantics { contentDescription = "$n hourly readings, $low below 90 percent." },
+    ) {
+        val mark = measurer.measure("90 %", label)
+        val r = 4.dp.toPx()
+        val mid = size.height / 2
+        val end = size.width - mark.size.width - 8.dp.toPx()
+        val slot = minOf(end / n, 20.dp.toPx())
+        drawLine(c.secondaryLabel.copy(alpha = 0.45f), Offset(0f, mid), Offset(end, mid), 1.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx())))
+        drawText(mark, topLeft = Offset(size.width - mark.size.width, mid - mark.size.height / 2f))
+        for (i in 0 until n) {
+            val dip = i >= n - low
+            drawCircle(if (dip) c.signalElevated else c.sleep, r, Offset(slot * (i + 0.5f), mid + r * 2.2f * if (dip) 2 * drop.value - 1 else -1f))
         }
     }
 }

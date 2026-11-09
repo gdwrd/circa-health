@@ -13,6 +13,10 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseInOut
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.ui.graphics.PathEffect
+import dev.ring.health.Prefs.suggestDismissed
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -347,7 +351,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
                             FlowRow(
                                 Modifier.padding(start = AppSpace.l, top = AppSpace.s, end = AppSpace.l),
                                 horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s),
-                            ) { es.forEach { JournalChip(it.label()) } }
+                            ) { es.forEach { JournalChip(it.label(), it.kind == "workout" && it.note == "auto") } }
                         }
                     }
                     TintButton(if (LocalTime.now().hour < 12) "Log yesterday" else "Log today", Modifier.padding(AppSpace.l)) { sheet = true }
@@ -372,7 +376,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
         testing = false
         scope.launch { Api.startExperiment(ctx, kind, metric)?.let { exp = it["active"].obj() } }
     }
-    if (sheet) CheckInSheet(journal, medTime, scope, sheetDay, ::loadJournal) { sheet = false; sheetDay = null }
+    if (sheet) CheckInSheet(journal, medTime, scope, sheetDay, data, ::loadJournal) { sheet = false; sheetDay = null }
 }
 
 /** Sleep + Activity rings; tapping one grows it into the card with its details (shared element), a plain switch under reduce-motion. */
@@ -678,18 +682,46 @@ private val WHY = mapOf(
 )
 
 @Composable
-private fun JournalChip(text: String) {
+private fun JournalChip(text: String, auto: Boolean = false) {
     val c = AppTheme.colors
-    Text(
-        text, style = AppType.footnote.copy(fontWeight = FontWeight.Medium), color = c.label,
-        modifier = Modifier.clip(RoundedCornerShape(50)).background(c.secondaryLabel.copy(alpha = 0.16f)).padding(horizontal = 12.dp, vertical = 6.dp),
-    )
+    Row(
+        Modifier.clip(RoundedCornerShape(50)).background(c.secondaryLabel.copy(alpha = 0.16f)).padding(horizontal = 12.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(AppSpace.xs), verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(text, style = AppType.footnote.copy(fontWeight = FontWeight.Medium), color = c.label)
+        if (auto) Text("auto", style = AppType.tab, color = c.secondaryLabel)
+    }
 }
 
-/** Writes go to [scope] (outlives the sheet) so a pending note or BP is saved when the sheet closes. */
+/** Suggested entry: a dashed outline that fills solid once logged (one 600 ms ease, a plain switch under reduce-motion). */
+@Composable
+private fun SuggestChip(label: String, logged: Boolean, onLog: () -> Unit) {
+    val c = AppTheme.colors
+    // Local state flips at once; the server state re-keys it after the reload.
+    var on by remember(logged) { mutableStateOf(logged) }
+    val fill by animateFloatAsState(if (on) 1f else 0f, if (LocalReduceMotion.current) snap() else tween(600), label = "suggest")
+    val onTint = if (c.background.luminance() < 0.5f) c.label else c.card // white in both themes
+    Box(Modifier.clip(RoundedCornerShape(50)).clickable(enabled = !on, role = Role.Button) { on = true; onLog() }) {
+        Canvas(Modifier.matchParentSize().semantics { contentDescription = if (on) "Logged" else "Suggested, tap to log" }) {
+            val w = 1.5.dp.toPx()
+            val round = CornerRadius(size.height / 2)
+            drawRoundRect(c.tint.copy(alpha = fill), cornerRadius = round)
+            drawRoundRect(
+                c.secondaryLabel.copy(alpha = 1 - fill), Offset(w / 2, w / 2), Size(size.width - w, size.height - w), round,
+                style = Stroke(w, pathEffect = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 3.dp.toPx()))),
+            )
+        }
+        Text(
+            label, style = AppType.footnote.copy(fontWeight = FontWeight.Medium), color = lerp(c.label, onTint, fill),
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+        )
+    }
+}
+
+/** Writes go to [scope] (outlives the sheet) so a pending note or BP is saved when the sheet closes. [today] is the `/today` body. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CheckInSheet(entries: List<Entry>, medTime: String, scope: CoroutineScope, startDay: Int?, reload: suspend () -> Unit, onDismiss: () -> Unit) {
+private fun CheckInSheet(entries: List<Entry>, medTime: String, scope: CoroutineScope, startDay: Int?, today: JsonObject?, reload: suspend () -> Unit, onDismiss: () -> Unit) {
     val c = AppTheme.colors
     val haptic = LocalHapticFeedback.current
     var day by remember { mutableIntStateOf(startDay ?: if (LocalTime.now().hour < 12) 0 else 1) }
@@ -704,8 +736,10 @@ private fun CheckInSheet(entries: List<Entry>, medTime: String, scope: Coroutine
         ) {
             Text("Check-in", style = AppType.title)
             Segmented(listOf("Yesterday", "Today"), day) { if (it != day) { day = it; haptic.tick() } }
-            val date = LocalDate.now().minusDays(1L - day).toString()
-            key(date) { DayForm(date, entries.filter { it.date == date }, medTime, scope, reload) }
+            val date = LocalDate.now().minusDays(1L - day)
+            // `/today.suggest` belongs to the wake date; what it suggests happened the evening before.
+            val suggest = today?.get("suggest").obj()?.takeIf { today?.get("date").str() ==date.plusDays(1).toString() }
+            key(date) { DayForm(date.toString(), entries.filter { it.date == date.toString() }, medTime, scope, suggest, reload) }
         }
     }
 }
@@ -716,11 +750,32 @@ private fun bpOk(s: String): Boolean {
 }
 
 @Composable
-private fun DayForm(date: String, es: List<Entry>, medTime: String, scope: CoroutineScope, reload: suspend () -> Unit) {
+@OptIn(ExperimentalLayoutApi::class)
+private fun DayForm(date: String, es: List<Entry>, medTime: String, scope: CoroutineScope, suggest: JsonObject?, reload: suspend () -> Unit) {
     val ctx = LocalContext.current
     val c = AppTheme.colors
     val haptic = LocalHapticFeedback.current
     fun run(block: suspend () -> Unit) { scope.launch { block(); reload() } }
+
+    // Suggested kinds not yet logged when the form opens; a tapped chip stays, filled, until the sheet closes.
+    val offered = remember(suggest) { (suggest?.get("kinds") as? JsonArray)?.mapNotNull { it.str() }?.filter { k -> es.none { it.kind == k } }.orEmpty() }
+    val delta = suggest?.get("delta").num()?.roundToInt()
+    var dismissed by remember { mutableStateOf(ctx.suggestDismissed == date) }
+    if (delta != null && offered.isNotEmpty() && !dismissed) InsetCard {
+        Column(Modifier.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
+            Text("Evening heart rate was +$delta bpm. Any of these?", style = AppType.subhead)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                offered.forEach { kind ->
+                    SuggestChip(KIND_LABEL[kind] ?: kind, es.any { it.kind == kind }) { haptic.tick(); run { Api.addJournal(ctx, date, kind) } }
+                }
+                Text(
+                    "Neither", style = AppType.footnote.copy(fontWeight = FontWeight.Medium), color = c.tint,
+                    modifier = Modifier.clip(RoundedCornerShape(50)).clickable(role = Role.Button) { haptic.tick(); ctx.suggestDismissed = date; dismissed = true }
+                        .padding(horizontal = 14.dp, vertical = 9.dp),
+                )
+            }
+        }
+    }
 
     InsetCard {
         QUESTIONS.forEachIndexed { i, (kind, q) ->

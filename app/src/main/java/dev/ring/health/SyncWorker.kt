@@ -445,9 +445,11 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             metrics += Metric("biometric_stress", labels, s.level.toDouble(), s.timestampMs)
         }
 
-        // ── SpO2: hourly average ──────────────────────────────────────────
+        // ── SpO2: hourly average + minimum ────────────────────────────────
         for (s in spo2Samples) {
             metrics += Metric("biometric_spo2_pct", labels, s.pct.toDouble(), s.timestampMs)
+            // Finished hours only: the backend keeps the larger value per timestamp, so a part-hour's higher minimum would stick.
+            if (s.timestampMs + 3_600_000 <= nowMs) metrics += Metric("biometric_spo2_min_pct", labels, s.min.toDouble(), s.timestampMs)
         }
 
         // ── Sleep: total + stage breakdown for every new or grown session ──

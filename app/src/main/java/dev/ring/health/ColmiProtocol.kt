@@ -131,8 +131,8 @@ object ColmiProtocol {
     // Stress: ring-computed level (0–100) every 30 minutes.
     data class StressSample(val timestampMs: Long, val level: Int)
 
-    // SpO2: hourly average derived from ring min+max (%).
-    data class Spo2Sample(val timestampMs: Long, val pct: Int)
+    // SpO2: hourly average derived from ring min+max (%), and that hour's minimum.
+    data class Spo2Sample(val timestampMs: Long, val pct: Int, val min: Int)
 
     // Live HR: on-demand reading streamed by the ring.
     // error: 0 = OK, 1 = ring not worn correctly, 2 = temporary error, other = unknown.
@@ -288,7 +288,7 @@ object ColmiProtocol {
                 val max = value[idx].toInt() and 0xff; idx++
                 if (min > 0 && max > 0) {
                     dayCal.set(Calendar.HOUR_OF_DAY, hour)
-                    samples += Spo2Sample(dayCal.timeInMillis, (min + max) / 2)
+                    samples += Spo2Sample(dayCal.timeInMillis, (min + max) / 2, min)
                 }
             }
         }

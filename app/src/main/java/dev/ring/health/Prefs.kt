@@ -29,6 +29,7 @@ object Prefs {
     private const val KEY_LAST_DEEP_DAY   = "last_deep_sync_day"
     private const val KEY_STALE_WARNED    = "stale_warned"
     private const val KEY_BREATH_ROUNDS   = "breath_rounds"
+    private const val KEY_SUGGEST_DISMISSED = "suggest_dismissed"
 
     private fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -136,4 +137,9 @@ object Prefs {
     var Context.breathRounds: Int
         get() = prefs(this).getInt(KEY_BREATH_ROUNDS, 5).coerceIn(3, 12)
         set(v) = prefs(this).edit().putInt(KEY_BREATH_ROUNDS, v.coerceIn(3, 12)).apply()
+
+    /** Journal date whose suggested entries got "Neither"; one date is enough, only last evening is ever suggested. */
+    var Context.suggestDismissed: String
+        get() = prefs(this).getString(KEY_SUGGEST_DISMISSED, "") ?: ""
+        set(v) = prefs(this).edit().putString(KEY_SUGGEST_DISMISSED, v).apply()
 }
