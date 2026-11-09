@@ -80,8 +80,9 @@ object ColmiProtocol {
     fun activityRequest(daysAgo: Int): ByteArray =
         buildPacket(byteArrayOf(CMD_SYNC_ACTIVITY, daysAgo.toByte(), 0x0f, 0x00, 0x5f, 0x01))
 
-    // Stress history (always today — ring returns current day's 30-min samples).
-    fun stressRequest(): ByteArray = buildPacket(byteArrayOf(CMD_SYNC_STRESS))
+    // Stress history, 30-min samples. daysAgo 0 is byte-identical to the old no-argument request (zero padding);
+    // whether the ring honours an offset is unknown, so callers compare the reply with today's.
+    fun stressRequest(daysAgo: Int = 0): ByteArray = buildPacket(byteArrayOf(CMD_SYNC_STRESS, daysAgo.toByte()))
 
     // On-demand HR measurement: ring will stream bpm notifications until stop is sent.
     fun liveHrStartRequest(): ByteArray =

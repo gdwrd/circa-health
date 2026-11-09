@@ -34,18 +34,15 @@ import dev.ring.health.Prefs.apiToken
 import dev.ring.health.Prefs.batteryAlerts
 import dev.ring.health.Prefs.batteryWarned
 import dev.ring.health.Prefs.chargedTold
-import dev.ring.health.Prefs.lastActivityMs
 import dev.ring.health.Prefs.lastBatteryPct
 import dev.ring.health.Prefs.lastCharging
-import dev.ring.health.Prefs.lastHrMs
-import dev.ring.health.Prefs.lastHrvMs
+import dev.ring.health.Prefs.lastDeepSyncDay
 import dev.ring.health.Prefs.lastSleepMs
+import dev.ring.health.Prefs.staleWarned
 import dev.ring.health.Prefs.sleepSchema
 import dev.ring.health.Prefs.syncIntervalMin
 import dev.ring.health.Prefs.todayJson
 import dev.ring.health.Prefs.todayJsonMs
-import dev.ring.health.Prefs.lastSpo2Ms
-import dev.ring.health.Prefs.lastStressMs
 import dev.ring.health.Prefs.lastSyncMs
 import dev.ring.health.Prefs.ringAddress
 import dev.ring.health.Prefs.vmUrl
@@ -86,6 +83,19 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             return Result.failure()
         }
 
+        // Deep sync re-reads the 7 days the ring keeps: daily from 04:00, or when the last good push is over 24 h old.
+        // Re-sending is safe: VM dedup keeps the larger sample per series+timestamp and slot values only grow.
+        val now = System.currentTimeMillis()
+        val cal = Calendar.getInstance()
+        val todayKey = cal.get(Calendar.YEAR) * 1000 + cal.get(Calendar.DAY_OF_YEAR)
+        val lastOk = applicationContext.lastSyncMs
+        val stale = lastOk == 0L || now - lastOk > 24 * 3_600_000L
+        val deep = stale || (todayKey != applicationContext.lastDeepSyncDay && cal.get(Calendar.HOUR_OF_DAY) >= 4)
+        if (stale) log(if (lastOk == 0L) "Deep sync (no push yet)" else "Deep sync (last push ${(now - lastOk) / 3_600_000} h ago)")
+        else if (deep) log("Deep sync (daily)")
+        val days = if (deep) 6 else 1
+        val hrN = IntArray(days + 1); val hrvN = IntArray(days + 1); val actN = IntArray(days + 1); val stressN = IntArray(days + 1)
+
         val conn = ColmiConnection(applicationContext, address)
         return try {
             val connected = conn.connect()
@@ -101,44 +111,67 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             val battery = collectBattery(conn)
             if (battery != null) onBattery(battery)
 
-            // ── Heart rate — today + yesterday ────────────────────────────
+            // ── Heart rate — today + yesterday (deep: 7 days) ─────────────
             val hrSamples = mutableListOf<HrSample>()
-            for (daysBack in 0..1) {
+            for (daysBack in 0..days) {
                 val day = Calendar.getInstance().apply {
                     add(Calendar.DAY_OF_MONTH, -daysBack)
                     set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
                     set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
                 }
                 conn.writePacket(ColmiProtocol.hrRequest(day))
-                hrSamples += collectHr(conn, day)
+                val got = collectHr(conn, day)
+                hrN[daysBack] = got.size
+                hrSamples += got
             }
 
-            // ── HRV — today + yesterday ───────────────────────────────────
+            // ── HRV — today + yesterday (deep: 7 days) ────────────────────
             val hrvSamples = mutableListOf<HrvSample>()
-            for (daysAgo in 0..1) {
+            for (daysAgo in 0..days) {
                 val day = Calendar.getInstance().apply {
                     add(Calendar.DAY_OF_MONTH, -daysAgo)
                     set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
                     set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
                 }
                 conn.writePacket(ColmiProtocol.hrvRequest(daysAgo))
-                hrvSamples += collectHrv(conn, day)
+                val got = collectHrv(conn, day)
+                hrvN[daysAgo] = got.size
+                hrvSamples += got
             }
 
-            // ── Activity (steps/calories/distance) — today + yesterday ────
+            // ── Activity (steps/calories/distance) — today + yesterday (deep: 7 days)
             val activitySamples = mutableListOf<ActivitySample>()
-            for (daysAgo in 0..1) {
+            for (daysAgo in 0..days) {
                 conn.writePacket(ColmiProtocol.activityRequest(daysAgo))
-                activitySamples += collectActivity(conn)
+                val got = collectActivity(conn)
+                actN[daysAgo] = got.size
+                activitySamples += got
             }
 
-            // ── Stress — today ────────────────────────────────────────────
+            // ── Stress — today (deep: days 1..6 too, if the ring honours the offset) ──
             val today = Calendar.getInstance().apply {
                 set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
                 set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
             }
             conn.writePacket(ColmiProtocol.stressRequest())
-            val stressSamples = collectStress(conn, today)
+            val stressSamples = collectStress(conn, today).toMutableList()
+            stressN[0] = stressSamples.size
+            if (deep) {
+                val todayLevels = stressSamples.map { it.level }
+                for (daysAgo in 1..days) {
+                    val day = (today.clone() as Calendar).apply { add(Calendar.DAY_OF_MONTH, -daysAgo) }
+                    conn.writePacket(ColmiProtocol.stressRequest(daysAgo))
+                    val got = collectStress(conn, day)
+                    // Same values as today's reply = the ring ignored the offset; keeping them would copy today onto d-N.
+                    if (got.isNotEmpty() && got.map { it.level } == todayLevels) {
+                        log("Deep sync: stress d-$daysAgo echoes today (${got.size})")
+                    } else {
+                        stressN[daysAgo] = got.size
+                        stressSamples += got
+                    }
+                }
+                for (d in 0..days) log("Deep sync: d-$d hr ${hrN[d]} · hrv ${hrvN[d]} · act ${actN[d]} · stress ${stressN[d]}")
+            }
 
             // ── SpO2 ──────────────────────────────────────────────────────
             conn.writeCommand(ColmiProtocol.spo2Request())
@@ -173,17 +206,6 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                     return Result.success()
                 }
 
-                // Advance cursors
-                hrSamples.maxOfOrNull { it.timestampMs }
-                    ?.let { applicationContext.lastHrMs = it }
-                hrvSamples.maxOfOrNull { it.timestampMs }
-                    ?.let { applicationContext.lastHrvMs = it }
-                activitySamples.maxOfOrNull { it.timestampMs }
-                    ?.let { applicationContext.lastActivityMs = it }
-                stressSamples.maxOfOrNull { it.timestampMs }
-                    ?.let { applicationContext.lastStressMs = it }
-                spo2Samples.maxOfOrNull { it.timestampMs }
-                    ?.let { applicationContext.lastSpo2Ms = it }
                 sleepSessions.maxOfOrNull { it.endMs }
                     ?.let { applicationContext.lastSleepMs = it }
                 applicationContext.sleepSchema = 4
@@ -201,6 +223,8 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             }.onFailure { log("Widget: ${it.javaClass.simpleName}: ${it.message}") }
 
             applicationContext.lastSyncMs = System.currentTimeMillis()
+            applicationContext.staleWarned = false
+            if (deep) applicationContext.lastDeepSyncDay = todayKey
             Log.i(TAG, "Sync complete, pushed ${metrics.size} metrics")
             scheduleNext(applicationContext)
             Result.success()
@@ -210,6 +234,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             throw e
         } finally {
             conn.disconnect()
+            runCatching { warnIfStale() } // every attempt incl. "could not connect", which is the case it exists for
         }
     }
 
@@ -347,11 +372,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         val labels  = mapOf("device" to "colmi_r02")
         val nowMs   = System.currentTimeMillis()
 
-        val lastHrMs       = ctx.lastHrMs
-        val lastHrvMs      = ctx.lastHrvMs
-        val lastActivityMs = ctx.lastActivityMs
-        val lastStressMs   = ctx.lastStressMs
-        val lastSpo2Ms     = ctx.lastSpo2Ms
+        // No watermarks for slot data: whole days are re-sent and VM dedup keeps the larger sample.
         // Once after an upgrade that changed sleep parsing: re-send the sessions the ring still holds.
         val lastSleepMs    = if (ctx.sleepSchema < 4) 0L else ctx.lastSleepMs
 
@@ -363,29 +384,29 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
         // ── Heart rate: raw 5-min samples (ring's native granularity) ─────
         // Aggregations like RHR (overnight min) are computed in Grafana.
-        for (s in hrSamples.filter { it.timestampMs > lastHrMs && it.bpm > 0 }) {
+        for (s in hrSamples.filter { it.bpm > 0 }) {
             metrics += Metric("biometric_hr_bpm", labels, s.bpm.toDouble(), s.timestampMs)
         }
 
         // ── HRV: raw 30-min samples (ring's native granularity) ───────────
-        for (s in hrvSamples.filter { it.timestampMs > lastHrvMs && it.valueMs > 0 }) {
+        for (s in hrvSamples.filter { it.valueMs > 0 }) {
             metrics += Metric("biometric_hrv_rmssd", labels, s.valueMs.toDouble(), s.timestampMs)
         }
 
         // ── Activity: steps/calories/distance per hourly slot ─────────────
-        for (s in activitySamples.filter { it.timestampMs > lastActivityMs }) {
+        for (s in activitySamples) {
             metrics += Metric("biometric_steps",            labels, s.steps.toDouble(),          s.timestampMs)
             metrics += Metric("biometric_calories",         labels, s.calories.toDouble(),        s.timestampMs)
             metrics += Metric("biometric_distance_meters",  labels, s.distanceMeters.toDouble(),  s.timestampMs)
         }
 
         // ── Stress: level per 30-min slot ────────────────────────────────
-        for (s in stressSamples.filter { it.timestampMs > lastStressMs }) {
+        for (s in stressSamples) {
             metrics += Metric("biometric_stress", labels, s.level.toDouble(), s.timestampMs)
         }
 
         // ── SpO2: hourly average ──────────────────────────────────────────
-        for (s in spo2Samples.filter { it.timestampMs > lastSpo2Ms }) {
+        for (s in spo2Samples) {
             metrics += Metric("biometric_spo2_pct", labels, s.pct.toDouble(), s.timestampMs)
         }
 
@@ -456,17 +477,33 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         val full = b.charging && b.level == 100
         if (!low && ctx.batteryWarned) ctx.batteryWarned = false
         if (!b.charging) ctx.chargedTold = false
-        if (!ctx.batteryAlerts) return
-        val granted = ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-        if (!granted) return
+        if (!ctx.batteryAlerts || !canNotify()) return
+        if (low && !ctx.batteryWarned) { post(2, "Ring battery ${b.level} %", "Charge the ring soon."); ctx.batteryWarned = true }
+        if (full && !ctx.chargedTold) { post(3, "Ring charged", "Put it back on to keep tracking."); ctx.chargedTold = true }
+    }
+
+    /** "Ring not synced for N days" once per gap over 48 h; the ring keeps 7 days, so this is the last warning before loss. */
+    private fun warnIfStale() {
+        val ctx = applicationContext
+        val gap = System.currentTimeMillis() - ctx.lastSyncMs
+        if (ctx.lastSyncMs == 0L || gap <= 48 * 3_600_000L || ctx.staleWarned || !canNotify()) return
+        post(4, "Ring not synced for ${gap / 86_400_000} days", "Data older than a week is lost.")
+        ctx.staleWarned = true
+    }
+
+    private fun canNotify(): Boolean =
+        ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+
+    /** Posts on the "health" channel; callers check [canNotify] first. */
+    @SuppressLint("MissingPermission")
+    private fun post(id: Int, title: String, text: String) {
+        val ctx = applicationContext
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(NotificationChannel("health", "Health", NotificationManager.IMPORTANCE_DEFAULT))
         val open = PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        fun post(id: Int, title: String, text: String) = nm.notify(id, NotificationCompat.Builder(ctx, "health")
+        nm.notify(id, NotificationCompat.Builder(ctx, "health")
             .setSmallIcon(R.drawable.ic_stat_circa).setContentTitle(title).setContentText(text)
             .setContentIntent(open).setAutoCancel(true).build())
-        if (low && !ctx.batteryWarned) { post(2, "Ring battery ${b.level} %", "Charge the ring soon."); ctx.batteryWarned = true }
-        if (full && !ctx.chargedTold) { post(3, "Ring charged", "Put it back on to keep tracking."); ctx.chargedTold = true }
     }
 
     // ── Foreground notification ────────────────────────────────────────────

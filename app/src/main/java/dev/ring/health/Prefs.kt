@@ -12,15 +12,10 @@ object Prefs {
     private const val KEY_STEP_GOAL       = "step_goal"
     private const val KEY_SLEEP_NEED_H    = "sleep_need_h"
     private const val KEY_LAST_SYNC_MS    = "last_sync_ms"
-    private const val KEY_LAST_HR_MS      = "last_hr_ms"
-    private const val KEY_LAST_HRV_MS     = "last_hrv_ms"
     private const val KEY_LAST_SLEEP_MS   = "last_sleep_ms"
     private const val KEY_SLEEP_SCHEMA    = "sleep_schema"
     private const val KEY_SYNC_INTERVAL   = "sync_interval_min"
     private const val KEY_ASKED_BATTERY   = "asked_battery"
-    private const val KEY_LAST_ACTIVITY_MS = "last_activity_ms"
-    private const val KEY_LAST_STRESS_MS  = "last_stress_ms"
-    private const val KEY_LAST_SPO2_MS    = "last_spo2_ms"
     private const val KEY_BATTERY_PCT     = "battery_pct"
     private const val KEY_CHARGING        = "charging"
     private const val KEY_BATTERY_WARNED  = "battery_warned"
@@ -28,6 +23,8 @@ object Prefs {
     private const val KEY_BATTERY_ALERTS  = "battery_alerts"
     private const val KEY_TODAY_JSON      = "today_json"
     private const val KEY_TODAY_JSON_MS   = "today_json_ms"
+    private const val KEY_LAST_DEEP_DAY   = "last_deep_sync_day"
+    private const val KEY_STALE_WARNED    = "stale_warned"
 
     private fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -52,17 +49,10 @@ object Prefs {
         get() = prefs(this).getFloat(KEY_SLEEP_NEED_H, 7.5f)
         set(v) = prefs(this).edit().putFloat(KEY_SLEEP_NEED_H, v).apply()
 
+    /** Last sync whose push succeeded (or had nothing to push); 0 = never. Drives deep sync and the stale warning. */
     var Context.lastSyncMs: Long
         get() = prefs(this).getLong(KEY_LAST_SYNC_MS, 0L)
         set(v) = prefs(this).edit().putLong(KEY_LAST_SYNC_MS, v).apply()
-
-    var Context.lastHrMs: Long
-        get() = prefs(this).getLong(KEY_LAST_HR_MS, 0L)
-        set(v) = prefs(this).edit().putLong(KEY_LAST_HR_MS, v).apply()
-
-    var Context.lastHrvMs: Long
-        get() = prefs(this).getLong(KEY_LAST_HRV_MS, 0L)
-        set(v) = prefs(this).edit().putLong(KEY_LAST_HRV_MS, v).apply()
 
     var Context.lastSleepMs: Long
         get() = prefs(this).getLong(KEY_LAST_SLEEP_MS, 0L)
@@ -81,18 +71,6 @@ object Prefs {
     var Context.sleepSchema: Int
         get() = prefs(this).getInt(KEY_SLEEP_SCHEMA, 0)
         set(v) = prefs(this).edit().putInt(KEY_SLEEP_SCHEMA, v).apply()
-
-    var Context.lastActivityMs: Long
-        get() = prefs(this).getLong(KEY_LAST_ACTIVITY_MS, 0L)
-        set(v) = prefs(this).edit().putLong(KEY_LAST_ACTIVITY_MS, v).apply()
-
-    var Context.lastStressMs: Long
-        get() = prefs(this).getLong(KEY_LAST_STRESS_MS, 0L)
-        set(v) = prefs(this).edit().putLong(KEY_LAST_STRESS_MS, v).apply()
-
-    var Context.lastSpo2Ms: Long
-        get() = prefs(this).getLong(KEY_LAST_SPO2_MS, 0L)
-        set(v) = prefs(this).edit().putLong(KEY_LAST_SPO2_MS, v).apply()
 
     /** Last ring battery level (-1 unknown) and charging state; the two flags make each alert fire once. */
     var Context.lastBatteryPct: Int
@@ -124,4 +102,14 @@ object Prefs {
     var Context.todayJsonMs: Long
         get() = prefs(this).getLong(KEY_TODAY_JSON_MS, 0L)
         set(v) = prefs(this).edit().putLong(KEY_TODAY_JSON_MS, v).apply()
+
+    /** YEAR*1000+DAY_OF_YEAR of the last successful 7-day deep sync. */
+    var Context.lastDeepSyncDay: Int
+        get() = prefs(this).getInt(KEY_LAST_DEEP_DAY, 0)
+        set(v) = prefs(this).edit().putInt(KEY_LAST_DEEP_DAY, v).apply()
+
+    /** "Ring not synced for N days" posted for the current gap. */
+    var Context.staleWarned: Boolean
+        get() = prefs(this).getBoolean(KEY_STALE_WARNED, false)
+        set(v) = prefs(this).edit().putBoolean(KEY_STALE_WARNED, v).apply()
 }
