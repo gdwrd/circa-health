@@ -74,15 +74,12 @@ import java.util.Locale
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.roundToInt
-import android.graphics.Paint
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontWeight
-import com.patrykandpatrick.vico.core.cartesian.CartesianDrawingContext
-import com.patrykandpatrick.vico.core.cartesian.decoration.Decoration
 import kotlinx.serialization.json.contentOrNull
 import java.time.LocalTime
 
@@ -108,11 +105,14 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
     var date by remember { mutableStateOf(LocalDate.now()) }
     var day by remember { mutableStateOf<JsonObject?>(null) }
     var workouts by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
+    var breaths by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
     var bp by remember { mutableStateOf<List<Triple<LocalDate, Int, Int>>>(emptyList()) }
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
     suspend fun loadDay() {
-        hr = (Api.hr(ctx, date).obj()?.get("points") as? JsonArray)
+        val hrDay = Api.hr(ctx, date).obj()
+        breaths = (hrDay?.get("breaths") as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
+        hr = (hrDay?.get("points") as? JsonArray)
             ?.mapNotNull { o -> o.obj()?.let { p -> p["t"].num()?.let { t -> p["bpm"].num()?.let { t to it } } } }
             ?.sortedBy { it.first }
         day = Api.today(ctx, date).obj()
@@ -175,10 +175,13 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
                     val xy = pts.map { (it.first - t0) / SLOT_S to it.second }
                     val byX = xy.toMap()
                     val spans = workouts.mapNotNull { w -> w["start"].num()?.let { s -> w["end"].num()?.let { e -> (s - t0) / SLOT_S to (e - t0) / SLOT_S } } }
+                    val breathSpans = breaths.mapNotNull { w -> w["start"].num()?.let { s -> w["end"].num()?.let { e -> (s - t0) / SLOT_S to (e - t0) / SLOT_S } } }
                     Chart(
                         listOf(xy), c.heart, true, 72, 0, x = 0.0..287.0,
                         decorations = listOfNotNull(
                             spans.takeIf { it.isNotEmpty() }?.let { DoseWindows(it, c.heart.toArgb(), alpha = 31, line = false) },
+                            // A 2-min session is under 1 px wide on the 24 h axis: the start line makes it visible.
+                            breathSpans.takeIf { it.isNotEmpty() }?.let { DoseWindows(it, c.breathe.toArgb(), alpha = 31) },
                             windows.takeIf { it.isNotEmpty() }?.let { DoseWindows(it, c.heart.toArgb()) },
                         ),
                         marker = { x -> "${byX[x]?.roundToInt()} bpm · ${clock(t0 + x * SLOT_S)}" },
@@ -192,6 +195,7 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
                 }
             }
         }
+        if (breaths.isNotEmpty()) item { BreathingCard(breaths) }
         item {
             Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
                 listOf("Resting HR" to ("rhr" to "bpm"), "HRV" to ("hrv" to "ms")).forEach { (label, m) ->
@@ -283,21 +287,38 @@ private fun MeasureNow() {
 @Composable
 private fun Empty() = EmptyState(Icons.Rounded.MonitorHeart, "Not enough data yet", "Keep the ring on; this fills in after a few syncs.")
 
-/** Spans shaded in [color] at [alpha] (8 % doses, 12 % workouts), a line at each start when [line]; [windows] are (start, end) in chart x. */
-private class DoseWindows(private val windows: List<Pair<Double, Double>>, private val color: Int, private val alpha: Int = 20, private val line: Boolean = true) : Decoration {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-
-    override fun drawUnderLayers(context: CartesianDrawingContext) = with(context) {
-        val b = layerBounds
-        fun px(x: Double) = b.left + layerDimensions.startPadding + ((x - ranges.minX) / ranges.xStep).toFloat() * layerDimensions.xSpacing - scroll
-        windows.forEach { (dose, end) ->
-            paint.color = color
-            paint.alpha = alpha
-            canvas.drawRect(px(dose).coerceIn(b.left, b.right), b.top, px(end).coerceIn(b.left, b.right), b.bottom, paint)
-            if (line && dose >= ranges.minX && dose <= ranges.maxX) {
-                paint.alpha = 200
-                paint.strokeWidth = dpToPx(1.5f)
-                canvas.drawLine(px(dose), b.top, px(dose), b.bottom, paint)
+/** One row per breathing session; tap shows its heart rate (x = seconds since start). */
+@Composable
+private fun BreathingCard(breaths: List<JsonObject>) {
+    val c = AppTheme.colors
+    Section("Breathing") {
+        breaths.forEachIndexed { i, b ->
+            val start = b["start"].num() ?: return@forEachIndexed
+            val secs = ((b["end"].num() ?: start) - start).roundToInt()
+            var open by remember(start) { mutableStateOf(false) }
+            if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
+            Column(Modifier.fillMaxWidth().clickable { open = !open }.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
+                Text("${clock(start)} · ${b["rounds"].num()?.roundToInt() ?: 0} rounds · ${secs / 60}:%02d".format(secs % 60), style = AppType.body)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
+                    val hr0 = b["hr_start"].num()
+                    val hr1 = b["hr_end"].num()
+                    val s0 = b["stress_before"].num()
+                    val s1 = b["stress_after"].num()
+                    Text(
+                        (if (hr0 != null && hr1 != null) "HR ${hr0.roundToInt()} → ${hr1.roundToInt()}" else "HR —") +
+                            if (s0 != null && s1 != null) " · stress ${s0.roundToInt()} → ${s1.roundToInt()}" else "",
+                        style = AppType.subhead, color = c.secondaryLabel,
+                    )
+                    listOf("feel_before", "feel_after").mapNotNull { b[it].num()?.roundToInt()?.let { f -> FACES.getOrNull(f - 1) } }.forEach {
+                        Icon(it, null, tint = c.breathe, modifier = Modifier.size(16.dp))
+                    }
+                }
+            }
+            val pts = (b["points"] as? JsonArray)?.mapNotNull { o -> o.obj()?.let { p -> p["t"].num()?.let { t -> p["bpm"].num()?.let { (t - start).roundToInt().toDouble() to it } } } }
+                ?.distinctBy { it.first }?.sortedBy { it.first }.orEmpty()
+            if (open && pts.isNotEmpty()) {
+                val byX = pts.toMap() // points are 5 s apart (backend step): label every 30 s
+                Chart(listOf(pts), c.breathe, true, 6, 0, height = 120.dp, marker = { x -> "${byX[x]?.roundToInt()} bpm · ${x.roundToInt()} s" }) { x -> "${x.roundToInt()} s" }
             }
         }
     }

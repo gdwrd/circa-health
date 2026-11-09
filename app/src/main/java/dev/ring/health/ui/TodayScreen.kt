@@ -535,7 +535,7 @@ private fun Sparkline(values: List<Double>, color: Color, modifier: Modifier) {
 
 /** One journal row from `/journal`. */
 private class Entry(val id: Int, val date: String, val kind: String, val value: String?, val note: String?) {
-    fun label() = (KIND_LABEL[kind] ?: kind) + if (kind == "bp") " ${value.orEmpty()}" else if (kind == "medication") " ${clock(value.orEmpty())}" else ""
+    fun label() = (KIND_LABEL[kind] ?: kind) + if (kind == "bp") " ${value.orEmpty()}" else if (kind == "medication" || kind == "breathe") " ${clock(value.orEmpty())}" else ""
 }
 
 private fun JsonElement?.str() = (this as? JsonPrimitive)?.contentOrNull
@@ -548,6 +548,7 @@ private fun parseJournal(json: JsonElement?): List<Entry> = (json.obj()?.get("en
 internal val KIND_LABEL = mapOf(
     "alcohol" to "Alcohol", "caffeine_late" to "Late caffeine", "late_meal" to "Late meal", "workout" to "Workout",
     "sick" to "Sick", "travel" to "Travel", "stress" to "Stress", "medication" to "Medication", "bp" to "BP", "note" to "Note",
+    "breathe" to "Breathe",
 )
 
 private val QUESTIONS = listOf(
@@ -566,6 +567,7 @@ private val WHY = mapOf(
     "medication" to "Dose times let us mark doses on the Heart screen and compare days with and without a dose.",
     "bp" to "From a cuff reading; the ring cannot measure blood pressure.",
     "note" to "Anything else worth remembering about the day.",
+    "breathe" to "Sessions log themselves; we compare the hour and the night after with the rest.",
 )
 
 @Composable
@@ -930,11 +932,12 @@ private fun Contributor(name: String, value: Double?, color: Color, info: String
     }
 }
 
-private val AFFECT_KINDS = listOf("alcohol", "caffeine_late", "late_meal", "workout", "stress", "travel", "sick")
+private val AFFECT_KINDS = listOf("alcohol", "caffeine_late", "late_meal", "workout", "stress", "travel", "sick", "breathe")
 
 private val AFTER = mapOf(
     "alcohol" to "after alcohol", "caffeine_late" to "after late caffeine", "late_meal" to "after a late meal",
     "workout" to "after a workout", "stress" to "after a stressful day", "travel" to "after travel",
+    "breathe" to "after breathing",
 )
 
 /** Short name (pills, tables) and sentence name per insight metric. */
@@ -946,7 +949,7 @@ internal val METRIC = mapOf(
 )
 
 // 1 = higher is better, -1 = lower is better; bedtime is neither.
-private val BETTER = mapOf("sleep_score" to 1, "deep_min" to 1, "rem_min" to 1, "hrv" to 1, "total_min" to 1, "rhr" to -1, "awake_min" to -1, "strain" to -1, "day_hr" to -1)
+private val BETTER = mapOf("sleep_score" to 1, "deep_min" to 1, "rem_min" to 1, "hrv" to 1, "total_min" to 1, "rhr" to -1, "awake_min" to -1, "strain" to -1, "day_hr" to -1, "stress" to -1)
 
 /** Pill / change colour: good, bad or neutral for this metric. */
 @Composable
@@ -1006,6 +1009,14 @@ private fun WhatAffectsYou(kinds: List<Pair<String, JsonObject>>) {
                 var open by remember { mutableStateOf(false) }
                 val nWith = k["n_with"].num()?.roundToInt() ?: 0
                 val name = if (kind == "sick") "Feeling unwell" else KIND_LABEL[kind] ?: kind
+                // Breathe only: the ring's stress in the hour after vs before a session.
+                val stress = k["stress"].obj()?.let { s -> s["delta"].num()?.let { d -> @Composable {
+                    val r = d.roundToInt()
+                    Text(
+                        "Stress ${if (r < 0) "−" else "+"}${kotlin.math.abs(r)} in the hour after · ${s["n"].num()?.roundToInt() ?: 0} sessions",
+                        style = AppType.subhead, color = effectColor("stress", d),
+                    )
+                } } }
                 Column(Modifier.fillMaxWidth().clickable(enabled = ok) { open = !open }.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
                     if (!ok) {
                         val need = 3 - nWith
@@ -1014,6 +1025,7 @@ private fun WhatAffectsYou(kinds: List<Pair<String, JsonObject>>) {
                             "$name · " + if (need > 0) "log $need more ${if (need == 1) "day" else "days"} to see the effect." else "needs $wo more ${if (wo == 1) "day" else "days"} without it.",
                             style = AppType.subhead, color = c.secondaryLabel,
                         )
+                        stress?.invoke()
                         return@Column
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1021,6 +1033,7 @@ private fun WhatAffectsYou(kinds: List<Pair<String, JsonObject>>) {
                         Text(" · $nWith ${if (kind == "sick") "days" else "nights"}", style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.weight(1f))
                         Text(if (open) "Less" else "More", style = AppType.footnote, color = c.tint)
                     }
+                    stress?.invoke()
                     val top = (k["top"] as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
                     if (top.isEmpty()) Text("No clear effect so far.", style = AppType.subhead, color = c.secondaryLabel)
                     else FlowRow(horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {

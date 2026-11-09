@@ -62,7 +62,7 @@ private const val FINISHED = 2
 /** 4-7-8 phases: name, seconds, circle scale at the end. */
 private val PHASES = listOf(Triple("In", 4, 1f), Triple("Hold", 7, 1f), Triple("Out", 8, 0.6f))
 
-private val FACES = listOf(
+internal val FACES = listOf(
     Icons.Rounded.SentimentVeryDissatisfied, Icons.Rounded.SentimentDissatisfied, Icons.Rounded.SentimentNeutral,
     Icons.Rounded.SentimentSatisfied, Icons.Rounded.SentimentVerySatisfied,
 )

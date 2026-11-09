@@ -99,6 +99,7 @@ private val METRICS = listOf(
     Metric("sleep_min", "Time asleep", "Time asleep", "h", { it.sleep }, true, 60.0),
     Metric("cardio_load", "Cardio load", "Load", "", { it.activity }, columns = true, note = "Heart-rate zone minutes, weighted by zone."),
     Metric("restorative_min", "Restorative time", "Restorative", "min", { it.readiness }, columns = true, note = "Awake time with a calm heart rate and little movement."),
+    Metric("breath_min", "Mindful minutes", "Mindful min", "min", { it.breathe }, columns = true, note = "Minutes of guided breathing per day."),
     Metric("fitness", "Fitness estimate", "Fitness", "", { it.heart }, note = "Estimated from resting heart rate and age. A trend, not a measurement."),
 )
 

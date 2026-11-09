@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -88,6 +90,7 @@ fun StressScreen(backend: Boolean?, header: @Composable () -> Unit) {
     var today by remember { mutableStateOf<JsonObject?>(null) } // resilience is 14-day: never follows the picker
     var date by remember { mutableStateOf(LocalDate.now()) }
     var samples by remember { mutableStateOf<List<Pair<Int, Double>>>(emptyList()) }
+    var starts by remember { mutableStateOf<List<Double>>(emptyList()) }
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
     suspend fun load() {
@@ -97,6 +100,8 @@ fun StressScreen(backend: Boolean?, header: @Composable () -> Unit) {
         samples = (Api.stress(ctx, date).obj()?.get("points") as? JsonArray)?.mapNotNull { o ->
             o.obj()?.let { p -> p["t"].num()?.let { t -> p["v"].num()?.let { ((t - midnight) / 1800).roundToInt() to it } } }
         }.orEmpty()
+        // Breathing session starts in the same 30-min slot x.
+        starts = (Api.hr(ctx, date).obj()?.get("breaths") as? JsonArray)?.mapNotNull { it.obj()?.get("start").num()?.let { t -> (t - midnight) / 1800 } }.orEmpty()
     }
     LaunchedEffect(date) { load() }
     LaunchedEffect(Unit) { today = Api.today(ctx).obj() }
@@ -136,17 +141,19 @@ fun StressScreen(backend: Boolean?, header: @Composable () -> Unit) {
                 }
             }
         }
-        if (samples.isNotEmpty()) item { ThroughTheDay(samples) }
+        if (samples.isNotEmpty()) item { ThroughTheDay(samples, starts) }
         val restorative = d["inputs"].obj()?.get("restorative_min").num()
-        if (st != null || restorative != null) item {
-            val tiles = listOf(
+        val breathe = d["breathe"].obj()
+        if (st != null || restorative != null || breathe != null) item {
+            val tiles = listOfNotNull(
                 Triple("Daytime stress load", st?.get("stressed_hours").num()?.let { it * 60 }, "in the stressed zone while awake"),
                 Triple("Restorative time", restorative, "calm heart rate, little movement"),
+                breathe?.let { Triple("Mindful minutes", it["today_min"].num(), "${it["week_min"].num()?.roundToInt() ?: 0} min this week") },
             )
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
                 Text("Load and recovery", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-                Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                    tiles.forEach { (label, min, line) ->
+                tiles.chunked(2).forEach { row -> Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                    row.forEach { (label, min, line) ->
                         InsetCard(Modifier.weight(1f).fillMaxHeight()) {
                             Column(Modifier.padding(AppSpace.l)) {
                                 Text(label, style = AppType.footnote, color = c.secondaryLabel)
@@ -155,7 +162,8 @@ fun StressScreen(backend: Boolean?, header: @Composable () -> Unit) {
                             }
                         }
                     }
-                }
+                    if (row.size == 1) Spacer(Modifier.weight(1f))
+                } }
             }
         }
         today?.let { t -> item {
@@ -193,7 +201,7 @@ private fun zoneOf(v: Double) = if (v <= 25) 0 else if (v <= 50) 1 else if (v <=
 
 /** 30-min stress columns across the day, each in its zone colour. */
 @Composable
-private fun ThroughTheDay(samples: List<Pair<Int, Double>>) {
+private fun ThroughTheDay(samples: List<Pair<Int, Double>>, starts: List<Double>) {
     val c = AppTheme.colors
     val zones = listOf("Restored" to c.zoneRestored, "Relaxed" to c.zoneRelaxed, "Engaged" to c.zoneEngaged, "Stressed" to c.zoneStressed)
     val byX = samples.associate { it.first.toDouble() to it.second }
@@ -223,6 +231,7 @@ private fun ThroughTheDay(samples: List<Pair<Int, Double>>) {
                     marker = rememberScrubMarker(c.tint) { x ->
                         byX[x]?.let { "${zones[zoneOf(it)].first} ${it.roundToInt()} · ${clock(LocalTime.of(x.toInt() / 2, x.toInt() % 2 * 30))}" } ?: "—"
                     },
+                    decorations = listOfNotNull(starts.takeIf { it.isNotEmpty() }?.let { s -> DoseWindows(s.map { it to it }, c.breathe.toArgb()) }),
                 ),
                 producer, 160.dp,
             )

@@ -118,6 +118,7 @@ import com.patrykandpatrick.vico.core.cartesian.data.CartesianLayerRangeProvider
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianValueFormatter
 import com.patrykandpatrick.vico.core.cartesian.data.lineSeries
 import com.patrykandpatrick.vico.core.cartesian.decoration.Decoration
+import com.patrykandpatrick.vico.core.cartesian.CartesianDrawingContext
 import com.patrykandpatrick.vico.core.cartesian.layer.LineCartesianLayer
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -616,4 +617,24 @@ internal fun Chart(
         ),
         producer, height,
     )
+}
+
+/** Spans shaded in [color] at [alpha] (8 % doses, 12 % workouts), a line at each start when [line]; [windows] are (start, end) in chart x. */
+internal class DoseWindows(private val windows: List<Pair<Double, Double>>, private val color: Int, private val alpha: Int = 20, private val line: Boolean = true) : Decoration {
+    private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+
+    override fun drawUnderLayers(context: CartesianDrawingContext) = with(context) {
+        val b = layerBounds
+        fun px(x: Double) = b.left + layerDimensions.startPadding + ((x - ranges.minX) / ranges.xStep).toFloat() * layerDimensions.xSpacing - scroll
+        windows.forEach { (dose, end) ->
+            paint.color = color
+            paint.alpha = alpha
+            canvas.drawRect(px(dose).coerceIn(b.left, b.right), b.top, px(end).coerceIn(b.left, b.right), b.bottom, paint)
+            if (line && dose >= ranges.minX && dose <= ranges.maxX) {
+                paint.alpha = 200
+                paint.strokeWidth = dpToPx(1.5f)
+                canvas.drawLine(px(dose), b.top, px(dose), b.bottom, paint)
+            }
+        }
+    }
 }
