@@ -1,8 +1,0 @@
-apiVersion: 1
-providers:
-  - name: ring-health
-    type: file
-    disableDeletion: false
-    allowUiUpdates: true
-    options:
-      path: /var/lib/grafana/dashboards

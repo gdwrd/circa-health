@@ -175,12 +175,6 @@ def _score_day(d: date) -> None:
                     "signals": sig, "sleep_extra": extra, "wear": wear, "cardio": load, "workouts": workouts}
     kept = {k: v for k, v in base.items() if v is not None}
     db.save_day(d, scores, contributors, kept)
-    vals = {"score_sleep": scores[0], "score_readiness": scores[1], "score_activity": scores[2],
-            "stress_zone": inputs["stress_load"], **{f"baseline_{k}": v for k, v in kept.items()}}
-    ts = int(vm.midnight(d).timestamp() * 1000)
-    body = "".join(f"{k} {v} {ts}\n" for k, v in vals.items() if v is not None)
-    if body:
-        vm.forward_import(body.encode())
 
 
 def rescore(dates: set[date]) -> None:

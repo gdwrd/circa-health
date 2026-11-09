@@ -13,15 +13,15 @@ A self-hosted biometric pipeline for the **Colmi R02** smart ring.
                                   | POST /api/v1/import/prometheus
                                   | (GET /today, /sleep, /trends back)
                                   V
-┌──────────┐              ┌────────────────┐   read/write  ┌────────┐
-│  Grafana │              │    backend     │ ◀───────────▶ │ SQLite │
-│          │              │  (FastAPI)     │               └────────┘
-└──────────┘              └────────────────┘
-      ^                           |
-      |                           | forward + scores
-      |  PromQL                   V
-      |                   ┌────────────────┐
-      └────────────────── │ VictoriaMetrics│
+                          ┌────────────────┐   read/write  ┌────────┐
+                          │    backend     │ ◀───────────▶ │ SQLite │
+                          │  (FastAPI)     │               └────────┘
+                          └────────────────┘
+                                  |
+                                  | forward
+                                  V
+                          ┌────────────────┐
+                          │ VictoriaMetrics│
                           │  (your host)   │
                           └────────────────┘
 ```
@@ -29,9 +29,8 @@ A self-hosted biometric pipeline for the **Colmi R02** smart ring.
 The Android app pulls heart rate, HRV, SpO₂, stress, steps, calories, distance,
 sleep stages and ring battery from the ring every 5 minutes, then pushes them as
 Prometheus-style metrics to a self-hosted [VictoriaMetrics](https://victoriametrics.com/)
-instance. A [Grafana](https://grafana.com/) dashboard is included. An optional
-Python [backend](#backend) sits in front of VictoriaMetrics and computes daily
-Sleep / Readiness / Activity scores from that data.
+instance. A Python [backend](#backend) sits in front of VictoriaMetrics and
+computes daily Sleep / Readiness / Activity scores from that data.
 
 No vendor cloud, no telemetry, no account — your biometric data never leaves
 your network. In this case I'm using a VPN on the phone so that it is constantly
@@ -55,7 +54,7 @@ project is a minimal Android app whose only job is:
 
 - **Ring**: Colmi R02 (other R0x variants likely work — same protocol family)
 - **Phone**: any Android device with API 31+ (Android 12 or newer)
-- **Server**: any host that can run VictoriaMetrics + Grafana (a Raspberry Pi
+- **Server**: any host that can run VictoriaMetrics + the backend (a Raspberry Pi
   is enough)
 
 ## Metrics collected
@@ -78,32 +77,24 @@ project is a minimal Android app whose only job is:
 | `biometric_sleep_stage`      | per segment        | 1 light / 2 deep / 3 REM / 4 awake, 0 at session end |
 | `ring_battery_pct`           | per sync           | Ring battery 0–100             |
 | `ring_charging`              | per sync           | 1 = charging, 0 = discharging  |
-| `score_sleep`                | per day (backend)  | Sleep score 0–100              |
-| `score_readiness`            | per day (backend)  | Readiness score 0–100          |
-| `score_activity`             | per day (backend)  | Activity score 0–100           |
-| `stress_zone`                | per day (backend)  | Stressed hours per day         |
-| `baseline_rhr`, `baseline_hrv`, `baseline_sleep_min`, `baseline_steps` | per day (backend) | Trailing 14-day baselines |
 
 The `biometric_*` and `ring_*` metrics carry the label `device="colmi_r02"`.
 
 Aggregations like overnight RHR (`min_over_time(biometric_hr_bpm[8h])`) are
-done in Grafana / PromQL rather than at write time, so you keep the raw data.
+done in PromQL (VictoriaMetrics' `:8428/vmui`) rather than at write time, so you keep the raw data.
 
-## Server side: VictoriaMetrics + Grafana
+## Server side: VictoriaMetrics + backend
 
-A ready-to-run stack lives in [`infra/`](infra/). It provisions the
-VictoriaMetrics data source (UID `victoriametrics`) and the
-[`grafana/biometrics.json`](grafana/biometrics.json) dashboard automatically.
+A ready-to-run stack lives in [`infra/`](infra/).
 
 ```bash
-# on the server, with the repo (or just infra/ + grafana/ + backend/) copied over
+# on the server, with the repo (or just infra/ + backend/) copied over
 cd infra
-cp .env.example .env   # set GRAFANA_ADMIN_PASSWORD and API_TOKEN (and GRAFANA_PORT, default 3001)
+cp .env.example .env   # set API_TOKEN
 docker compose up -d
 ```
 
-VictoriaMetrics listens on `:8428`, the backend on `:8429`, Grafana on `:3001`
-(login `admin` / your password).
+VictoriaMetrics listens on `:8428` (ad-hoc queries at `/vmui`), the backend on `:8429`.
 
 ### Point the app at the backend (`:8429`) or straight at VM (`:8428`)
 
@@ -125,8 +116,7 @@ VictoriaMetrics listens on `:8428`, the backend on `:8429`, Grafana on `:3001`
 - stress zones (restored / relaxed / engaged / stressed) and a resilience level,
 - trailing 14-day personal baselines.
 
-Results are stored in SQLite and also written back to VictoriaMetrics as
-`score_*`, `stress_zone` and `baseline_*`, so Grafana can chart them. Routes
+Results are stored in SQLite only and read through the backend routes. Routes
 (`/today`, `/sleep`, `/trends`, ...) need `Authorization: Bearer <API_TOKEN>`;
 only `/health` is open. TLS is not handled here (use a VPN such as Tailscale).
 
@@ -209,7 +199,7 @@ we've already shipped.
 
 - Protocol details reverse-engineered by the
   [Gadgetbridge](https://gadgetbridge.org/) community (GPL-3.0).
-- VictoriaMetrics, Grafana, AndroidX, OkHttp — thanks to all the maintainers.
+- VictoriaMetrics, AndroidX, OkHttp — thanks to all the maintainers.
 
 ## License
 

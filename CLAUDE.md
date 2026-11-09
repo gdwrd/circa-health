@@ -1,6 +1,6 @@
 # Ring Health Tracker — agent rules
 
-Colmi R02 ring → Android app (`app/`, package `dev.ring.health`) → VictoriaMetrics (`/api/v1/import/prometheus`) → Grafana.
+Colmi R02 ring → Android app (`app/`, package `dev.ring.health`) → backend → VictoriaMetrics (`/api/v1/import/prometheus`).
 v2 adds a Python backend (`backend/`) that sits on that same import path and computes Sleep / Readiness / Activity scores.
 The plan is `docs/PLAN.md`; the task ledger is `NEXTSTEPS.md`.
 
@@ -10,7 +10,7 @@ The plan is `docs/PLAN.md`; the task ledger is `NEXTSTEPS.md`.
 - Read only the files the ledger item names plus `## Facts that still hold`. Do not grep the repo to "get context".
 - Never open: `app/build/**`, `.gradle/**`, `*.apk`, `*.jks`, `keystore.properties` (secrets; read by Gradle only), `infra/.env`.
   Inspect an APK with `apksigner verify --print-certs`, never by unzipping it.
-- Secrets (`API_TOKEN`, Grafana password, keystore passwords) live in gitignored files only; never print or commit them.
+- Secrets (`API_TOKEN`, keystore passwords) live in gitignored files only; never print or commit them.
 
 ## Kotlin / Android Rules
 - Kotlin 2.0.21, AGP 8.13.2, minSdk 31, targetSdk 35, JVM 17. Versions go in `gradle/libs.versions.toml`, never inline.
@@ -28,9 +28,8 @@ The plan is `docs/PLAN.md`; the task ledger is `NEXTSTEPS.md`.
 - Test only what changed: `python -m pytest backend/tests/test_<area>.py -q`. The full backend suite is small; run it. Never run Android instrumented tests (none exist).
 - Scores are approximations against personal 14-day baselines. Never label them "Oura scores" in code, UI or docs.
 
-## Infra & Grafana
+## Infra
 - Compose file: `infra/docker-compose.yml`; `.env` next to it (gitignored), `infra/.env.example` is the template.
-- Check: `docker compose -f infra/docker-compose.yml config -q` (export `GRAFANA_ADMIN_PASSWORD=x API_TOKEN=x` first). Local stack: `docker compose -f infra/docker-compose.yml up -d --build`; VM `:8428`, backend `:8429`, Grafana `:3001`.
-- Dashboard source of truth is `grafana/biometrics.json` (provisioned read-only). Edit the JSON; never export from the Grafana UI over it. Check: `python -c "import json;json.load(open('grafana/biometrics.json'))"` then look at the panel in a browser — there is no headless renderer.
+- Check: `docker compose -f infra/docker-compose.yml config -q` (export `API_TOKEN=x` first). Local stack: `docker compose -f infra/docker-compose.yml up -d --build`; VM `:8428` (ad-hoc queries at `/vmui`), backend `:8429`.
 - Homelab deploy: `scp` changed dirs to `d0p3@192.168.0.104:~/ring-health/`, then `ssh d0p3@192.168.0.104 "cd ~/ring-health/infra && docker compose up -d --build"`. Never `docker compose down -v` (deletes 10 y of ring data).
 - Never regenerate committed data or re-import history as a check. VictoriaMetrics instant queries hide samples newer than 30 s.

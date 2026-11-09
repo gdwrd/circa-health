@@ -52,7 +52,7 @@ def test_ingest_rescores_and_today_has_sleep_score(monkeypatch) -> None:
         assert j["sleep"]["score"] is not None and j["status"] == "learning" and j["baseline_days"] == "1/14"
         asleep_now = ss <= datetime.now().timestamp() <= es  # latest fake sample is "now"
         assert j["activity"]["score"] is not None and j["vitals"]["hr"] == (54 if asleep_now else 70)
-        assert b"score_sleep" in sent[-1]
+        assert not any(b"score_sleep" in b for b in sent)  # scores live in ring.db only
         s = c.get("/sleep", headers=H).json()
         assert s["session"]["total_min"] == 420 and s["stages"]
         t = c.get("/trends?metric=sleep&days=7", headers=H).json()
