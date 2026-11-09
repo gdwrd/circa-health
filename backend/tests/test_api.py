@@ -331,7 +331,7 @@ def test_sleep_debt_and_bedtime_fields(tmp_path, monkeypatch) -> None:
         assert s["debt"] == debt and s["bedtime"] == window
         assert c.get(f"/sleep?date={d - timedelta(10)}", headers=H).json()["debt"] is None  # no sleep_min that week
         assert c.get("/today", headers=H).json()["tonight"] == {"bedtime": window, "debt": debt, "plan": None,
-                                                                "wind_down_usual": None}
+                                                                "wind_down_usual": None, "what_if": None}
         c.patch("/settings", json={"wake_weekday": "07:00", "wake_weekend": "07:00"}, headers=H)
         assert c.get(f"/sleep?date={d}", headers=H).json()["plan"] == {  # 1140 - 450 - 10 = 680, in bed 665 > window end 660
             "asleep_by_min": 680.0, "in_bed_by_min": 665.0, "sleep_min": 460.0, "extra_min": 10, "wake_min": 1140,
@@ -524,3 +524,48 @@ def test_confidence_saved_and_passed_through_today(monkeypatch) -> None:
         assert c.get(f"/today?date={d}", headers=H).json()["confidence"] == want
         assert c.get(f"/today?date={d - timedelta(3)}", headers=H).json()["confidence"] is None
         assert c.get(f"/today?date={d - timedelta(2)}", headers=H).json()["confidence"]["sleep"] is None
+
+
+def test_today_what_if_from_history(monkeypatch) -> None:
+    """21 days to today, 450 min nights: odd days back are hard (load 20), even ones easy (5); readiness is 60 the
+    day after a hard day and 80 after an easy one. 14-day mean load 12.5 -> a hard day starts at round(1.1 x 12.5) = 14."""
+    monkeypatch.setattr(main, "_vitals", lambda: {})
+    d = date.today()
+    with TestClient(app) as c:
+        assert c.get("/today", headers=H).json()["tonight"]["what_if"] is None  # no cardio baseline yet
+        for i in range(21):
+            db.save_day(d - timedelta(i), (None, 60 if i % 2 == 0 else 80, None),
+                        {"inputs": {"cardio_load": 20.0 if i % 2 else 5.0, "sleep_min": 450.0}}, {})
+        w = c.get("/today", headers=H).json()["tonight"]["what_if"]
+        assert w == {"rest": {"full": {"median": 80, "lo": 80, "hi": 80, "n": 10}, "short": None},
+                     "train": {"full": {"median": 60, "lo": 60, "hi": 60, "n": 10}, "short": None}}
+        assert c.get(f"/today?date={d - timedelta(30)}", headers=H).json()["tonight"]["what_if"] == w  # tonight is always today's
+
+
+def test_export_csv_rows_bounds_auth() -> None:
+    d = date.today()
+    db.save_day(d - timedelta(1), (81, 72, 65), {
+        "inputs": {"sleep_min": 412.0, "nap_min": 0, "rhr": 52.0, "hrv": 47.26666, "spo2": 93.0, "steps": 6500.0,
+                   "cardio_load": 9.0, "stress_load": 1.5},
+        "sleep_extra": {"spo2": {"mean": 95.0, "min": 88.0, "low_count": 1, "n": 6}}}, {})
+    db.save_day(d, (None, None, 40), {"inputs": {"spo2": 93.0, "steps": 100.0}}, {})  # scored before sleep_extra.spo2.min
+    y = (d - timedelta(1)).isoformat()
+    db.add_journal(y, "bp", "150/95", None, 1)
+    db.add_journal(y, "bp", "128/82", None, 2)  # the day's later reading replaces the first
+    db.add_journal(y, "alcohol", None, "two, with dinner", 3)  # notes stay out of the file
+    db.add_journal((d - timedelta(5)).isoformat(), "sick", None, None, 4)  # outside days=3
+    with TestClient(app) as c:
+        r = c.get("/export.csv?days=3", headers=H)
+        assert r.status_code == 200 and r.headers["content-type"].startswith("text/csv")
+        lines = r.text.splitlines()
+        assert lines == [
+            "date,sleep_score,readiness_score,activity_score,sleep_min,nap_min,rhr,hrv,spo2_min,steps,cardio_load,"
+            "stress_load,bp_sys,bp_dia,journal",
+            f"{d - timedelta(2)},,,,,,,,,,,,,,",
+            f"{y},81,72,65,412.0,0,52.0,47.3,88.0,6500.0,9.0,1.5,128,82,alcohol;bp",
+            f"{d},,,40,,,,,93.0,100.0,,,,,"]
+        assert len(c.get("/export.csv", headers=H).text.splitlines()) == 91  # default 90 days + header
+        assert len(c.get("/export.csv?days=365", headers=H).text.splitlines()) == 366
+        for bad in (0, 366, "x"):
+            assert c.get(f"/export.csv?days={bad}", headers=H).status_code == 422, bad
+        assert c.get("/export.csv").status_code == 401

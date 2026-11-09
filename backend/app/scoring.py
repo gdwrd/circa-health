@@ -1,5 +1,5 @@
 """Pure scoring functions (no I/O). Scores are approximations against personal 14-day baselines."""
-from statistics import mean, median, pstdev
+from statistics import mean, median, pstdev, quantiles
 
 Contribs = dict[str, float | None]
 
@@ -147,6 +147,20 @@ def suggest(evening_hr: float | None, base: tuple[float, float] | None, workout:
     if evening_hr is None or base is None or workout or (evening_hr - base[0]) / base[1] < 1.5:
         return None
     return {"kinds": ["alcohol", "late_meal"], "delta": round(evening_hr - base[0])}
+
+
+def what_if(history: list[tuple[float, float, int]], hard_from: float, need_min: float) -> dict:
+    """history: (cardio load, sleep minutes that night, next-day readiness) over 90 days. Days like this, no
+    regression: rest/train (load >= hard_from) x full/short night (>= need - 30). Each bucket is the next-day
+    readiness {median, lo, hi, n} (lo/hi = quartiles), or None under 5 days."""
+    out: dict = {}
+    for day, hard in (("rest", False), ("train", True)):
+        out[day] = {}
+        for night, full in (("full", True), ("short", False)):
+            v = [r for load, sleep, r in history if (load >= hard_from) == hard and (sleep >= need_min - 30) == full]
+            q = len(v) >= 5 and [round(x) for x in quantiles(v, n=4, method="inclusive")]
+            out[day][night] = {"median": q[1], "lo": q[0], "hi": q[2], "n": len(v)} if q else None
+    return out
 
 
 def low_index(hr: list[float]) -> int:

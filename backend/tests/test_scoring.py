@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.scoring import (activity_score, baseline, bedtime_window, confidence, low_index, readiness_score, regularity,
                          resilience, robust, sleep_debt, sleep_score, social_jetlag, strain, stress_zones, suggest,
-                         tonight, wind_down)
+                         tonight, what_if, wind_down)
 
 GOOD = {"total_min": 480, "awake_min": 8, "rem_min": 100, "deep_min": 100, "midpoint_h": 2.0, "regularity_sd": 20}
 SHORT = {"total_min": 240, "awake_min": 20, "rem_min": 40, "deep_min": 30, "midpoint_h": 1.0}
@@ -172,3 +172,15 @@ def test_suggest_needs_baseline_z_and_no_workout() -> None:
     assert suggest(74.4, base, False) is None
     assert suggest(80.0, base, True) is None  # a workout explains it
     assert suggest(80.0, None, False) is None and suggest(None, base, False) is None
+
+
+def test_what_if_buckets_quartiles_and_five_day_floor() -> None:
+    """need 450 -> a full night is >= 420; a hard day is load >= 14."""
+    rest_full = [(5.0, 420.0, r) for r in (70, 72, 74, 76, 78)]  # 420 = exactly need - 30: full
+    train_short = [(14.0, 419.0, r) for r in (66, 50, 58, 62, 54)]  # 14 = exactly hard_from: train
+    train_full = [(30.0, 480.0, 60)] * 4  # one day short of a bucket
+    w = what_if(rest_full + train_short + train_full, 14, 450)
+    assert w == {"rest": {"full": {"median": 74, "lo": 72, "hi": 76, "n": 5}, "short": None},
+                 "train": {"full": None, "short": {"median": 58, "lo": 54, "hi": 62, "n": 5}}}
+    assert what_if(train_full + [(30.0, 480.0, 90)], 14, 450)["train"]["full"] == {"median": 60, "lo": 60, "hi": 60, "n": 5}
+    assert what_if([], 14, 450) == {"rest": {"full": None, "short": None}, "train": {"full": None, "short": None}}

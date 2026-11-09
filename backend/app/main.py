@@ -1,3 +1,5 @@
+import csv
+import io
 import logging
 import os
 import random
@@ -308,6 +310,20 @@ def _day(day: str | None) -> date:
         raise HTTPException(422, "bad date")
 
 
+def _what_if() -> dict | None:
+    """Days like today from the user's last 90: evidence only, never changes a score. None while cardio is learning."""
+    t = _today()
+    m = notify.cardio_base(t)[0]
+    if m is None:
+        return None
+    by = {r["date"]: r for r in db.days(t - timedelta(90), t)}
+    hist = [(load, n["inputs"]["sleep_min"], n["readiness_score"]) for d, r in by.items()
+            if (load := r["inputs"].get("cardio_load")) is not None and (n := by.get(d + timedelta(1)))
+            and n["inputs"].get("sleep_min") is not None and n["readiness_score"] is not None]
+    # 100 = any readiness in the "recovered" band; its low edge is where a hard day starts
+    return scoring.what_if(hist, cardio.target(100, m)["lo"], db.setting("sleep_need_min"))
+
+
 @api.get("/today")
 def today(day: str | None = Query(None, alias="date")) -> dict:
     d = _day(day)
@@ -339,7 +355,8 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
         **({"breathe": {"today_min": mins([b for b in wk if _dt(b["start"]).date() == d]), "week_min": mins(wk),
                         "sessions": len(wk)}} if wk or db.query("SELECT 1 FROM breath_session LIMIT 1") else {}),
         "tonight": {"bedtime": notify.bedtime_window(_today()), "debt": debt(_today()), "plan": notify.tonight(_today()),
-                    "wind_down_usual": median(wd) if len(wd) >= 5 else None},  # minutes after noon, 14 nights
+                    "wind_down_usual": median(wd) if len(wd) >= 5 else None,  # minutes after noon, 14 nights
+                    "what_if": _what_if()},
     }
 
 
@@ -435,6 +452,33 @@ def week(end: str | None = None) -> dict:
     except ValueError:
         raise HTTPException(422, "bad date")
     return {**_week(e), "previous": _week(e - timedelta(7))}
+
+
+EXPORT = ("sleep_min", "nap_min", "rhr", "hrv", "spo2_min", "steps", "cardio_load", "stress_load")
+
+
+@api.get("/export.csv")
+def export_csv(days: int = Query(90, ge=1, le=365)) -> Response:
+    """One row per day, oldest first; a day without data keeps its row with empty cells."""
+    start = _today() - timedelta(days - 1)
+    rows = {r["date"]: r for r in db.days(start, _today())}
+    entries = db.journal(start.isoformat())
+    bp = {p["date"]: p for p in insights.bp(entries)}  # ascending: the day's last reading wins
+    kinds: dict[str, set[str]] = {}
+    for e in entries:
+        kinds.setdefault(e["date"], set()).add(e["kind"])
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["date", *SCORES.values(), *EXPORT, "bp_sys", "bp_dia", "journal"])
+    for n in range(days):
+        d = (start + timedelta(n)).isoformat()
+        r = rows.get(start + timedelta(n)) or {"c": {}, "inputs": {}}
+        spo2 = (r["c"].get("sleep_extra") or {}).get("spo2") or {}  # the night's true minimum; older days: lowest hourly mean
+        v = {**r["inputs"], "spo2_min": spo2.get("min", r["inputs"].get("spo2"))}
+        cells = [*(r.get(k) for k in SCORES.values()), *(v.get(k) for k in EXPORT),
+                 bp.get(d, {}).get("sys"), bp.get(d, {}).get("dia")]
+        w.writerow([d, *(round(x, 1) if isinstance(x, float) else x for x in cells), ";".join(sorted(kinds.get(d, ())))])
+    return Response(buf.getvalue(), media_type="text/csv")
 
 
 EFFECT_METRICS = ("sleep_score", "readiness_score", "hrv", "rhr", "bed_start")
