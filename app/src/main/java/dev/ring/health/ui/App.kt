@@ -13,16 +13,14 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bedtime
-import androidx.compose.material.icons.rounded.Favorite
-import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.DirectionsWalk
+import androidx.compose.material.icons.rounded.MonitorHeart
 import androidx.compose.material.icons.automirrored.rounded.ShowChart
-import androidx.compose.material.icons.rounded.Spa
 import androidx.compose.material.icons.rounded.Today
 import androidx.compose.material.icons.automirrored.outlined.ShowChart
 import androidx.compose.material.icons.outlined.Bedtime
-import androidx.compose.material.icons.outlined.FavoriteBorder
-import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material.icons.outlined.Spa
+import androidx.compose.material.icons.outlined.DirectionsWalk
+import androidx.compose.material.icons.outlined.MonitorHeart
 import androidx.compose.material.icons.outlined.Today
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
@@ -57,10 +55,9 @@ import androidx.navigation.compose.rememberNavController
 private enum class TabItem(val route: String, val label: String, val icon: ImageVector, val outline: ImageVector) {
     Today("today", "Today", Icons.Rounded.Today, Icons.Outlined.Today),
     Sleep("sleep", "Sleep", Icons.Rounded.Bedtime, Icons.Outlined.Bedtime),
-    Heart("heart", "Heart", Icons.Rounded.Favorite, Icons.Outlined.FavoriteBorder),
-    Stress("stress", "Stress", Icons.Rounded.Spa, Icons.Outlined.Spa),
+    Activity("activity", "Activity", Icons.Rounded.DirectionsWalk, Icons.Outlined.DirectionsWalk),
+    Body("body", "Body", Icons.Rounded.MonitorHeart, Icons.Outlined.MonitorHeart),
     Trends("trends", "Trends", Icons.AutoMirrored.Rounded.ShowChart, Icons.AutoMirrored.Outlined.ShowChart),
-    Settings("settings", "Settings", Icons.Rounded.Settings, Icons.Outlined.Settings),
 }
 
 @Composable
@@ -72,10 +69,14 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
         var backend by remember { mutableStateOf(Api.cached(ctx)) }
         // Re-detect on every tab change so a URL/token edited in Settings takes effect.
         LaunchedEffect(route) { backend = Api.cached(ctx) ?: Api.hasBackend(ctx) }
-        fun go(t: TabItem) = nav.navigate(t.route) {
-            popUpTo(nav.graph.findStartDestination().id) { saveState = true }
-            launchSingleTop = true
-            restoreState = true
+        fun go(t: TabItem) {
+            // Settings sits above Today; pop it first or saveState/restoreState brings it back on the Today tab.
+            if (nav.currentDestination?.route == "settings") nav.popBackStack()
+            nav.navigate(t.route) {
+                popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                launchSingleTop = true
+                restoreState = true
+            }
         }
         // Today consumes a journal link once its sheet opens (it may still be waiting for the backend check).
         LaunchedEffect(link) {
@@ -101,12 +102,12 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
             // Content runs under the tab bar so the bar can blur it; LargeTitleScaffold pads its list end by this.
             CompositionLocalProvider(LocalBottomBar provides inner.calculateBottomPadding()) {
             NavHost(nav, startDestination = TabItem.Today.route, modifier = Modifier.haze(haze)) {
-                composable(TabItem.Today.route) { TodayScreen(backend, journalDate, onLinkHandled) }
+                composable(TabItem.Today.route) { TodayScreen(backend, { nav.navigate("settings") }, journalDate, onLinkHandled) }
                 composable(TabItem.Sleep.route) { SleepScreen(backend) }
-                composable(TabItem.Heart.route) { HeartScreen(backend) }
-                composable(TabItem.Stress.route) { StressScreen(backend) }
+                composable(TabItem.Activity.route) { NoBackendTab("Activity", backend) } // B2 replaces with ActivityScreen
+                composable(TabItem.Body.route) { BodyScreen(backend) }
                 composable(TabItem.Trends.route) { TrendsScreen(backend, link?.first == "month", onLinkHandled) }
-                composable(TabItem.Settings.route) { SettingsScreen(hasPermissions, requestPermissions) }
+                composable("settings") { SettingsScreen(hasPermissions, requestPermissions) { nav.popBackStack() } }
             }
             }
         }
@@ -146,4 +147,4 @@ private fun TabBar(current: String?, modifier: Modifier, onSelect: (TabItem) -> 
 
 /** Today still calls this; one no-backend empty state everywhere. */
 @Composable
-internal fun PlaceholderTab(title: String, backend: Boolean?) = NoBackendTab(title, backend)
+internal fun PlaceholderTab(title: String, backend: Boolean?, action: (@Composable () -> Unit)? = null) = NoBackendTab(title, backend, action)

@@ -103,7 +103,7 @@ private fun trend(json: JsonElement?): Trend? {
 }
 
 @Composable
-fun HeartScreen(backend: Boolean?) {
+fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
     if (backend != true) return NoBackendTab("Heart", backend)
     val ctx = LocalContext.current
     var hr by remember { mutableStateOf<List<Pair<Double, Double>>?>(null) }
@@ -161,6 +161,7 @@ fun HeartScreen(backend: Boolean?) {
     LargeTitleScaffold("Heart", refreshing = refreshing, onRefresh = {
         scope.launch { refreshing = true; try { load(); loadDay() } finally { refreshing = false } }
     }) {
+        item { Box(Modifier.padding(bottom = AppSpace.m)) { header() } }
         item { Section("Now") { MeasureNow() } }
         if (!loaded) return@LargeTitleScaffold
         item { DayPicker(date) { date = it } }

@@ -79,7 +79,7 @@ private val LEVELS = listOf(
 )
 
 @Composable
-fun StressScreen(backend: Boolean?) {
+fun StressScreen(backend: Boolean?, header: @Composable () -> Unit) {
     if (backend != true) return NoBackendTab("Stress", backend)
     val ctx = LocalContext.current
     var detail by remember { mutableStateOf(false) }
@@ -105,6 +105,7 @@ fun StressScreen(backend: Boolean?) {
     LargeTitleScaffold("Stress", refreshing = refreshing, onRefresh = {
         scope.launch { refreshing = true; try { load(); today = Api.today(ctx).obj() } finally { refreshing = false } }
     }) {
+        item { Box(Modifier.padding(bottom = AppSpace.m)) { header() } }
         val d = data ?: return@LargeTitleScaffold
         val st = d["stress"].obj()
         val zones = listOf(

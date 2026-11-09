@@ -373,6 +373,7 @@ fun ScoreRing(
 fun LargeTitleScaffold(
     title: String,
     back: (@Composable () -> Unit)? = null,
+    action: (@Composable () -> Unit)? = null,
     refreshing: Boolean = false,
     onRefresh: (() -> Unit)? = null,
     content: LazyListScope.() -> Unit,
@@ -397,7 +398,10 @@ fun LargeTitleScaffold(
             item {
                 Column(Modifier.padding(top = AppSpace.xl)) {
                     back?.invoke()
-                    Text(title, style = AppType.largeTitle, modifier = Modifier.padding(start = AppSpace.xs))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(title, style = AppType.largeTitle, modifier = Modifier.weight(1f).padding(start = AppSpace.xs))
+                        action?.invoke()
+                    }
                 }
             }
             content()
@@ -421,6 +425,7 @@ fun LargeTitleScaffold(
         ) {
             Text(title, style = AppType.headline, modifier = Modifier.align(Alignment.Center), textAlign = TextAlign.Center)
             back?.let { Box(Modifier.align(Alignment.CenterStart).padding(start = AppSpace.l)) { it() } }
+            action?.let { Box(Modifier.align(Alignment.CenterEnd).padding(end = AppSpace.l)) { it() } }
             Hairline(Modifier.align(Alignment.BottomCenter))
         }
     }
@@ -455,7 +460,7 @@ fun EmptyState(icon: ImageVector, title: String, line: String) {
 
 /** Tab without a backend: large title and the "Scores need the backend" empty state (blank while the probe runs). */
 @Composable
-fun NoBackendTab(title: String, backend: Boolean?) = LargeTitleScaffold(title) {
+fun NoBackendTab(title: String, backend: Boolean?, action: (@Composable () -> Unit)? = null) = LargeTitleScaffold(title, action = action) {
     if (backend == false) item { InsetCard { EmptyState(Icons.Rounded.CloudOff, "Scores need the backend", "Set the server URL and token in Settings.") } }
 }
 

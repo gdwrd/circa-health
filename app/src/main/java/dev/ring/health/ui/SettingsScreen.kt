@@ -99,7 +99,7 @@ import java.util.Locale
 
 @SuppressLint("MissingPermission")
 @Composable
-fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit) {
+fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, onBack: () -> Unit) {
     val ctx = LocalContext.current
     val activity = ctx as ComponentActivity
     val c = AppTheme.colors
@@ -178,7 +178,10 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
 
     if (showLog) return SyncLogScreen { showLog = false }
 
-    LargeTitleScaffold("Settings") {
+    LargeTitleScaffold(
+        "Settings",
+        back = { Text("‹ Today", style = AppType.headline, color = c.tint, modifier = Modifier.clickable(onClick = onBack).padding(start = AppSpace.xs, bottom = AppSpace.xs)) },
+    ) {
         item {
             Section("Ring", "Each sync reads new data from the ring and pushes it to the server.") {
                 ValueRow("Last sync", if (lastSync == 0L) "Never" else SimpleDateFormat("d MMM, ", Locale.getDefault()).format(Date(lastSync)) + clock(lastSync / 1000.0))

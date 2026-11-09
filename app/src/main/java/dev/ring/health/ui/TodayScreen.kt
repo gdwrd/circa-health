@@ -89,6 +89,10 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -148,8 +152,14 @@ private fun JsonElement?.num() = (this as? JsonPrimitive)?.doubleOrNull
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened: () -> Unit = {}) {
-    if (backend != true) return PlaceholderTab("Today", backend)
+fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, journalDate: String? = null, onJournalOpened: () -> Unit = {}) {
+    val haptic = LocalHapticFeedback.current
+    val gear = @Composable {
+        Box(Modifier.size(44.dp).clip(CircleShape).clickable(role = Role.Button) { haptic.tick(); onSettings() }, contentAlignment = Alignment.Center) {
+            Icon(Icons.Rounded.Settings, "Settings", tint = AppTheme.colors.tint, modifier = Modifier.size(24.dp))
+        }
+    }
+    if (backend != true) return PlaceholderTab("Today", backend, gear)
     val ctx = LocalContext.current
     var data by remember { mutableStateOf<JsonObject?>(null) }
     var open by remember { mutableStateOf<String?>(null) }
@@ -183,7 +193,7 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
     LaunchedEffect(Unit) { load() }
 
     val c = AppTheme.colors
-    LargeTitleScaffold("Today", refreshing = refreshing, onRefresh = {
+    LargeTitleScaffold("Today", action = gear, refreshing = refreshing, onRefresh = {
         scope.launch { refreshing = true; try { load() } finally { refreshing = false } }
     }) {
         val d = data ?: return@LargeTitleScaffold
