@@ -71,6 +71,7 @@ import java.time.format.TextStyle as DayStyle
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.roundToInt
 
 private fun JsonElement?.obj() = this as? JsonObject
@@ -138,11 +139,15 @@ fun SleepScreen(backend: Boolean?) {
         val d = data ?: return@LargeTitleScaffold
         item { DayPicker(date) { date = it } }
         val ses = d["session"].obj()
-        if (ses == null) item {
-            InsetCard {
-                if (date == LocalDate.now()) EmptyState(Icons.Rounded.Bedtime, "No sleep recorded", "Wear the ring to bed; last night appears after the morning sync.")
-                else EmptyState(Icons.Rounded.Bedtime, "No sleep recorded for this night", "Wear the ring to bed and sync in the morning.")
+        if (ses == null) {
+            item {
+                InsetCard {
+                    if (date == LocalDate.now()) EmptyState(Icons.Rounded.Bedtime, "No sleep recorded", "Wear the ring to bed; last night appears after the morning sync.")
+                    else EmptyState(Icons.Rounded.Bedtime, "No sleep recorded for this night", "Wear the ring to bed and sync in the morning.")
+                }
             }
+            // The window is from today, not this night, so it still shows.
+            d["bedtime"].obj()?.let { b -> item { Bedtime(b, week) } }
         } else {
             val startS = ses["start"].num() ?: 0.0
             val endS = ses["end"].num() ?: startS
@@ -217,6 +222,7 @@ fun SleepScreen(backend: Boolean?) {
                 }
             }
             item { Regularity(d["contributors"].obj()?.get("regularity").num(), week, d["sleep_extra"].obj()?.get("regularity").obj()) }
+            d["bedtime"].obj()?.let { b -> item { Bedtime(b, week) } }
             if (d.containsKey("sleep_extra")) item { BloodOxygen(d["sleep_extra"].obj()?.get("spo2").obj(), date != LocalDate.now()) }
         }
         val t = trend ?: return@LargeTitleScaffold
@@ -228,7 +234,19 @@ fun SleepScreen(backend: Boolean?) {
                         "Hours asleep · goal $need h", style = AppType.footnote, color = c.secondaryLabel,
                         modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.l),
                     )
-                    val day = { x: Double -> runCatching { LocalDate.parse(t[x.toInt()].first).dayOfWeek.getDisplayName(DayStyle.SHORT, Locale.getDefault()) }.getOrDefault("") }
+                    d["debt"].obj()?.let { debt ->
+                        val owe = debt["debt_min"].num()?.roundToInt() ?: 0
+                        val sug = debt["suggest_min"].num()?.roundToInt() ?: 0
+                        val r = if (owe > 0) sug.toDouble() / owe else 0.0
+                        // Share of the debt the suggestion clears; the backend caps it at 60 min, so long debts get smaller words.
+                        val part = when { r >= 0.45 -> "about half"; r >= 0.28 -> "about a third"; r >= 0.2 -> "about a quarter"; else -> "part of it" }
+                        val text = if (owe >= 30) "Over the last 7 nights against your ${duration((need * 60).roundToInt())} need." +
+                            (if (sug > 0) " An extra $sug min " + (if (date == LocalDate.now()) "tonight clears $part." else "the next night would have cleared $part.") else "")
+                        else "You've slept close to your need this week."
+                        Text(if (owe >= 30) "${duration(owe)} behind" else "Caught up", style = AppType.headline, modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.s, end = AppSpace.l))
+                        Text(text, style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.xs, end = AppSpace.l))
+                    }
+                    val day ={ x: Double -> runCatching { LocalDate.parse(t[x.toInt()].first).dayOfWeek.getDisplayName(DayStyle.SHORT, Locale.getDefault()) }.getOrDefault("") }
                     ScrubChartHost(
                         rememberCartesianChart(
                             rememberColumnCartesianLayer(
@@ -396,6 +414,56 @@ private fun Regularity(score: Double?, week: List<Pair<LocalDate, JsonObject?>>,
                         drawRoundRect(c.sleep, Offset(x0, cy - barH / 2), Size((x(b.toDouble()) - x0).coerceAtLeast(barH), barH), CornerRadius(barH / 2))
                     }
                 }
+            }
+        }
+    }
+}
+
+/** Best-bedtime window (from today) on an 8 PM–2 AM strip, this week's bedtimes as dots. */
+@Composable
+private fun Bedtime(b: JsonObject, week: List<Pair<LocalDate, JsonObject?>>) {
+    val c = AppTheme.colors
+    val nights = b["nights"].num()?.roundToInt() ?: 0
+    val start = b["start_min"].num()
+    val end = b["end_min"].num()
+    val status = (b["status"] as? JsonPrimitive)?.contentOrNull
+    val ok = status == "ok" && start != null && end != null
+    val measurer = rememberTextMeasurer()
+    val label = AppType.footnote.copy(color = c.secondaryLabel)
+    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+        Text("Bedtime", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
+        InsetCard {
+            Column(Modifier.padding(AppSpace.l)) {
+                val (head, line) = when {
+                    ok -> "Your best nights start ${noonClock(start!!)}–${noonClock(end!!)}" to
+                        "Sleep quality ${b["score_in"].num()?.roundToInt()} in that window · ${b["score_out"].num()?.roundToInt()} outside · $nights nights"
+                    status == "flat" -> "No clear best bedtime yet" to "Your sleep looks similar at every bedtime over $nights nights."
+                    else -> "Learning your best bedtime" to "$nights/14 nights — keep wearing the ring to bed."
+                }
+                Text(head, style = AppType.headline)
+                if (ok) {
+                    val dots = week.mapNotNull { (_, s) -> s?.get("start").num()?.let { afterNoon(it).toDouble() } }
+                    // 8 PM–2 AM, stretched to whole hours when the window or a bedtime falls outside.
+                    val lo = (listOf(480.0, start!!) + dots).min().let { floor(it / 60) * 60 }
+                    val hi = (listOf(840.0, end!!) + dots).max().let { ceil(it / 60) * 60 }
+                    Canvas(Modifier.fillMaxWidth().height(40.dp).padding(top = AppSpace.m)) {
+                        val h = 8.dp.toPx()
+                        val cy = h / 2 + 1.dp.toPx()
+                        fun x(m: Double) = ((m - lo) / (hi - lo) * size.width).toFloat()
+                        drawRoundRect(c.emptySegment, Offset(0f, cy - h / 2), Size(size.width, h), CornerRadius(h / 2))
+                        drawRoundRect(c.sleep.copy(alpha = 0.35f), Offset(x(start), cy - h / 2), Size(x(end) - x(start), h), CornerRadius(h / 2))
+                        dots.forEach { m ->
+                            drawCircle(c.card, 4.dp.toPx(), Offset(x(m), cy))
+                            drawCircle(c.sleep, 3.dp.toPx(), Offset(x(m), cy))
+                        }
+                        listOf(lo, (lo + hi) / 2, hi).forEachIndexed { i, m ->
+                            val lm = measurer.measure(noonClock(m).replace(":00 ", " "), label)
+                            val lx = when (i) { 0 -> 0f; 1 -> x(m) - lm.size.width / 2f; else -> size.width - lm.size.width }
+                            drawText(lm, topLeft = Offset(lx, size.height - lm.size.height))
+                        }
+                    }
+                }
+                Text(line, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = if (ok) AppSpace.s else AppSpace.xs))
             }
         }
     }
