@@ -137,7 +137,8 @@ def _score_day(d: date) -> None:
         low = scoring.low_index(hr) if hr else None
         hrv = [v for v in samples.raw("biometric_hrv_rmssd", s, e).values() if v > 0]
         sp = [v for v in samples.raw("biometric_spo2_pct", s, e).values() if v > 0]
-        extra["spo2"] = {"mean": mean(sp), "min": min(sp), "low_count": sum(v < 90 for v in sp), "n": len(sp)} if sp else None
+        lo = [v for v in samples.raw("biometric_spo2_min_pct", s, e).values() if v > 0] or sp  # hourly minimums when the app sends them
+        extra["spo2"] = {"mean": mean(sp), "min": min(lo), "low_count": sum(v < 90 for v in lo), "n": len(sp)} if sp else None
         extra["hr_low_t"] = list(hrs)[low] if hr else None
         night = {"sleep_score": sleep["score"], "need_min": need,
                  "hr_p10": sorted(hr)[int(0.1 * (len(hr) - 1))] if hr else None,
@@ -151,6 +152,8 @@ def _score_day(d: date) -> None:
         rhr = inputs["rhr"] or base["rhr"]
         inputs["wind_down"] = rhr and scoring.wind_down(
             [(_after_noon(t), v) for t, v in eve.items() if v > 0 and t < n["start"]], rhr)
+        ev = [v for t, v in samples.raw("biometric_hr_bpm", s - timedelta(hours=3), s).items() if v > 0 and awake(t)]
+        inputs["evening_hr"] = mean(ev) if ev else None  # awake() drops the sample at sleep start
         y = _hourly("biometric_steps", d - timedelta(1))
         ready = scoring.readiness_score(night, base, sum(y.values()) if y else None, goal)
 
@@ -195,6 +198,10 @@ def _score_day(d: date) -> None:
             if w["start"] - 600 <= start <= w["end"]:
                 w["kind"], w["confirmed"] = kind, True
                 break
+    if any(w["minutes"] >= 20 or w["confirmed"] for w in workouts):  # auto journal row; a manual entry is never touched
+        db.add_auto(d.isoformat(), "workout")
+    else:
+        db.delete_auto(d.isoformat(), "workout")
     inputs |= {"cardio_load": load and load["load"], "fitness": cardio.fitness(mh, base["rhr"]),
                "restorative_min": cardio.restorative(day_hr, inputs.get("rhr") or base["rhr"], steps_h, awake)}
 
@@ -208,6 +215,11 @@ def _score_day(d: date) -> None:
     sig["nights"] = sum(1 for v in window["rhr"] if v is not None)
     med_short = bool(med) and med > (d - timedelta(14)).isoformat() and rb["rhr"] is None
     sig["reason"] = "medication" if med_short else "baseline" if sig["index"] is None else None
+    # evidence only, never logged: a workout (the evening's or today's) that reaches into the 3 h before sleep explains the HR
+    late = bool(n) and any(w["end"] > n["start"] - 10800 and w["start"] < n["start"]
+                           for w in ((prev and prev["c"].get("workouts")) or []) + workouts)
+    suggest = scoring.suggest(inputs.get("evening_hr"),
+                              scoring.robust([p["inputs"].get("evening_hr") for p in prior], 3.0), late)
 
     def conf(r: dict | None, coverage: float) -> str | None:  # evidence only: never changes a score
         c = r and r["contributors"]
@@ -218,6 +230,7 @@ def _score_day(d: date) -> None:
     contributors = {"sleep": sleep and sleep["contributors"], "readiness": ready and ready["contributors"],
                     "activity": activity and activity["contributors"], "inputs": inputs, "stress": zones, "session": n,
                     "signals": sig, "sleep_extra": extra, "wear": wear, "cardio": load, "workouts": workouts,
+                    "suggest": suggest,
                     "confidence": {"sleep": conf(sleep, cover), "readiness": conf(ready, cover),
                                    "activity": conf(activity, worn_share)}}
     kept = {k: v for k, v in base.items() if v is not None}
@@ -310,7 +323,7 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
     wd = [v for r in db.days(_today() - timedelta(13), _today()) if (v := r["inputs"].get("wind_down")) is not None]
     return {
         "status": "ok" if n >= 5 else "learning", "date": d.isoformat(), "baseline_days": f"{n}/14",
-        "calm": cfg["calm"] == "1", "confidence": row["c"].get("confidence"),
+        "calm": cfg["calm"] == "1", "confidence": row["c"].get("confidence"), "suggest": row["c"].get("suggest"),
         **{k: {"score": row.get(f"{k}_score"), "contributors": row["c"].get(k)} for k in ("sleep", "readiness", "activity")},
         "stress": row["c"].get("stress"),
         "resilience": scoring.resilience([r["inputs"].get("stress_load") for r in rows],

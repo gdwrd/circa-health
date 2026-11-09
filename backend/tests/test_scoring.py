@@ -4,8 +4,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.scoring import (activity_score, baseline, bedtime_window, confidence, low_index, readiness_score, regularity,
-                         resilience, robust, sleep_debt, sleep_score, social_jetlag, strain, stress_zones, tonight,
-                         wind_down)
+                         resilience, robust, sleep_debt, sleep_score, social_jetlag, strain, stress_zones, suggest,
+                         tonight, wind_down)
 
 GOOD = {"total_min": 480, "awake_min": 8, "rem_min": 100, "deep_min": 100, "midpoint_h": 2.0, "regularity_sd": 20}
 SHORT = {"total_min": 240, "awake_min": 20, "rem_min": 40, "deep_min": 30, "midpoint_h": 1.0}
@@ -163,3 +163,12 @@ def test_wind_down_last_run_one_outlier_from_18() -> None:
     assert wind_down([(300, 60), (345, 60), (380, 60)], 55) == 380  # nothing before 18:00 (360) counts
     assert wind_down([], 55) is None and wind_down([(300, 60), (345, 60)], 55) is None
     assert wind_down([(400, 60), (480, 90), (500, 90)], 55) is None  # not settled before sleep
+
+
+def test_suggest_needs_baseline_z_and_no_workout() -> None:
+    base = robust([70.0] * 7, 3.0)  # (70, 3): the floor
+    assert suggest(74.5, base, False) == {"kinds": ["alcohol", "late_meal"], "delta": 4}  # z = 1.5
+    assert suggest(80.0, base, False)["delta"] == 10
+    assert suggest(74.4, base, False) is None
+    assert suggest(80.0, base, True) is None  # a workout explains it
+    assert suggest(80.0, None, False) is None and suggest(None, base, False) is None

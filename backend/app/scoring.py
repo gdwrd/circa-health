@@ -141,6 +141,14 @@ def wind_down(hr: list[tuple[float, float]], rhr: float) -> float | None:
     return start
 
 
+def suggest(evening_hr: float | None, base: tuple[float, float] | None, workout: bool) -> dict | None:
+    """Journal kinds to offer (never logged) when the evening HR is >= 1.5 robust SDs above its usual and no
+    workout explains it. base: robust() of the prior evenings; delta in bpm."""
+    if evening_hr is None or base is None or workout or (evening_hr - base[0]) / base[1] < 1.5:
+        return None
+    return {"kinds": ["alcohol", "late_meal"], "delta": round(evening_hr - base[0])}
+
+
 def low_index(hr: list[float]) -> int:
     """Index of the first sample within 5 % of the minimum (night HR near its low)."""
     return next(i for i, v in enumerate(hr) if v <= min(hr) * 1.05)

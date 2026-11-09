@@ -148,6 +148,21 @@ def delete_phone_in_bed(d: str) -> None:
         con.execute("DELETE FROM journal WHERE date=? AND kind='phone_in_bed'", (d,))
 
 
+def add_auto(d: str, kind: str) -> None:
+    """Auto journal row; an entry already there for that day and kind (manual or auto) stays as it is.
+    Only for kinds under the journal_day_kind unique index (not medication / breathe)."""
+    with closing(connect()) as con, con:
+        con.execute("INSERT OR IGNORE INTO journal(date, kind, value, note, ts) VALUES(?,?,NULL,'auto',?)",
+                    (d, kind, int(datetime.now().timestamp())))
+
+
+def delete_auto(d: str, kind: str) -> None:
+    """Removes only the row add_auto wrote; a manual entry stays."""
+    # shortcut: a manual entry whose note is exactly 'auto' counts as auto, add an `auto` column if users type that
+    with closing(connect()) as con, con:
+        con.execute("DELETE FROM journal WHERE date=? AND kind=? AND note='auto'", (d, kind))
+
+
 def journal(since: str) -> list[dict]:
     return [dict(r) for r in query("SELECT id, date, kind, value, note, ts FROM journal WHERE date>=? "
                                    "ORDER BY date DESC, ts DESC, id DESC", (since,))]
