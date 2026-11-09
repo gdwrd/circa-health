@@ -492,3 +492,51 @@ def test_sleep_override_edit_rescore_delete(tmp_path, monkeypatch) -> None:
         assert c.delete("/sleep?date=bogus", headers=H).status_code == 422
         assert c.delete("/sleep", headers=H).status_code == 422
         assert c.get(f"/sleep?date={d}", headers=H).json()["edited"] is False
+
+
+def test_breathe_sessions_journal_hr_today(tmp_path, monkeypatch) -> None:
+    import sqlite3
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "b.db"))
+    with sqlite3.connect(tmp_path / "b.db") as con:  # pre-G1 database: old journal index
+        con.executescript("CREATE TABLE journal(id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, kind TEXT, value TEXT,"
+                          " note TEXT, ts INTEGER); CREATE UNIQUE INDEX journal_day_kind ON journal(date, kind)"
+                          " WHERE kind != 'medication';")
+
+    def fake(expr: str, start: datetime, end: datetime, step: str, lookback: str | None = None) -> list[dict]:
+        t0, t1 = start.timestamp(), end.timestamp()
+        v = {"biometric_breath_hr_bpm": [[t0, "70"], [t1, "62"]],
+             "biometric_stress": [[t0 + 600, "60"], [t1 - 600, "40"]]}.get(expr, [])
+        return [{"metric": {}, "values": v}] if v else []
+
+    sent: list[bytes] = []
+    monkeypatch.setattr(vm, "query_range", fake)
+    monkeypatch.setattr(vm, "forward_import", lambda b: sent.append(b) or httpx.Response(204))
+    d = date.today() - timedelta(1)
+    s1 = int((vm.midnight(d) + timedelta(hours=10)).timestamp())
+    s2 = s1 + 4 * 3600
+    body = {"start": s1, "end": s1 + 600, "rounds": 4, "feel_before": 2, "feel_after": None,
+            "samples": [[s1 + 10, 72], [s1 + 20, 65], [s1 + 30, 68]]}
+    with TestClient(app) as c:
+        assert "breathe" not in c.get(f"/today?date={d}", headers=H).json()  # never a session yet
+        for bad in ({"end": s1 + 3601}, {"end": s1}, {"rounds": 0}, {"feel_after": 6}, {"samples": [[s1 + 10, 300]]},
+                    {"samples": [[s1 - 10, 70]]}, {"start": "x"}):
+            assert c.post("/breathe", json={**body, **bad}, headers=H).status_code == 422, bad
+        r = c.post("/breathe", json=body, headers=H)
+        assert r.status_code == 200
+        b = r.json()
+        assert (b["hr_start"], b["hr_end"], b["hr_min"], b["rounds"], b["feel_before"]) == (72, 68, 65, 4, 2)
+        assert (b["stress_before"], b["stress_after"]) == (60, 40)
+        assert b["points"] == [{"t": s1, "bpm": 70.0}, {"t": s1 + 600, "bpm": 62.0}]
+        assert f'biometric_breath_hr_bpm{{device="colmi_r02"}} 72 {(s1 + 10) * 1000}\n'.encode() in sent[0]
+        c.post("/breathe", json=body, headers=H)  # re-sent: still one journal row
+        c.post("/breathe", json={**body, "start": s2, "end": s2 + 600, "samples": []}, headers=H)
+        j = [e for e in c.get("/journal", headers=H).json()["entries"] if e["kind"] == "breathe"]
+        assert [(e["date"], e["value"]) for e in j] == [(d.isoformat(), "14:00"), (d.isoformat(), "10:00")]
+        assert c.post("/journal", json={"date": d.isoformat(), "kind": "breathe"}, headers=H).status_code == 422
+        br = c.get(f"/hr?date={d}", headers=H).json()["breaths"]
+        assert [x["start"] for x in br] == [s1, s2] and br[1]["hr_start"] is None and br[1]["points"]
+        t = c.get(f"/today?date={d}", headers=H).json()
+        assert t["breathe"] == {"today_min": 20.0, "week_min": 20.0, "sessions": 2} and t["inputs"]["breath_min"] == 20.0
+        assert c.get("/today", headers=H).json()["breathe"]["today_min"] == 0.0
+        assert c.get("/trends?metric=breath_min", headers=H).status_code == 200

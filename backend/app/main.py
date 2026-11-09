@@ -62,6 +62,10 @@ def _sessions(d: date) -> list[dict]:
     return kept
 
 
+def _dt(ts: float) -> datetime:
+    return datetime.fromtimestamp(ts, vm.tz())
+
+
 def _score_day(d: date) -> None:
     goal, need = db.setting("step_goal"), db.setting("sleep_need_min")
     prior = db.days(d - timedelta(14), d - timedelta(1))
@@ -132,6 +136,13 @@ def _score_day(d: date) -> None:
     st = [v for t, v in vm.series("biometric_stress", vm.midnight(d), end, "30m").items() if v > 0 and awake(t)]
     zones = scoring.stress_zones(st) if st else None
     inputs["stress_load"] = zones and zones["stressed_hours"]
+    br = db.breaths(d, d)
+    for b in br:  # 1m step + 1m lookback = each raw stress sample once; "after" fills in on a later sync
+        sw = vm.series("biometric_stress", _dt(b["start"] - 3600), _dt(b["end"] + 3600), "1m", "1m")
+        sides = [[v for t, v in sw.items() if v > 0 and ok(t)] for ok in
+                 (lambda t: t < b["start"], lambda t: b["end"] < t <= b["end"] + 3600)]
+        db.set_breath_stress(b["start"], *(mean(x) if x else None for x in sides))
+    inputs["breath_min"] = sum(((b["end"] - b["start"]) / 60 for b in br), 0.0)
 
     cfg = db.settings()
     mh = cardio.max_hr(int(cfg["birth_year"]), d) if cfg["birth_year"] else None
@@ -245,6 +256,8 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
     row = next((r for r in rows if r["date"] == d), None) or {"c": {}, "inputs": {}}
     sig = row["c"].get("signals") or {"index": None, "level": None, "flags": {}, "streak": 0, "reason": "baseline"}
     m, days = notify.cardio_base(d)
+    wk = db.breaths(d - timedelta(6), d)
+    mins = lambda xs: round(sum((b["end"] - b["start"]) / 60 for b in xs), 1)
     status = "needs_age" if not db.settings()["birth_year"] else "learning" if m is None else "ok"
     return {
         "status": "ok" if n >= 5 else "learning", "date": d.isoformat(), "baseline_days": f"{n}/14",
@@ -260,6 +273,8 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
                    "minutes": (row["c"].get("cardio") or {}).get("minutes"), "days": days,
                    "target": cardio.target(row.get("readiness_score"), m) if status == "ok" else None},
         "workouts": row["c"].get("workouts", []),
+        **({"breathe": {"today_min": mins([b for b in wk if _dt(b["start"]).date() == d]), "week_min": mins(wk),
+                        "sessions": len(wk)}} if wk or db.query("SELECT 1 FROM breath_session LIMIT 1") else {}),
         "tonight": {"bedtime": notify.bedtime_window(_today()), "debt": debt(_today()), "plan": notify.tonight(_today())},
     }
 
@@ -304,7 +319,8 @@ def delete_sleep(day: str = Query(..., alias="date")) -> dict:
 
 
 SCORES = {"sleep": "sleep_score", "readiness": "readiness_score", "activity": "activity_score"}
-INPUTS = ("rhr", "hrv", "steps", "sleep_min", "stress_load", "bed_start", "cardio_load", "restorative_min", "fitness")
+INPUTS = ("rhr", "hrv", "steps", "sleep_min", "stress_load", "bed_start", "cardio_load", "restorative_min", "fitness",
+          "breath_min")
 
 
 @api.get("/trends")
@@ -431,7 +447,39 @@ def hr(hours: int = 24, day: str | None = Query(None, alias="date")) -> dict:
         s = vm.series("biometric_hr_bpm", vm.midnight(d), min(vm.midnight(d + timedelta(1)), now), "5m")
     else:
         s = vm.series("biometric_hr_bpm", now - timedelta(hours=min(max(hours, 1), 48)), now, "5m")
-    return {"points": [{"t": t, "bpm": v} for t, v in s.items() if v > 0]}
+    return {"points": [{"t": t, "bpm": v} for t, v in s.items() if v > 0], **({"breaths": _breaths(d)} if day else {})}
+
+
+def _breaths(d: date) -> list[dict]:
+    return [{**b, "points": [{"t": t, "bpm": v} for t, v in
+                             vm.series("biometric_breath_hr_bpm", _dt(b["start"]), _dt(b["end"]), "5s").items()]}
+            for b in db.breaths(d, d)]
+
+
+def _int(v: object, lo: int, hi: int) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+
+
+@api.post("/breathe")
+def breathe(body: dict = Body(...)) -> dict:
+    start, end, rounds, samples = body.get("start"), body.get("end"), body.get("rounds"), body.get("samples", [])
+    feel = body.get("feel_before"), body.get("feel_after")
+    if (not _int(start, 0, 2**40) or not _int(end, start + 1, start + 3600) or not _int(rounds, 1, 30)
+            or not all(f is None or _int(f, 1, 5) for f in feel)):
+        raise HTTPException(422, "bad session")
+    if not isinstance(samples, list) or len(samples) > 1200 or not all(
+            isinstance(p, list) and len(p) == 2 and _num(p[0], start, end) and _num(p[1], 30, 220) for p in samples):
+        raise HTTPException(422, "bad samples")
+    bpm = [p[1] for p in sorted(samples)]
+    db.add_breath({"start": start, "end": end, "rounds": rounds, "hr_start": bpm[0] if bpm else None,
+                   "hr_end": bpm[-1] if bpm else None, "hr_min": min(bpm, default=None), "feel_before": feel[0],
+                   "feel_after": feel[1], "stress_before": None, "stress_after": None})
+    if samples:
+        vm.forward_import("".join(f'biometric_breath_hr_bpm{{device="colmi_r02"}} {b} {int(t * 1000)}\n'
+                                  for t, b in samples).encode())
+    d = _dt(start).date()
+    rescore({d})
+    return next(b for b in _breaths(d) if b["start"] == start)
 
 
 @api.get("/activity")
@@ -478,7 +526,7 @@ def add_journal(body: dict = Body(...)) -> dict:
         d = date.fromisoformat(body.get("date"))
     except (TypeError, ValueError):
         raise HTTPException(422, "bad date")
-    if d > _today() or kind not in db.KINDS:
+    if d > _today() or kind not in db.KINDS or kind == "breathe":  # sessions come only from POST /breathe
         raise HTTPException(422, "bad date or kind")
     if note is not None and (not isinstance(note, str) or len(note) > 200):
         raise HTTPException(422, "bad note")
@@ -511,7 +559,7 @@ def journal_insights() -> dict:
     start = d - timedelta(insights.DAYS)
     rows, entries = db.days(start, d), db.journal(start.isoformat())
     hr = _day_hr(rows, start, d) if any(e["kind"] == "medication" for e in entries) else {}
-    return {"kinds": insights.kinds(rows, entries, d, hr, db.settings()["medication_started"])}
+    return {"kinds": insights.kinds(rows, entries, d, hr, db.settings()["medication_started"], db.breaths(start, d))}
 
 
 @api.get("/journal/bp")

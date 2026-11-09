@@ -2,17 +2,20 @@ import json
 import os
 import sqlite3
 from contextlib import closing
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from . import vm
 
-SCHEMA = """
+# several medication doses and breathing sessions a day; other kinds once
+INDEX = ("CREATE UNIQUE INDEX IF NOT EXISTS journal_day_kind ON journal(date, kind) "
+         "WHERE kind NOT IN ('medication', 'breathe')")
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS daily(date TEXT PRIMARY KEY, sleep_score REAL, readiness_score REAL,
   activity_score REAL, contributors TEXT, computed_at TEXT);
 CREATE TABLE IF NOT EXISTS baselines(metric TEXT, date TEXT, value REAL, PRIMARY KEY(metric, date));
 CREATE TABLE IF NOT EXISTS journal(id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, kind TEXT, value TEXT,
   note TEXT, ts INTEGER);
-CREATE UNIQUE INDEX IF NOT EXISTS journal_day_kind ON journal(date, kind) WHERE kind != 'medication';
+{INDEX};
 CREATE TABLE IF NOT EXISTS notifications(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, title TEXT,
   body TEXT, created_at TEXT, acked_at TEXT, extra TEXT);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
@@ -21,6 +24,9 @@ INSERT OR IGNORE INTO settings VALUES('step_goal','8000'),('sleep_need_min','450
   ('wake_weekday',''),('wake_weekend','');
 CREATE TABLE IF NOT EXISTS workout_kind(date TEXT, start INTEGER, kind TEXT, PRIMARY KEY(date, start));
 CREATE TABLE IF NOT EXISTS sleep_override(date TEXT PRIMARY KEY, start INTEGER, "end" INTEGER);
+CREATE TABLE IF NOT EXISTS breath_session(start INTEGER PRIMARY KEY, "end" INTEGER, rounds INTEGER,
+  hr_start REAL, hr_end REAL, hr_min REAL, feel_before INTEGER, feel_after INTEGER, stress_before REAL,
+  stress_after REAL);
 """
 
 
@@ -30,7 +36,7 @@ def connect() -> sqlite3.Connection:
     return con
 
 
-KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "sick", "travel", "stress", "medication", "bp", "note")
+KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "sick", "travel", "stress", "medication", "bp", "note", "breathe")
 TAG_ALIASES = {"caffeine": "caffeine_late"}
 
 
@@ -40,6 +46,9 @@ def init() -> None:
         if "extra" not in {r[1] for r in con.execute("PRAGMA table_info(notifications)")}:
             con.execute("ALTER TABLE notifications ADD COLUMN extra TEXT")
         _migrate_tags(con)
+        if "breathe" not in con.execute("SELECT sql FROM sqlite_master WHERE name='journal_day_kind'").fetchone()[0]:
+            con.execute("DROP INDEX IF EXISTS journal_day_kind")
+            con.execute(INDEX)
 
 
 def _migrate_tags(con: sqlite3.Connection) -> None:
@@ -141,3 +150,25 @@ def set_sleep_override(d: date, start: int, end: int) -> None:
 def delete_sleep_override(d: date) -> None:
     with closing(connect()) as con, con:
         con.execute("DELETE FROM sleep_override WHERE date=?", (d.isoformat(),))
+
+
+def add_breath(row: dict) -> None:
+    """Session row + its journal row; a re-sent session (same start) replaces the row and keeps one journal entry."""
+    t = datetime.fromtimestamp(row["start"], vm.tz())
+    with closing(connect()) as con, con:
+        con.execute("INSERT OR REPLACE INTO breath_session VALUES(:start, :end, :rounds, :hr_start, :hr_end, :hr_min, "
+                    ":feel_before, :feel_after, :stress_before, :stress_after)", row)
+        con.execute("INSERT INTO journal(date, kind, value, note, ts) SELECT ?, 'breathe', ?, NULL, ? "
+                    "WHERE NOT EXISTS (SELECT 1 FROM journal WHERE kind='breathe' AND ts=?)",
+                    (t.date().isoformat(), t.strftime("%H:%M"), row["start"], row["start"]))
+
+
+def breaths(start: date, end: date) -> list[dict]:
+    """Sessions starting on local dates [start, end], ascending."""
+    lo, hi = vm.midnight(start).timestamp(), vm.midnight(end + timedelta(1)).timestamp()
+    return [dict(r) for r in query("SELECT * FROM breath_session WHERE start >= ? AND start < ? ORDER BY start", (lo, hi))]
+
+
+def set_breath_stress(start: int, before: float | None, after: float | None) -> None:
+    with closing(connect()) as con, con:
+        con.execute("UPDATE breath_session SET stress_before=?, stress_after=? WHERE start=?", (before, after, start))

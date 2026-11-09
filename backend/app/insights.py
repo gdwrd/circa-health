@@ -5,7 +5,7 @@ from statistics import mean, median
 from . import vm
 
 DAYS, MIN_N = 90, 3
-NIGHT_KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "stress", "travel")
+NIGHT_KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "stress", "travel", "breathe")
 NIGHT = ("sleep_score", "deep_min", "rem_min", "hrv", "rhr", "total_min", "awake_min", "bed_start")
 MED = ("day_hr", "rhr", "hrv", "bed_start", "total_min", "sleep_score")
 UNITS = {"sleep_score": "pts", "readiness_score": "pts", "deep_min": "min", "rem_min": "min", "total_min": "min", "awake_min": "min",
@@ -66,8 +66,9 @@ def _hhmm(m: float) -> str:
     return f"{int(m) // 60:02d}:{int(m) % 60:02d}"
 
 
-def kinds(rows: list[dict], entries: list[dict], today: date, day_hr: dict[date, float], med_started: str) -> dict:
-    """rows: db.days over the window; entries: db.journal; day_hr: mean awake HR per date."""
+def kinds(rows: list[dict], entries: list[dict], today: date, day_hr: dict[date, float], med_started: str,
+          breaths: list[dict]) -> dict:
+    """rows: db.days over the window; entries: db.journal; day_hr: mean awake HR per date; breaths: db.breaths."""
     nt = nights(rows)
     days = [today - timedelta(DAYS - i) for i in range(DAYS)]  # d in [today-90, today-1]; night d+1 <= today
     logged: dict[str, set[date]] = {}
@@ -103,6 +104,9 @@ def kinds(rows: list[dict], entries: list[dict], today: date, day_hr: dict[date,
     split = median(t for t, _ in timed) if timed else None
     by_time = compare([o for t, o in timed if t > split], [o for t, o in timed if t <= split], ("bed_start", "total_min"))
     out["medication"]["by_time"] = {**by_time, "split": None if split is None else _hhmm(split)}  # with = after split
+    drop = [b["stress_after"] - b["stress_before"] for b in breaths
+            if b["stress_before"] is not None and b["stress_after"] is not None]
+    out["breathe"]["stress"] = {"delta": round(mean(drop), 1), "n": len(drop)} if len(drop) >= MIN_N else None
     return out
 
 

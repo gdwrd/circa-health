@@ -38,7 +38,7 @@ def test_night_kind_pairs_with_next_night_and_learning() -> None:
     alc = [TODAY - timedelta(i) for i in (3, 6, 9)]
     rows = [row(TODAY - timedelta(i), hrv=30 if TODAY - timedelta(i + 1) in alc else 50,
                 bed_min=30 if TODAY - timedelta(i + 1) in alc else -30) for i in range(20)]
-    k = insights.kinds(rows, [entry(d, "alcohol") for d in alc] + [entry(alc[0], "workout")], TODAY, {}, "")
+    k = insights.kinds(rows, [entry(d, "alcohol") for d in alc] + [entry(alc[0], "workout")], TODAY, {}, "", [])
     a = k["alcohol"]
     assert a["status"] == "ok" and a["n_with"] == 3 and a["n_without"] == 17  # 20 nights with a next row
     m = {e["metric"]: e for e in a["all"]}
@@ -54,7 +54,7 @@ def test_sick_strain_window() -> None:
     sick = [TODAY - timedelta(i) for i in (5, 10, 15)]
     near = {s + timedelta(j) for s in sick for j in (-1, 0, 1)}
     rows = [row(TODAY - timedelta(i), strain=60 if TODAY - timedelta(i) in near else 10) for i in range(30)]
-    s = insights.kinds(rows, [entry(d, "sick") for d in sick], TODAY, {}, "")["sick"]
+    s = insights.kinds(rows, [entry(d, "sick") for d in sick], TODAY, {}, "", [])["sick"]
     e = s["all"][0]
     assert s["status"] == "ok" and e["metric"] == "strain" and e["with"] == 60 and e["without"] == 10 and e["strong"]
 
@@ -67,14 +67,14 @@ def test_medication_dose_vs_none_and_dose_time() -> None:
     rows = [row(TODAY - timedelta(i), bed_min=60 if TODAY - timedelta(i + 1) in late else 0) for i in range(30)]
     hr = {TODAY - timedelta(i): 80.0 if TODAY - timedelta(i) in dose else 70.0 for i in range(30)}
     entries = [entry(d, "medication", t) for d, t in dose.items()] + [entry(TODAY - timedelta(2), "medication", "20:00")]
-    m = insights.kinds(rows, entries, TODAY, hr, start.isoformat())["medication"]
+    m = insights.kinds(rows, entries, TODAY, hr, start.isoformat(), [])["medication"]
     e = {x["metric"]: x for x in m["all"]}
     assert m["n_with"] == 6 and m["n_without"] == 14  # days before medication_started are excluded
     assert e["day_hr"]["delta"] == 10 and e["day_hr"]["unit"] == "bpm"
     bt = m["by_time"]
     assert bt["split"] == "10:00" and bt["n_with"] == 3 and bt["n_without"] == 3  # first dose of the day counts
     assert {x["metric"]: x["delta"] for x in bt["all"]}["bed_start"] == 60
-    lone = insights.kinds(rows, entries[:2], TODAY, hr, start.isoformat())["medication"]
+    lone = insights.kinds(rows, entries[:2], TODAY, hr, start.isoformat(), [])["medication"]
     assert lone["status"] == "learning" and lone["by_time"]["status"] == "learning"
 
 
@@ -99,3 +99,9 @@ def test_routes(tmp_path, monkeypatch) -> None:
         bp = c.get("/journal/bp?days=30", headers=H).json()["points"]
         assert [(p["sys"], p["dia"]) for p in bp] == [(128, 82), (120, 80)]
         assert len(c.get("/journal/bp?days=1", headers=H).json()["points"]) == 1
+
+
+def test_breathe_stress_delta_needs_three() -> None:
+    br = [{"stress_before": 60, "stress_after": a} for a in (40, 50, 45)] + [{"stress_before": 60, "stress_after": None}]
+    assert insights.kinds([], [], TODAY, {}, "", br)["breathe"]["stress"] == {"delta": -15.0, "n": 3}
+    assert insights.kinds([], [], TODAY, {}, "", br[1:])["breathe"]["stress"] is None
