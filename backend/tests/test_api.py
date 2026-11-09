@@ -122,7 +122,7 @@ def test_activity_hours(monkeypatch) -> None:
         h = c.get("/activity?date=2026-11-03", headers=H).json()
         assert lookbacks["biometric_steps"] == "59m"  # an empty hour must not repeat the hour before
         assert h["date"] == "2026-11-03" and len(h["hours"]) == 24
-        assert h["hours"][9] == {"h": 9, "steps": 1200.0, "calories": 80.0, "distance_m": 900.0, "worn": True}
+        assert h["hours"][9] == {"h": 9, "steps": 1200.0, "calories": 0.8, "distance_m": 900.0, "worn": True}  # raw / 100 = kcal
         assert h["hours"][8] == {"h": 8, "steps": 0.0, "calories": 0.0, "distance_m": 0.0, "worn": False}
         assert [x["h"] for x in h["hours"] if x["worn"]] == [9]
         assert c.get("/activity?date=bad", headers=H).status_code == 422

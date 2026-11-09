@@ -454,7 +454,7 @@
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 22 },
       "targets": [
-        { "expr": "biometric_calories", "refId": "A", "legendFormat": "kcal" }
+        { "expr": "biometric_calories / 100", "refId": "A", "legendFormat": "kcal" }
       ],
       "fieldConfig": {
         "defaults": {
@@ -539,7 +539,7 @@
       "datasource": { "type": "prometheus", "uid": "victoriametrics" },
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 30 },
       "targets": [
-        { "expr": "sum_over_time(biometric_calories[24h])", "refId": "A", "legendFormat": "kcal" }
+        { "expr": "sum_over_time(biometric_calories[24h]) / 100", "refId": "A", "legendFormat": "kcal" }
       ],
       "fieldConfig": {
         "defaults": {

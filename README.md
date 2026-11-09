@@ -67,7 +67,7 @@ project is a minimal Android app whose only job is:
 | `biometric_stress`           | 30 min             | Ring's stress score (0–100)    |
 | `biometric_spo2_pct`         | hourly             | Blood oxygen %                 |
 | `biometric_steps`            | hourly             | Steps per hour bucket          |
-| `biometric_calories`         | hourly             | kcal per hour bucket           |
+| `biometric_calories`         | hourly             | Raw ring units per hour; ÷ 100 = kcal |
 | `biometric_distance_meters`  | hourly             | Meters per hour bucket         |
 | `biometric_sleep_total_min`  | per session        | Minutes asleep                 |
 | `biometric_sleep_deep_min`   | per session        | Minutes in deep sleep          |

@@ -120,7 +120,7 @@ object ColmiProtocol {
     // Battery: level 0–100, charging true/false.
     data class BatteryStatus(val level: Int, val charging: Boolean)
 
-    // Activity: steps/calories/distance for one hourly slot.
+    // Activity: steps/calories/distance for one hourly slot. calories is raw ring units (÷ 100 = kcal, applied by the backend).
     data class ActivitySample(
         val timestampMs: Long,
         val steps: Int,

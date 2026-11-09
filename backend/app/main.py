@@ -489,7 +489,9 @@ def activity(day: str | None = Query(None, alias="date")) -> dict:
     m = {k: _hourly(f"biometric_{k}", d) for k in ("steps", "calories", "distance_meters")}
     raw = vm.series("biometric_hr_bpm", vm.midnight(d), vm.midnight(d + timedelta(1)) - timedelta(seconds=1), "5m")
     worn = {datetime.fromtimestamp(t, vm.tz()).hour for t, v in raw.items() if v > 0}
-    return {"date": d.isoformat(), "hours": [{"h": h, "steps": m["steps"].get(h, 0.0), "calories": m["calories"].get(h, 0.0),
+    # biometric_calories is raw ring units (tens of small calories on current firmware): / 100 = kcal.
+    # shortcut: old firmware (no new-calorie flag in the 0xf0 header) sends small calories, / 1000; read the flag if that ring shows up.
+    return {"date": d.isoformat(), "hours": [{"h": h, "steps": m["steps"].get(h, 0.0), "calories": m["calories"].get(h, 0.0) / 100,
                                               "distance_m": m["distance_meters"].get(h, 0.0), "worn": h in worn}
                                              for h in range(n)]}
 

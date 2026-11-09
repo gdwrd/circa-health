@@ -83,6 +83,12 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             return Result.failure()
         }
 
+        if (liveHrActive) {
+            log("Skipped: ring busy with live heart rate")
+            scheduleNext(applicationContext)
+            return Result.success()
+        }
+
         // Deep sync re-reads the 7 days the ring keeps: daily from 04:00, or when the last good push is over 24 h old.
         // Re-sending is safe: VM dedup keeps the larger sample per series+timestamp and slot values only grow.
         val now = System.currentTimeMillis()
@@ -527,6 +533,8 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
     }
 
     companion object {
+        /** True while runLiveHr (Measure now, Breathe) holds the ring; a sync then skips its turn. */
+        @Volatile internal var liveHrActive = false
 
         // Kick off the first sync immediately; each run re-schedules the next one.
         // PeriodicWorkRequest has a hard 15-min OS floor, so we use self-chaining

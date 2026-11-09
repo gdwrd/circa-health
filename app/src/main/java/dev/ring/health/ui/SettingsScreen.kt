@@ -612,6 +612,8 @@ internal suspend fun runLiveHr(
 ): String {
     val conn = ColmiConnection(ctx, address)
     var measurementStarted = false
+    var packets = 0; var valid = 0; var restarts = 0
+    SyncWorker.liveHrActive = true // a background sync would take the ring mid-stream
     return try {
         val connected = conn.connect()
         if (!connected) return "Could not connect (ring may be busy syncing — try again in a few seconds)"
@@ -625,21 +627,28 @@ internal suspend fun runLiveHr(
         var lastBpm = 0
         var notWorn = false
         val deadline = System.currentTimeMillis() + durationMs
+        var lastLock = System.currentTimeMillis() // last start request or valid reading
         loop@ while (currentCoroutineContext().isActive && System.currentTimeMillis() < deadline) {
+            // Long mode: the ring may stop streaming on its own. It needs ~25 s to lock on after a start
+            // (seen on the real ring), so ask again only after 30 s without a valid reading.
+            if (!stopWhenStable && System.currentTimeMillis() - lastLock >= 30_000) {
+                conn.writePacket(ColmiProtocol.liveHrStartRequest())
+                lastLock = System.currentTimeMillis(); restarts++
+            }
             val left = deadline - System.currentTimeMillis()
             val pkt = withTimeoutOrNull(if (stopWhenStable) left else minOf(left, 5_000)) {
                 conn.notifyV1.receive()
             }
             if (pkt == null) {
                 if (stopWhenStable || System.currentTimeMillis() >= deadline) break
-                // Long mode: the ring may stop streaming on its own; ask again after 5 s of silence.
-                conn.writePacket(ColmiProtocol.liveHrStartRequest())
                 continue
             }
+            packets++
             val parsed = ColmiProtocol.parseLiveHrPacket(pkt) ?: continue
             when (parsed.error) {
                 1 -> { notWorn = true; break@loop }
                 0 -> if (parsed.bpm > 0) {
+                    valid++; lastLock = System.currentTimeMillis()
                     lastBpm = parsed.bpm
                     onBpm(parsed.bpm)
                     onProgress("♥ ${parsed.bpm} bpm  (measuring…)")
@@ -668,6 +677,8 @@ internal suspend fun runLiveHr(
             }.onFailure { Log.w("Settings", "Live HR stop failed", it) }
         }
         conn.disconnect()
+        SyncWorker.liveHrActive = false
+        if (!stopWhenStable) SyncLog.add(ctx, "Breathe live HR: $packets packets, $valid valid, $restarts restarts")
     }
 }
 
