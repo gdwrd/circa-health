@@ -236,7 +236,9 @@ fun TodayScreen(backend: Boolean?, journalDate: String? = null, onJournalOpened:
         }
         d["cardio"].obj()?.let { item { CardioLoad(it) } }
         val tonight = d["tonight"].obj()
-        if (LocalTime.now().hour >= 18 && tonight != null) {
+        val plan = tonight?.get("plan").obj()
+        if (LocalTime.now().hour >= 18 && tonight != null && plan != null) item { TonightCard(plan, tonight["bedtime"].obj()) }
+        else if (LocalTime.now().hour >= 18 && tonight != null) {
             val b = tonight["bedtime"].obj()?.takeIf { it["status"].str() == "ok" }
             val start = b?.get("start_min").num()
             val end = b?.get("end_min").num()
@@ -748,10 +750,42 @@ internal fun iosSwitchColors(): SwitchColors {
     )
 }
 
+/** Tonight's bedtime plan (backend `tonight.plan`; times are minutes after noon). Tap opens the Sleep tab. */
+@Composable
+private fun TonightCard(p: JsonObject, bedtime: JsonObject?) {
+    val c = AppTheme.colors
+    val ctx = LocalContext.current
+    fun noon(m: Double?) = clock(LocalTime.NOON.plusMinutes((m ?: 0.0).roundToInt().toLong()))
+    val extra = p["extra_min"].num()?.roundToInt() ?: 0
+    val base = duration((p["sleep_min"].num()?.roundToInt() ?: 0) - extra)
+    val alarm = noon(p["wake_min"].num())
+    val foot = when (p["window"].str()) {
+        "later" -> bedtime?.get("start_min").num()?.let { "Your best nights start around ${noon(it)} — a little earlier tonight clears debt." }
+        "earlier" -> "Later than your best window; tonight's debt share keeps it short."
+        else -> null
+    }
+    InsetCard {
+        Column(
+            Modifier.fillMaxWidth().clickable {
+                // Same route as the notification deep link; MainActivity is singleTop.
+                ctx.startActivity(android.content.Intent(ctx, dev.ring.health.MainActivity::class.java).putExtra("open", "sleep"))
+            }.padding(AppSpace.l),
+        ) {
+            Text("Tonight", style = AppType.subhead, color = c.sleep)
+            Text("In bed by ${noon(p["in_bed_by_min"].num())}", style = AppType.title, modifier = Modifier.padding(top = AppSpace.xs))
+            Text(
+                if (extra > 0) "$base + ${duration(extra)} catch-up before your $alarm alarm" else "$base before your $alarm alarm",
+                style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.xs),
+            )
+            if (foot != null) Text(foot, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s))
+        }
+    }
+}
+
 /** Time picker dialog in the device's 12/24 h format; [onPick] gets "HH:MM". */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun TimePickDialog(initial: String, onDismiss: () -> Unit, onPick: (String) -> Unit) {
+internal fun TimePickDialog(initial: String, onDismiss: () -> Unit, onTurnOff: (() -> Unit)? = null, onPick: (String) -> Unit) {
     val c = AppTheme.colors
     val t = runCatching { LocalTime.parse(initial) }.getOrDefault(LocalTime.of(8, 0))
     val state = rememberTimePickerState(t.hour, t.minute, is24Hour = android.text.format.DateFormat.is24HourFormat(LocalContext.current))
@@ -760,7 +794,12 @@ internal fun TimePickDialog(initial: String, onDismiss: () -> Unit, onPick: (Str
     AlertDialog(
         onDismissRequest = onDismiss, containerColor = c.card,
         confirmButton = { TextButton({ onPick("%02d:%02d".format(Locale.ROOT, state.hour, state.minute)) }) { Text("Done", color = c.tint) } },
-        dismissButton = { TextButton(onDismiss) { Text("Cancel", color = c.tint) } },
+        dismissButton = {
+            Row {
+                if (onTurnOff != null) TextButton(onTurnOff) { Text("Turn off", color = c.tint) }
+                TextButton(onDismiss) { Text("Cancel", color = c.tint) }
+            }
+        },
         text = {
             TimePicker(
                 state,

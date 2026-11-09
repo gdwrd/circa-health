@@ -166,6 +166,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var pickTime by remember { mutableStateOf(false) }
     var pickWindow by remember { mutableStateOf(false) }
     var pickLowStep by remember { mutableStateOf(false) }
+    var pickWake by remember { mutableStateOf<String?>(null) } // "wake_weekday" | "wake_weekend"
     var birth by remember { mutableStateOf("") }
     LaunchedEffect(url, token) {
         med = Api.settings(ctx)
@@ -200,7 +201,8 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             }
         }
         item {
-            Section("You", "Your birth year sets your maximum heart rate for cardio zones. Goals shape the Activity and Sleep scores.") {
+            Section("You", "Your birth year sets your maximum heart rate for cardio zones. Goals shape the Activity and Sleep scores." +
+                if (med != null) " Wake times set tonight's bedtime plan; weekends mean the nights before Saturday and Sunday." else "") {
                 // Birth year is stored by the backend; without one there are no cardio zones.
                 if (med != null) {
                     FieldRow("Birth year", birth, "Not set", KeyboardType.Number) {
@@ -219,6 +221,12 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 FieldRow("Sleep need (h)", sleepNeed, "7.5", KeyboardType.Decimal) {
                     sleepNeed = it
                     it.replace(',', '.').toFloatOrNull()?.let { h -> ctx.sleepNeedHours = h }
+                }
+                med?.let { s ->
+                    listOf("wake_weekday" to "Wake up · weekdays", "wake_weekend" to "Wake up · weekends").forEach { (k, title) ->
+                        Hairline(Modifier.padding(start = AppSpace.l))
+                        ChevronRow(title, (s[k] as? JsonPrimitive)?.contentOrNull.orEmpty().ifEmpty { null }?.let(::clock) ?: "Off") { pickWake = k }
+                    }
                 }
             }
         }
@@ -377,6 +385,14 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         TimePickDialog((med?.get("medication_time") as? JsonPrimitive)?.contentOrNull ?: "08:00", { pickTime = false }) {
             pickTime = false
             patchMed("medication_time", JsonPrimitive(it))
+        }
+    }
+
+    pickWake?.let { k ->
+        val cur = (med?.get(k) as? JsonPrimitive)?.contentOrNull.orEmpty()
+        TimePickDialog(cur.ifEmpty { if (k == "wake_weekday") "07:00" else "08:00" }, { pickWake = null }, onTurnOff = { pickWake = null; patchMed(k, JsonPrimitive("")) }) {
+            pickWake = null
+            patchMed(k, JsonPrimitive(it))
         }
     }
 

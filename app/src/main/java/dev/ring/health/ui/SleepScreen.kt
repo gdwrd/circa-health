@@ -37,6 +37,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -156,7 +157,7 @@ fun SleepScreen(backend: Boolean?) {
                 }
             }
             // The window is from today, not this night, so it still shows.
-            d["bedtime"].obj()?.let { b -> item { Bedtime(b, week) } }
+            d["bedtime"].obj()?.let { b -> item { Bedtime(b, week, d["plan"].obj()) } }
         } else {
             val startS = ses["start"].num() ?: 0.0
             val endS = ses["end"].num() ?: startS
@@ -243,7 +244,7 @@ fun SleepScreen(backend: Boolean?) {
                 }
             }
             item { Regularity(d["contributors"].obj()?.get("regularity").num(), week, d["sleep_extra"].obj()?.get("regularity").obj()) }
-            d["bedtime"].obj()?.let { b -> item { Bedtime(b, week) } }
+            d["bedtime"].obj()?.let { b -> item { Bedtime(b, week, d["plan"].obj()) } }
             if (d.containsKey("sleep_extra")) item { BloodOxygen(d["sleep_extra"].obj()?.get("spo2").obj(), date != LocalDate.now()) }
         }
         val t = trend ?: return@LargeTitleScaffold
@@ -487,13 +488,14 @@ private fun Regularity(score: Double?, week: List<Pair<LocalDate, JsonObject?>>,
 
 /** Best-bedtime window (from today) on an 8 PM–2 AM strip, this week's bedtimes as dots. */
 @Composable
-private fun Bedtime(b: JsonObject, week: List<Pair<LocalDate, JsonObject?>>) {
+private fun Bedtime(b: JsonObject, week: List<Pair<LocalDate, JsonObject?>>, plan: JsonObject?) {
     val c = AppTheme.colors
     val nights = b["nights"].num()?.roundToInt() ?: 0
     val start = b["start_min"].num()
     val end = b["end_min"].num()
     val status = (b["status"] as? JsonPrimitive)?.contentOrNull
     val ok = status == "ok" && start != null && end != null
+    val inBed = plan?.get("in_bed_by_min").num()
     val measurer = rememberTextMeasurer()
     val label = AppType.footnote.copy(color = c.secondaryLabel)
     Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
@@ -506,12 +508,16 @@ private fun Bedtime(b: JsonObject, week: List<Pair<LocalDate, JsonObject?>>) {
                     status == "flat" -> "No clear best bedtime yet" to "Your sleep looks similar at every bedtime over $nights nights."
                     else -> "Learning your best bedtime" to "$nights/14 nights — keep wearing the ring to bed."
                 }
+                if (plan != null) Text(
+                    "Tonight: in bed by ${noonClock(inBed ?: 0.0)} · up at ${noonClock(plan["wake_min"].num() ?: 0.0)}",
+                    style = AppType.subhead, modifier = Modifier.padding(bottom = AppSpace.xs),
+                )
                 Text(head, style = AppType.headline)
                 if (ok) {
                     val dots = week.mapNotNull { (_, s) -> s?.get("start").num()?.let { afterNoon(it).toDouble() } }
                     // 8 PM–2 AM, stretched to whole hours when the window or a bedtime falls outside.
-                    val lo = (listOf(480.0, start!!) + dots).min().let { floor(it / 60) * 60 }
-                    val hi = (listOf(840.0, end!!) + dots).max().let { ceil(it / 60) * 60 }
+                    val lo = (listOf(480.0, start!!) + dots + listOfNotNull(inBed)).min().let { floor(it / 60) * 60 }
+                    val hi = (listOf(840.0, end!!) + dots + listOfNotNull(inBed)).max().let { ceil(it / 60) * 60 }
                     Canvas(Modifier.fillMaxWidth().height(40.dp).padding(top = AppSpace.m)) {
                         val h = 8.dp.toPx()
                         val cy = h / 2 + 1.dp.toPx()
@@ -522,6 +528,7 @@ private fun Bedtime(b: JsonObject, week: List<Pair<LocalDate, JsonObject?>>) {
                             drawCircle(c.card, 4.dp.toPx(), Offset(x(m), cy))
                             drawCircle(c.sleep, 3.dp.toPx(), Offset(x(m), cy))
                         }
+                        inBed?.let { drawLine(c.label, Offset(x(it), cy - h), Offset(x(it), cy + h), 2.dp.toPx(), StrokeCap.Round) }
                         listOf(lo, (lo + hi) / 2, hi).forEachIndexed { i, m ->
                             val lm = measurer.measure(noonClock(m).replace(":00 ", " "), label)
                             val lx = when (i) { 0 -> 0f; 1 -> x(m) - lm.size.width / 2f; else -> size.width - lm.size.width }
