@@ -169,11 +169,12 @@ def _duration(minutes: float) -> str:
 
 
 def _morning(now: datetime, dates: set[date]) -> None:
-    """Once per day, 30 min after today's night ended and before 14:00 local; tap opens the Sleep tab."""
+    """Once per day, 30 min after today's night ended, 05:00-14:00 local; tap opens the Sleep tab."""
     row = next(iter(db.days(now.date(), now.date())), None)
     n = row and row["c"].get("session")
     asleep = row and row["inputs"].get("sleep_min")
-    if not n or asleep is None or now.timestamp() < n["end"] + 1800 or now.hour >= 14 or _fired("morning", now):
+    # before 05:00 the "night" is a stub the ring published mid-sleep (a stir closes a segment)
+    if not n or asleep is None or now.timestamp() < n["end"] + 1800 or not 5 <= now.hour < 14 or _fired("morning", now):
         return  # no sleep_min: night not scored yet, the next sync after the rescore fires it
     score = row["sleep_score"]
     body = f"{_duration(asleep)} asleep"

@@ -253,6 +253,16 @@ def test_morning_not_after_two_pm(monkeypatch) -> None:
     assert "morning" not in kinds()
 
 
+def test_morning_not_before_five(monkeypatch) -> None:
+    """A stub the ring publishes mid-sleep (ended 01:47) must not pass as the night at 02:20."""
+    seed_morning()
+    row = db.days(D, D)[0]
+    db.save_day(D, (50, 77, None), row["c"] | {"session": row["c"]["session"] | {"end": row["c"]["session"]["start"] + 3420}}, {})
+    at(monkeypatch, 2, 20)
+    notify.evaluate(set())
+    assert "morning" not in kinds()
+
+
 def test_morning_null_scores(monkeypatch) -> None:
     seed_morning(None, None)
     at(monkeypatch, 9)

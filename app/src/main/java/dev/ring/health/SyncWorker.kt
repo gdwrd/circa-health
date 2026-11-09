@@ -184,9 +184,9 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                     ?.let { applicationContext.lastStressMs = it }
                 spo2Samples.maxOfOrNull { it.timestampMs }
                     ?.let { applicationContext.lastSpo2Ms = it }
-                sleepSessions.maxOfOrNull { it.startMs }
+                sleepSessions.maxOfOrNull { it.endMs }
                     ?.let { applicationContext.lastSleepMs = it }
-                applicationContext.sleepSchema = 3
+                applicationContext.sleepSchema = 4
 
                 runCatching { postPending() }.onSuccess { n -> if (n > 0) log("Server: showed $n notifications") }
             }
@@ -353,7 +353,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         val lastStressMs   = ctx.lastStressMs
         val lastSpo2Ms     = ctx.lastSpo2Ms
         // Once after an upgrade that changed sleep parsing: re-send the sessions the ring still holds.
-        val lastSleepMs    = if (ctx.sleepSchema < 3) 0L else ctx.lastSleepMs
+        val lastSleepMs    = if (ctx.sleepSchema < 4) 0L else ctx.lastSleepMs
 
         // ── Battery (always push — instantaneous reading) ─────────────────
         if (battery != null) {
@@ -389,8 +389,10 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             metrics += Metric("biometric_spo2_pct", labels, s.pct.toDouble(), s.timestampMs)
         }
 
-        // ── Sleep: total + stage breakdown for every new session ─────────
-        val newSessions = sessions.filter { it.startMs > lastSleepMs && it.durationMinutes > 0 }
+        // ── Sleep: total + stage breakdown for every new or grown session ──
+        // Watermark is the session END: the ring extends tonight's record (same start) while you sleep,
+        // and VM dedup keeps the larger sample, so re-sending the grown session replaces the stub.
+        val newSessions = sessions.filter { it.endMs > lastSleepMs && it.durationMinutes > 0 }
         for (s in newSessions) {
             metrics += Metric("biometric_sleep_total_min", labels, s.durationMinutes.toDouble(), s.startMs)
 
