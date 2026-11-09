@@ -8,11 +8,12 @@ DAYS, MIN_N = 90, 3
 NIGHT_KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "stress", "travel")
 NIGHT = ("sleep_score", "deep_min", "rem_min", "hrv", "rhr", "total_min", "awake_min", "bed_start")
 MED = ("day_hr", "rhr", "hrv", "bed_start", "total_min", "sleep_score")
-UNITS = {"sleep_score": "pts", "deep_min": "min", "rem_min": "min", "total_min": "min", "awake_min": "min",
+UNITS = {"sleep_score": "pts", "readiness_score": "pts", "deep_min": "min", "rem_min": "min", "total_min": "min", "awake_min": "min",
          "bed_start": "min", "hrv": "ms", "rhr": "bpm", "day_hr": "bpm", "strain": "pts"}
 FLOORS = {"rhr": 1.5, "day_hr": 1.5, "hrv": 5.0, "awake_min": 10.0,  # same floors as scoring.FLOORS
           # minimum spreads so near-identical values (5 min grid bed times) are never "strong"
-          "bed_start": 15.0, "total_min": 15.0, "deep_min": 5.0, "rem_min": 5.0, "sleep_score": 3.0, "strain": 5.0}
+          "bed_start": 15.0, "total_min": 15.0, "deep_min": 5.0, "rem_min": 5.0, "sleep_score": 3.0, "readiness_score": 3.0,
+          "strain": 5.0}
 
 
 def effect(with_: list[float], without: list[float], floor: float = 0.0) -> dict | None:
@@ -35,7 +36,8 @@ def nights(rows: list[dict]) -> dict[date, dict]:
         if not s:
             continue
         st = datetime.fromtimestamp(s["start"], vm.tz())
-        out[r["date"]] = {"sleep_score": r["sleep_score"], "rhr": r["inputs"].get("rhr"), "hrv": r["inputs"].get("hrv"),
+        out[r["date"]] = {"sleep_score": r["sleep_score"], "readiness_score": r.get("readiness_score"),
+                          "rhr": r["inputs"].get("rhr"), "hrv": r["inputs"].get("hrv"),
                           **{k: s[k] for k in ("deep_min", "rem_min", "total_min", "awake_min")},
                           # minutes from midnight, 23:30 -> -30. shortcut: 5 min grid start, upgrade with C1 inputs.bed_start
                           "bed_start": st.hour * 60 + st.minute - (1440 if st.hour >= 12 else 0),

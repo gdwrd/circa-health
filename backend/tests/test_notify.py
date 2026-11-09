@@ -295,3 +295,59 @@ def test_bedtime_uses_best_window(monkeypatch, env) -> None:
     notify.evaluate(set())
     (n,) = notify.pending()
     assert (n["title"], n["body"]) == ("Wind down", "Your best nights start around 22:00.")
+
+
+def seed_month(n: int, workouts: int = 0) -> None:
+    """n scored days in October 2026, the first carrying `workouts` workouts."""
+    for i in range(n):
+        ws = [{"minutes": 30, "load": 2.0, "kind": "walk"}] * (workouts if i == 0 else 0)
+        db.save_day(date(2026, 10, 1 + i), (78, 74, 69), {"workouts": ws}, {})
+
+
+def test_monthly_fires_on_the_first_once(monkeypatch) -> None:
+    seed_month(12, workouts=12)
+    first = date(2026, 11, 1)
+    at(monkeypatch, 9, day=first)
+    notify.evaluate(set())
+    notify.evaluate(set())
+    (n,) = [x for x in notify.pending() if x["kind"] == "monthly"]
+    assert n["title"] == "Your October" and n["body"] == "Sleep 78 · Readiness 74 · Activity 69 avg. 12 workouts."
+    assert n["extra"] == {"open": "month"}
+    at(monkeypatch, 9, day=first + timedelta(1))
+    notify.evaluate(set())
+    assert [k for k in kinds() if k == "monthly"] == ["monthly"]
+
+
+def test_monthly_not_on_the_second_or_under_ten_days(monkeypatch) -> None:
+    seed_month(12)
+    at(monkeypatch, 9, day=date(2026, 11, 2))
+    notify.evaluate(set())
+    at(monkeypatch, 13, day=date(2026, 11, 1))
+    notify.evaluate(set())
+    assert "monthly" not in kinds()
+
+
+def test_monthly_needs_ten_days(monkeypatch) -> None:
+    seed_month(9)
+    at(monkeypatch, 9, day=date(2026, 11, 1))
+    notify.evaluate(set())
+    assert "monthly" not in kinds()
+
+
+def test_muted_kind_skipped_other_still_fires(monkeypatch) -> None:
+    seed(D, 82, {"resting_hr": 90.0})
+    db.set_settings({"muted": "readiness,weekly"})
+    at(monkeypatch, 8)
+    notify.evaluate({D})
+    assert "readiness" not in kinds()
+    db.set_settings({"muted": "bedtime"})
+    notify.evaluate({D})
+    assert "readiness" in kinds()
+
+
+def test_bad_muted_422() -> None:
+    with TestClient(app) as c:
+        for bad in ("nope", "readiness,nope", "readiness, bedtime", 1, None):
+            assert c.patch("/settings", json={"muted": bad}, headers=H).status_code == 422, bad
+        assert c.patch("/settings", json={"muted": "monthly,checkin"}, headers=H).json()["muted"] == "monthly,checkin"
+        assert c.patch("/settings", json={"muted": ""}, headers=H).json()["muted"] == ""

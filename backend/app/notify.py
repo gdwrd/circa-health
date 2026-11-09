@@ -107,6 +107,19 @@ def _inactivity(now: datetime, dates: set[date]) -> None:
         _add("inactivity", "Time to move", "No steps in the last 2 hours.", now)
 
 
+def _scored(start: date, end: date) -> list[dict]:
+    return [r for r in db.days(start, end) if any(r[k] is not None for k in ("sleep_score", "readiness_score", "activity_score"))]
+
+
+def _avg(rows: list[dict]) -> str:
+    parts = []
+    for name, k in (("Sleep", "sleep_score"), ("Readiness", "readiness_score"), ("Activity", "activity_score")):
+        v = [r[k] for r in rows if r[k] is not None]
+        if v:
+            parts.append(f"{name} {round(sum(v) / len(v))}")
+    return " · ".join(parts) + " avg."
+
+
 def _weekly(now: datetime, dates: set[date]) -> None:
     """Monday 08-12 local: averages of the previous 7 days, once (no weekly row in the last 6 days)."""
     if now.weekday() or not 8 <= now.hour < 12:
@@ -115,20 +128,30 @@ def _weekly(now: datetime, dates: set[date]) -> None:
     if last and now - datetime.fromisoformat(last[0]["created_at"]) < timedelta(days=6):
         return
     d = now.date()
-    rows = [r for r in db.days(d - timedelta(7), d - timedelta(1))
-            if any(r[k] is not None for k in ("sleep_score", "readiness_score", "activity_score"))]
+    rows = _scored(d - timedelta(7), d - timedelta(1))
     if len(rows) < 3:
         return
-    parts = []
-    for name, k in (("Sleep", "sleep_score"), ("Readiness", "readiness_score"), ("Activity", "activity_score")):
-        v = [r[k] for r in rows if r[k] is not None]
-        if v:
-            parts.append(f"{name} {round(sum(v) / len(v))}")
-    body = " · ".join(parts) + " avg."
+    body = _avg(rows)
     sleeps = [r for r in rows if r["sleep_score"] is not None]
     if sleeps:
         body += f" Best night: {max(sleeps, key=lambda r: r['sleep_score'])['date']:%a}."
     _add("weekly", "Your week", body, now, {"open": "trends"})
+
+
+def _monthly(now: datetime, dates: set[date]) -> None:
+    """Day 1, 08-12 local: averages of the previous month, once (no monthly row in the last 20 days), >= 10 scored days."""
+    if now.day != 1 or not 8 <= now.hour < 12:
+        return
+    last = db.query("SELECT created_at FROM notifications WHERE kind='monthly' ORDER BY id DESC LIMIT 1")
+    if last and now - datetime.fromisoformat(last[0]["created_at"]) < timedelta(days=20):
+        return
+    end = now.date() - timedelta(1)
+    rows = _scored(end.replace(day=1), end)
+    if len(rows) < 10:
+        return
+    n = sum(len(r["c"].get("workouts") or []) for r in db.days(end.replace(day=1), end))
+    body = _avg(rows) + (f" {n} workout{'s' if n > 1 else ''}." if n else "")
+    _add("monthly", f"Your {end:%B}", body, now, {"open": "month"})
 
 
 def _checkin(now: datetime, dates: set[date]) -> None:
@@ -195,9 +218,17 @@ def _strain(now: datetime, dates: set[date]) -> None:
     _add("strain", "Your body may be under strain", body, now)
 
 
+KINDS = ("readiness", "bedtime", "inactivity", "strain", "checkin", "weekly", "morning", "monthly")
+
+
 def evaluate(dates: set[date]) -> None:
     now = _now()
-    for rule in (_readiness, _bedtime, _inactivity, _weekly, _strain, _checkin, _morning):
+    muted = set(db.settings()["muted"].split(","))
+    for rule, kind in ((_readiness, "readiness"), (_bedtime, "bedtime"), (_inactivity, "inactivity"),
+                       (_weekly, "weekly"), (_strain, "strain"), (_checkin, "checkin"), (_morning, "morning"),
+                       (_monthly, "monthly")):
+        if kind in muted:
+            continue
         try:
             rule(now, dates)
         except Exception:

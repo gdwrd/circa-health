@@ -357,3 +357,39 @@ def test_sleep_debt_and_bedtime_fields(tmp_path, monkeypatch) -> None:
         assert s["debt"] == debt and s["bedtime"] == window
         assert c.get(f"/sleep?date={d - timedelta(10)}", headers=H).json()["debt"] is None  # no sleep_min that week
         assert c.get("/today", headers=H).json()["tonight"] == {"bedtime": window, "debt": debt}
+
+
+def test_month_shape_means_best_week_workouts_effects(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "m.db"))
+    db.init()
+    first = date(2026, 10, 1)
+    for i in range(31):  # October: sleep 70/90 alternating with alcohol nights, readiness rising, one workout a day
+        d = first + timedelta(i)
+        s = vm.midnight(d - timedelta(1)) + timedelta(hours=23)
+        bad = i % 2 == 1  # night after an alcohol day (logged on even days)
+        c = {"inputs": {"steps": 1000.0, "sleep_min": 420.0, "restorative_min": 30.0, "cardio_load": 5.0},
+             "session": {"start": s.timestamp(), "end": s.timestamp() + 8 * 3600, "deep_min": 60.0, "rem_min": 90.0,
+                         "total_min": 420.0, "awake_min": 20.0},
+             "workouts": [{"minutes": 30, "load": 2.5, "kind": ("walk", "ride")[i % 2]}]}
+        db.save_day(d, (60 if bad else 90, 50 + i, None), c, {})
+        if i % 2 == 0 and i < 30:
+            db.add_journal(d.isoformat(), "alcohol", None, None, 0)
+    db.save_day(date(2026, 9, 30), (50, 40, 30), {}, {})  # previous month
+    with TestClient(app) as c:
+        m = c.get("/month?month=2026-10", headers=H).json()
+        assert m["month"] == "2026-10" and m["start"] == "2026-10-01" and m["end"] == "2026-10-31"
+        assert len(m["days"]) == 31 and m["days"][0] == {"date": "2026-10-01", "sleep": 90, "readiness": 50,
+                                                         "activity": None, "steps": 1000.0, "sleep_min": 420.0,
+                                                         "cardio_load": 5.0, "workouts": 1}
+        assert m["scored_days"] == 31 and m["means"] == {"sleep": 75.5, "readiness": 65.0, "activity": None}
+        assert m["best_week"] == {"start": "2026-10-25", "end": "2026-10-31", "readiness": 77.0}
+        assert m["steps_total"] == 31000.0 and m["sleep_avg_min"] == 420.0 and m["restorative_avg_min"] == 30.0
+        assert m["workouts"] == {"count": 31, "minutes": 930, "load": 77.5, "by_kind": {"walk": 16, "ride": 15, "workout": 0}}
+        (e,) = m["effects"]
+        assert e["kind"] == "alcohol" and e["metric"] == "sleep_score" and e["delta"] < 0 and e["n_with"] == 15
+        assert m["previous"] == {"means": {"sleep": 50.0, "readiness": 40.0, "activity": 30.0}, "scored_days": 1}
+        e = c.get("/month?month=2026-08", headers=H).json()
+        assert e["scored_days"] == 0 and e["best_week"] is None and e["effects"] == [] and e["workouts"]["count"] == 0
+        assert c.get("/month", headers=H).json()["month"] == date.today().strftime("%Y-%m")
+        for bad in ("2026-13", "bogus", "2026-1", "2026-10-01"):
+            assert c.get(f"/month?month={bad}", headers=H).status_code == 422, bad

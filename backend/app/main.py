@@ -336,6 +336,75 @@ def week(end: str | None = None) -> dict:
     return {**_week(e), "previous": _week(e - timedelta(7))}
 
 
+EFFECT_METRICS = ("sleep_score", "readiness_score", "hrv", "rhr", "bed_start")
+
+
+def _month(first: date) -> dict:
+    """One calendar month (future days left out), shaped like _week; effects split nights as insights.kinds does."""
+    last = (first.replace(day=28) + timedelta(4)).replace(day=1) - timedelta(1)
+    rows = db.days(first, last + timedelta(1))  # + the night after the last day, for effects
+    by = {r["date"]: r for r in rows}
+    days, rest, wk = [], [], {"count": 0, "minutes": 0, "load": 0.0, "by_kind": {"walk": 0, "ride": 0, "workout": 0}}
+    for i in range((min(last, _today()) - first).days + 1):
+        d = first + timedelta(i)
+        r = by.get(d) or {"c": {}, "inputs": {}}
+        ws = r["c"].get("workouts") or []
+        rest.append(r["inputs"].get("restorative_min"))
+        for w in ws:
+            wk["count"] += 1
+            wk["minutes"] += w["minutes"]
+            wk["load"] += w["load"] or 0
+            wk["by_kind"][w["kind"]] += 1
+        days.append({"date": d.isoformat(), **{k: r.get(v) for k, v in SCORES.items()},
+                     "steps": r["inputs"].get("steps"), "sleep_min": r["inputs"].get("sleep_min"),
+                     "cardio_load": r["inputs"].get("cardio_load"), "workouts": len(ws)})
+    wk["load"] = round(wk["load"], 1)
+
+    def avg(k: str, xs: list[dict] = days) -> float | None:
+        v = [x[k] for x in xs if x[k] is not None]
+        return round(mean(v), 1) if v else None
+
+    scored = [any(x[k] is not None for k in SCORES) for x in days]
+    weeks = [{"start": days[i]["date"], "end": days[i + 6]["date"], "readiness": avg("readiness", days[i:i + 7])}
+             for i in range(len(days) - 6) if sum(scored[i:i + 7]) >= 4]
+    steps = [x["steps"] for x in days if x["steps"] is not None]
+
+    nt, logged = insights.nights(rows), {}
+    for e in db.journal(first.isoformat()):
+        if e["date"] <= last.isoformat() and e["kind"] not in ("medication", "bp", "note"):
+            logged.setdefault(e["kind"], set()).add(e["date"])
+    effects = []
+    for kind, on in logged.items():
+        if len(on) < 3:
+            continue
+        nxt = [(x["date"] in on, nt[d]) for x in days if (d := date.fromisoformat(x["date"]) + timedelta(1)) in nt]
+        res = insights.compare([o for w, o in nxt if w], [o for w, o in nxt if not w], EFFECT_METRICS)
+        top = max((e for e in res.get("all", []) if e["strong"]), key=lambda e: abs(e["z"]), default=None)
+        if top:
+            effects.append({"kind": kind, "metric": top["metric"], "delta": top["delta"], "n_with": top["n_with"],
+                            "n_without": top["n_without"], "z": top["z"]})
+    effects = [{k: v for k, v in e.items() if k != "z"} for e in sorted(effects, key=lambda e: -abs(e["z"]))[:3]]
+
+    return {"month": first.strftime("%Y-%m"), "start": first.isoformat(), "end": last.isoformat(), "days": days,
+            "means": {k: avg(k) for k in SCORES}, "scored_days": sum(scored),
+            "best_week": max((w for w in weeks if w["readiness"] is not None), key=lambda w: w["readiness"], default=None),
+            "steps_total": sum(steps) if steps else None, "sleep_avg_min": avg("sleep_min"),
+            "restorative_avg_min": avg("r", [{"r": v} for v in rest]),
+            "workouts": wk, "effects": effects}
+
+
+@api.get("/month")
+def month(m: str | None = Query(None, alias="month")) -> dict:
+    try:
+        first = date.fromisoformat(f"{m}-01") if m else _today().replace(day=1)
+    except ValueError:
+        raise HTTPException(422, "bad month")
+    if m and not re.fullmatch(r"\d{4}-\d{2}", m):
+        raise HTTPException(422, "bad month")
+    prev = _month((first - timedelta(1)).replace(day=1))
+    return {**_month(first), "previous": {"means": prev["means"], "scored_days": prev["scored_days"]}}
+
+
 @api.get("/hr")
 def hr(hours: int = 24, day: str | None = Query(None, alias="date")) -> dict:
     now = datetime.now(vm.tz())
@@ -432,7 +501,7 @@ def _settings_out() -> dict:
     return {"step_goal": float(s["step_goal"]), "sleep_need_min": float(s["sleep_need_min"]),
             "medication_started": s["medication_started"], "medication_time": s["medication_time"],
             "medication_window_h": float(s["medication_window_h"]), "birth_year": s["birth_year"],
-            "low_step_kind": s["low_step_kind"]}
+            "low_step_kind": s["low_step_kind"], "muted": s["muted"]}
 
 
 def _year_ok(v: object) -> bool:
@@ -455,7 +524,8 @@ def _started_ok(v: object) -> bool:
 SETTINGS = {"step_goal": lambda v: _num(v, 1000, 100000), "sleep_need_min": lambda v: _num(v, 240, 720),
             "medication_started": _started_ok, "medication_time": lambda v: isinstance(v, str) and HHMM.fullmatch(v),
             "medication_window_h": lambda v: _num(v, 1, 24), "birth_year": _year_ok,
-            "low_step_kind": lambda v: v in ("ride", "workout")}
+            "low_step_kind": lambda v: v in ("ride", "workout"),
+            "muted": lambda v: isinstance(v, str) and (v == "" or all(k in notify.KINDS for k in v.split(",")))}
 
 
 @api.get("/settings")
