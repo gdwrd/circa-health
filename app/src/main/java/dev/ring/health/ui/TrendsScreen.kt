@@ -14,7 +14,16 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -62,6 +71,7 @@ import kotlinx.serialization.json.doubleOrNull
 import kotlinx.coroutines.launch
 import java.text.DecimalFormat
 import java.time.LocalDate
+import java.time.YearMonth
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.ceil
@@ -76,7 +86,7 @@ private fun JsonElement?.num() = (this as? JsonPrimitive)?.doubleOrNull
 /** [div] converts the wire value to the displayed unit (minutes -> hours). */
 private class Metric(
     val key: String, val label: String, val chip: String, val unit: String,
-    val color: (AppColors) -> Color, val columns: Boolean = false, val div: Double = 1.0,
+    val color: (AppColors) -> Color, val columns: Boolean = false, val div: Double = 1.0, val note: String? = null,
 )
 
 private val METRICS = listOf(
@@ -87,7 +97,12 @@ private val METRICS = listOf(
     Metric("hrv", "Heart rate variability", "HRV", "ms", { it.hrv }),
     Metric("steps", "Steps", "Steps", "steps", { it.activity }, true),
     Metric("sleep_min", "Time asleep", "Time asleep", "h", { it.sleep }, true, 60.0),
+    Metric("cardio_load", "Cardio load", "Load", "", { it.activity }, columns = true, note = "Heart-rate zone minutes, weighted by zone."),
+    Metric("restorative_min", "Restorative time", "Restorative", "min", { it.readiness }, columns = true, note = "Awake time with a calm heart rate and little movement."),
+    Metric("fitness", "Fitness estimate", "Fitness", "", { it.heart }, note = "Estimated from resting heart rate and age. A trend, not a measurement."),
 )
+
+private val SCORES = setOf("sleep", "readiness", "activity")
 
 /** x = days since [first]; null values are already dropped. */
 private class Pts(val first: LocalDate, val last: LocalDate, val v: List<Pair<Double, Double>>, val b: List<Pair<Double, Double>>)
@@ -109,9 +124,14 @@ private fun Metric.format(v: Double) = when (key) {
 private val MARKER_AXIS = 49.dp // approx. width of the chart's y-axis labels, so markers align with the plot
 
 @Composable
-fun TrendsScreen(backend: Boolean?) {
+fun TrendsScreen(backend: Boolean?, openMonth: Boolean, onLinkHandled: () -> Unit) {
+    var monthOpen by rememberSaveable { mutableStateOf(openMonth) }
+    var ym by rememberSaveable { mutableStateOf(YearMonth.now().toString()) }
+    LaunchedEffect(openMonth) { if (openMonth) { monthOpen = true; ym = YearMonth.now().toString(); onLinkHandled() } }
     if (backend != true) return NoBackendTab("Trends", backend)
     val ctx = LocalContext.current
+    var month by remember { mutableStateOf<JsonObject?>(null) }
+    LaunchedEffect(ym) { month = runCatching { Api.month(ctx, ym).obj() }.getOrNull() }
     var m by remember { mutableStateOf(METRICS[0]) }
     var days by remember { mutableIntStateOf(30) }
     var data by remember { mutableStateOf<Pts?>(null) }
@@ -137,9 +157,13 @@ fun TrendsScreen(backend: Boolean?) {
 
     val c = AppTheme.colors
     LargeTitleScaffold("Trends", refreshing = refreshing, onRefresh = {
-        scope.launch { refreshing = true; try { load() } finally { refreshing = false } }
+        scope.launch {
+            refreshing = true
+            try { load(); month = runCatching { Api.month(ctx, ym).obj() }.getOrNull() } finally { refreshing = false }
+        }
     }) {
         week?.let { item { WeekCard(it) } }
+        month?.let { item { MonthCard(it, YearMonth.parse(ym), monthOpen, { monthOpen = !monthOpen }) { ym = it.toString() } } }
         item {
             androidx.compose.foundation.layout.Column(verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
                 Segmented(listOf("30 D", "90 D"), if (days == 30) 0 else 1) { days = if (it == 0) 30 else 90 }
@@ -195,6 +219,12 @@ fun TrendsScreen(backend: Boolean?) {
                         style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(AppSpace.l),
                     )
                 }
+                m.note?.let {
+                    Text(
+                        it, style = AppType.footnote, color = c.secondaryLabel,
+                        modifier = Modifier.padding(start = AppSpace.l, end = AppSpace.l, bottom = AppSpace.l, top = if (inPeriod.isEmpty()) AppSpace.l else 0.dp),
+                    )
+                }
             }
         }
     }
@@ -236,38 +266,140 @@ private fun WeekCard(w: JsonObject) {
             if (scored < 3) return@Column Text(
                 "Learning your week · $scored/3 days scored. Your summary appears after 3.", style = AppType.subhead, color = c.secondaryLabel,
             )
-            val means = w["means"].obj()
-            val prev = w["previous"].obj()?.get("means").obj()
-            Row(Modifier.fillMaxWidth()) {
-                listOf("sleep" to "Sleep", "readiness" to "Readiness", "activity" to "Activity").forEach { (k, label) ->
-                    val v = means?.get(k).num()?.roundToInt()
-                    val p = prev?.get(k).num()?.roundToInt()
-                    val delta = if (v != null && p != null) v - p else 0
-                    Column(Modifier.weight(1f)) {
-                        Text(label, style = AppType.footnote, color = c.secondaryLabel)
-                        Text(
-                            buildAnnotatedString {
-                                append(v?.toString() ?: "–")
-                                // Every score here is better when higher, so up is good.
-                                if (delta != 0) withStyle(SpanStyle(fontSize = 13.sp, color = if (delta > 0) c.goodText else c.badText)) {
-                                    append(if (delta > 0) " ▲$delta" else " ▼${-delta}")
-                                }
-                            },
-                            style = AppType.headline,
-                        )
-                    }
-                }
-            }
+            MeansRow(w)
             val best = day(w["best_night"].obj()?.get("date"))
             val worst = day(w["worst_night"].obj()?.get("date"))?.takeIf { it != best }
             if (best != null) Text(listOfNotNull("Best night ${best.format(dow)}", worst?.let { "Worst ${it.format(dow)}" }).joinToString(" · "), style = AppType.subhead)
             val steps = w["steps_total"].num()
             val line = listOfNotNull(
-                steps?.let { if (it >= 10_000) "Steps ${(it / 1000).roundToInt()} k" else "Steps %,d".format(it.roundToInt()) },
+                steps?.let { "Steps " + stepsText(it) },
                 w["sleep_avg_min"].num()?.let { "Sleep ${duration(it.roundToInt())} avg" },
             ).joinToString(" · ")
             if (line.isNotEmpty()) Text(line, style = AppType.subhead)
         }
+    }
+}
+
+private fun stepsText(v: Double) = if (v >= 10_000) "${(v / 1000).roundToInt()} k" else "%,d".format(v.roundToInt())
+
+/** Sleep / Readiness / Activity means of [w] with ▲/▼ vs its `previous` block (week and month). */
+@Composable
+private fun MeansRow(w: JsonObject) {
+    val c = AppTheme.colors
+    val means = w["means"].obj()
+    val prev = w["previous"].obj()?.get("means").obj()
+    Row(Modifier.fillMaxWidth()) {
+        listOf("sleep" to "Sleep", "readiness" to "Readiness", "activity" to "Activity").forEach { (k, label) ->
+            val v = means?.get(k).num()?.roundToInt()
+            val p = prev?.get(k).num()?.roundToInt()
+            val delta = if (v != null && p != null) v - p else 0
+            Column(Modifier.weight(1f)) {
+                Text(label, style = AppType.footnote, color = c.secondaryLabel)
+                Text(
+                    buildAnnotatedString {
+                        append(v?.toString() ?: "–")
+                        // Every score here is better when higher, so up is good.
+                        if (delta != 0) withStyle(SpanStyle(fontSize = 13.sp, color = if (delta > 0) c.goodText else c.badText)) {
+                            append(if (delta > 0) " ▲$delta" else " ▼${-delta}")
+                        }
+                    },
+                    style = AppType.headline,
+                )
+            }
+        }
+    }
+}
+
+private fun count(n: Int, one: String) = if (n == 1) "1 $one" else "$n ${one}s"
+
+/** Collapsed: month + score means (or learning). Open: MonthPicker, means vs previous month, best week, totals, workouts, journal effects. */
+@Composable
+private fun MonthCard(mo: JsonObject, ym: YearMonth, open: Boolean, onToggle: () -> Unit, onMonth: (YearMonth) -> Unit) {
+    val c = AppTheme.colors
+    val scored = mo["scored_days"].num()?.toInt() ?: 0
+    val means = mo["means"].obj()
+    val turn by animateFloatAsState(if (open) 90f else 0f, label = "chevron")
+    InsetCard {
+        Row(Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(ym.month.getDisplayName(java.time.format.TextStyle.FULL_STANDALONE, Locale.getDefault()), style = AppType.headline)
+                Text(
+                    if (scored < 10) "Learning · $scored/10 days"
+                    else listOf("sleep" to "Sleep", "readiness" to "Readiness", "activity" to "Activity")
+                        .joinToString(" · ") { (k, l) -> "$l ${means?.get(k).num()?.roundToInt() ?: "–"}" },
+                    style = AppType.subhead, color = c.secondaryLabel,
+                )
+            }
+            Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, if (open) "Collapse" else "Expand", tint = c.secondaryLabel, modifier = Modifier.rotate(turn))
+        }
+        if (!open) return@InsetCard
+        Column(Modifier.padding(start = AppSpace.l, end = AppSpace.l, bottom = AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
+            MonthPicker(ym, onMonth)
+            if (scored > 0) MeansRow(mo)
+            if (scored < 10) return@Column Text(
+                "Learning your month · $scored/10 days scored. Your summary appears after 10.", style = AppType.subhead, color = c.secondaryLabel,
+            )
+            mo["best_week"].obj()?.let { b ->
+                val s = day(b["start"]); val e = day(b["end"])
+                if (s != null && e != null) Text(
+                    "Best week ${s.dayOfMonth}–${e.format(DateTimeFormatter.ofPattern("d MMM", Locale.getDefault()))} · Readiness ${b["readiness"].num()?.roundToInt() ?: "–"}",
+                    style = AppType.subhead,
+                )
+            }
+            val totals = listOfNotNull(
+                mo["steps_total"].num()?.let { "Steps " + stepsText(it) },
+                mo["sleep_avg_min"].num()?.let { "Sleep ${duration(it.roundToInt())} avg" },
+                mo["restorative_avg_min"].num()?.let { "Restorative ${duration(it.roundToInt())} avg" },
+            ).joinToString(" · ")
+            if (totals.isNotEmpty()) Text(totals, style = AppType.subhead)
+            val wk = mo["workouts"].obj()
+            val n = wk?.get("count").num()?.toInt() ?: 0
+            if (wk != null && n > 0) {
+                val by = wk["by_kind"].obj()
+                Text(
+                    (listOf("ride" to "ride", "walk" to "walk", "workout" to "workout").mapNotNull { (k, w) ->
+                        by?.get(k).num()?.toInt()?.takeIf { it > 0 }?.let { count(it, w) }
+                    } + listOf(duration(wk["minutes"].num()?.roundToInt() ?: 0), "load ${wk["load"].num()?.roundToInt() ?: 0}")).joinToString(" · "),
+                    style = AppType.subhead,
+                )
+            }
+            val effects = (mo["effects"] as? JsonArray)?.mapNotNull { it.obj() }.orEmpty().take(3)
+            if (effects.isEmpty()) Text("Keep journaling to see what mattered this month.", style = AppType.subhead, color = c.secondaryLabel)
+            else Column {
+                Text("What held up:", style = AppType.subhead.copy(fontWeight = FontWeight.SemiBold))
+                effects.forEach { e ->
+                    val k = (e["kind"] as? JsonPrimitive)?.content ?: return@forEach
+                    val met = (e["metric"] as? JsonPrimitive)?.content ?: return@forEach
+                    val d = e["delta"].num() ?: return@forEach
+                    val who = if (k == "sick") "Feeling unwell" else KIND_LABEL[k] ?: k
+                    // Scores read as plain points ("sleep score −6"), the rest in their unit.
+                    val change = if (met.endsWith("_score")) d.roundToInt().let { if (it < 0) "−${-it}" else "+$it" } else metricDelta(met, d, null)
+                    Text(
+                        "$who → ${METRIC[met]?.second ?: met.replace('_', ' ')} $change over ${count(e["n_with"].num()?.toInt() ?: 0, "night")}",
+                        style = AppType.subhead,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** DayPicker for months: ‹ "MMMM yyyy" ›, › dead at this month, ‹ dead 12 months back. */
+@Composable
+private fun MonthPicker(ym: YearMonth, onChange: (YearMonth) -> Unit) {
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    val now = YearMonth.now()
+    @Composable
+    fun Chevron(icon: androidx.compose.ui.graphics.vector.ImageVector, name: String, to: YearMonth, enabled: Boolean) =
+        Box(
+            Modifier.size(44.dp).clip(AppShape.small).clickable(enabled = enabled) { haptic.tick(); onChange(to) },
+            contentAlignment = Alignment.Center,
+        ) { Icon(icon, name, tint = if (enabled) c.tint else c.secondaryLabel) }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Chevron(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "Previous month", ym.minusMonths(1), ym.isAfter(now.minusMonths(12)))
+        Text(ym.format(DateTimeFormatter.ofPattern("MMMM yyyy", Locale.getDefault())), style = AppType.headline, textAlign = TextAlign.Center, modifier = Modifier.weight(1f))
+        Chevron(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Next month", ym.plusMonths(1), ym.isBefore(now))
     }
 }
 
@@ -313,7 +445,7 @@ private fun TrendChart(p: Pts, m: Metric, color: Color, avg: Double) {
             val s = listOf(1.0, 2.0, 3.0, 5.0, 10.0).first { it * mag >= raw } * mag
             Triple(0.0, ceil(top * 1.05 / s) * s, s)
         }
-        m.unit.isEmpty() -> Triple(0.0, 100.0, 25.0)
+        m.key in SCORES -> Triple(0.0, 100.0, 25.0)
         else -> {
             val span = top - ys.min()
             val s = if (span > 60) 20.0 else if (span > 24) 10.0 else 5.0

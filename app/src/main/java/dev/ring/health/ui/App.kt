@@ -82,6 +82,7 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
             when (link?.first) {
                 "trends" -> { go(TabItem.Trends); onLinkHandled() }
                 "sleep" -> { go(TabItem.Sleep); onLinkHandled() }
+                "month" -> go(TabItem.Trends) // Trends consumes it once the month card is open
                 "journal" -> { go(TabItem.Today); if (link.second == null) onLinkHandled() }
                 null -> {}
                 else -> onLinkHandled()
@@ -104,7 +105,7 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
                 composable(TabItem.Sleep.route) { SleepScreen(backend) }
                 composable(TabItem.Heart.route) { HeartScreen(backend) }
                 composable(TabItem.Stress.route) { StressScreen(backend) }
-                composable(TabItem.Trends.route) { TrendsScreen(backend) }
+                composable(TabItem.Trends.route) { TrendsScreen(backend, link?.first == "month", onLinkHandled) }
                 composable(TabItem.Settings.route) { SettingsScreen(hasPermissions, requestPermissions) }
             }
             }

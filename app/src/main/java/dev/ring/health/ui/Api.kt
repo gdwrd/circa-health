@@ -52,6 +52,7 @@ object Api {
     suspend fun sleep(ctx: Context, date: String) = get(ctx, "/sleep?date=$date")
     suspend fun trends(ctx: Context, metric: String, days: Int) = get(ctx, "/trends?metric=$metric&days=$days")
     suspend fun week(ctx: Context) = get(ctx, "/week")
+    suspend fun month(ctx: Context, ym: String) = get(ctx, "/month?month=$ym")
     suspend fun hr(ctx: Context, hours: Int) = get(ctx, "/hr?hours=$hours")
     suspend fun hr(ctx: Context, date: LocalDate) = get(ctx, "/hr?date=$date")
     suspend fun stress(ctx: Context, date: LocalDate) = get(ctx, "/stress?date=$date")
