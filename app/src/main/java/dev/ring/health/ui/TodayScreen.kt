@@ -91,6 +91,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.SelfImprovement
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.ui.semantics.Role
@@ -162,7 +163,7 @@ private fun JsonElement?.num() = (this as? JsonPrimitive)?.doubleOrNull
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, journalDate: String? = null, onJournalOpened: () -> Unit = {}) {
+fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit, journalDate: String? = null, onJournalOpened: () -> Unit = {}) {
     val haptic = LocalHapticFeedback.current
     val gear = @Composable {
         Box(Modifier.size(44.dp).clip(CircleShape).clickable(role = Role.Button) { haptic.tick(); onSettings() }, contentAlignment = Alignment.Center) {
@@ -170,6 +171,15 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, journalDate: String? 
         }
     }
     if (backend != true) return PlaceholderTab("Today", backend, gear)
+    // Breathe only with the backend: the session is saved there.
+    val actions = @Composable {
+        Row {
+            Box(Modifier.size(44.dp).clip(CircleShape).clickable(role = Role.Button) { haptic.tick(); onBreathe() }, contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.SelfImprovement, "Breathe", tint = AppTheme.colors.tint, modifier = Modifier.size(24.dp))
+            }
+            gear()
+        }
+    }
     val ctx = LocalContext.current
     var data by remember { mutableStateOf<JsonObject?>(null) }
     var open by remember { mutableStateOf<String?>(null) }
@@ -203,7 +213,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, journalDate: String? 
     LaunchedEffect(Unit) { load() }
 
     val c = AppTheme.colors
-    LargeTitleScaffold("Today", action = gear, refreshing = refreshing, onRefresh = {
+    LargeTitleScaffold("Today", action = actions, refreshing = refreshing, onRefresh = {
         scope.launch { refreshing = true; try { load() } finally { refreshing = false } }
     }) {
         val d = data ?: return@LargeTitleScaffold

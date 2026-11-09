@@ -25,6 +25,7 @@ object Prefs {
     private const val KEY_TODAY_JSON_MS   = "today_json_ms"
     private const val KEY_LAST_DEEP_DAY   = "last_deep_sync_day"
     private const val KEY_STALE_WARNED    = "stale_warned"
+    private const val KEY_BREATH_ROUNDS   = "breath_rounds"
 
     private fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -112,4 +113,9 @@ object Prefs {
     var Context.staleWarned: Boolean
         get() = prefs(this).getBoolean(KEY_STALE_WARNED, false)
         set(v) = prefs(this).edit().putBoolean(KEY_STALE_WARNED, v).apply()
+
+    /** Breathe screen 4-7-8 rounds, 3..12. */
+    var Context.breathRounds: Int
+        get() = prefs(this).getInt(KEY_BREATH_ROUNDS, 5).coerceIn(3, 12)
+        set(v) = prefs(this).edit().putInt(KEY_BREATH_ROUNDS, v.coerceIn(3, 12)).apply()
 }

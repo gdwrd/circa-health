@@ -70,8 +70,8 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
         // Re-detect on every tab change so a URL/token edited in Settings takes effect.
         LaunchedEffect(route) { backend = Api.cached(ctx) ?: Api.hasBackend(ctx) }
         fun go(t: TabItem) {
-            // Settings sits above Today; pop it first or saveState/restoreState brings it back on the Today tab.
-            if (nav.currentDestination?.route == "settings") nav.popBackStack()
+            // Settings and Breathe sit above Today; pop them first or saveState/restoreState brings them back on the Today tab.
+            if (nav.currentDestination?.route in setOf("settings", "breathe")) nav.popBackStack()
             nav.navigate(t.route) {
                 popUpTo(nav.graph.findStartDestination().id) { saveState = true }
                 launchSingleTop = true
@@ -102,11 +102,12 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
             // Content runs under the tab bar so the bar can blur it; LargeTitleScaffold pads its list end by this.
             CompositionLocalProvider(LocalBottomBar provides inner.calculateBottomPadding()) {
             NavHost(nav, startDestination = TabItem.Today.route, modifier = Modifier.haze(haze)) {
-                composable(TabItem.Today.route) { TodayScreen(backend, { nav.navigate("settings") }, journalDate, onLinkHandled) }
+                composable(TabItem.Today.route) { TodayScreen(backend, { nav.navigate("settings") }, { nav.navigate("breathe") }, journalDate, onLinkHandled) }
                 composable(TabItem.Sleep.route) { SleepScreen(backend) }
                 composable(TabItem.Activity.route) { ActivityScreen(backend) }
                 composable(TabItem.Body.route) { BodyScreen(backend) }
                 composable(TabItem.Trends.route) { TrendsScreen(backend, link?.first == "month", onLinkHandled) }
+                composable("breathe") { BreatheScreen { nav.popBackStack() } }
                 composable("settings") { SettingsScreen(hasPermissions, requestPermissions) { nav.popBackStack() } }
             }
             }

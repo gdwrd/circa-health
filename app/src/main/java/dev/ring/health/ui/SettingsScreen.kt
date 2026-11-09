@@ -87,6 +87,7 @@ import dev.ring.health.Prefs.vmUrl
 import dev.ring.health.SyncLog
 import dev.ring.health.SyncWorker
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -603,8 +604,12 @@ private fun ButtonRow(title: String, enabled: Boolean = true, onClick: () -> Uni
 
 // ── Live heart rate (moved from MainActivity; behaviour unchanged) ──────────
 
+/** Streams live HR for up to [durationMs]; [stopWhenStable] ends early once readings settle and pushes the last bpm. */
 @SuppressLint("MissingPermission")
-internal suspend fun runLiveHr(ctx: Context, address: String, onBpm: (Int) -> Unit = {}, onProgress: (String) -> Unit): String {
+internal suspend fun runLiveHr(
+    ctx: Context, address: String, onBpm: (Int) -> Unit = {}, durationMs: Long = 30_000, stopWhenStable: Boolean = true,
+    onProgress: (String) -> Unit,
+): String {
     val conn = ColmiConnection(ctx, address)
     var measurementStarted = false
     return try {
@@ -619,11 +624,18 @@ internal suspend fun runLiveHr(ctx: Context, address: String, onBpm: (Int) -> Un
         // streams a few invalid (bpm=0) packets first while it acquires.
         var lastBpm = 0
         var notWorn = false
-        val deadline = System.currentTimeMillis() + 30_000
+        val deadline = System.currentTimeMillis() + durationMs
         loop@ while (currentCoroutineContext().isActive && System.currentTimeMillis() < deadline) {
-            val pkt = withTimeoutOrNull(deadline - System.currentTimeMillis()) {
+            val left = deadline - System.currentTimeMillis()
+            val pkt = withTimeoutOrNull(if (stopWhenStable) left else minOf(left, 5_000)) {
                 conn.notifyV1.receive()
-            } ?: break
+            }
+            if (pkt == null) {
+                if (stopWhenStable || System.currentTimeMillis() >= deadline) break
+                // Long mode: the ring may stop streaming on its own; ask again after 5 s of silence.
+                conn.writePacket(ColmiProtocol.liveHrStartRequest())
+                continue
+            }
             val parsed = ColmiProtocol.parseLiveHrPacket(pkt) ?: continue
             when (parsed.error) {
                 1 -> { notWorn = true; break@loop }
@@ -632,7 +644,7 @@ internal suspend fun runLiveHr(ctx: Context, address: String, onBpm: (Int) -> Un
                     onBpm(parsed.bpm)
                     onProgress("♥ ${parsed.bpm} bpm  (measuring…)")
                     // Stable enough after ~6 valid readings (≈12s of streaming)
-                    if (System.currentTimeMillis() > deadline - 18_000) break@loop
+                    if (stopWhenStable && System.currentTimeMillis() > deadline - 18_000) break@loop
                 }
             }
         }
@@ -640,7 +652,7 @@ internal suspend fun runLiveHr(ctx: Context, address: String, onBpm: (Int) -> Un
         when {
             notWorn      -> "Ring not worn correctly — adjust and retry"
             lastBpm == 0 -> "No reading — ensure ring is on a finger and try again"
-            else         -> { pushLiveHr(ctx, lastBpm); "♥ $lastBpm bpm" }
+            else         -> { if (stopWhenStable) pushLiveHr(ctx, lastBpm); "♥ $lastBpm bpm" }
         }
     } catch (t: Throwable) {
         Log.w("Settings", "Live HR failed", t)
@@ -651,7 +663,8 @@ internal suspend fun runLiveHr(ctx: Context, address: String, onBpm: (Int) -> Un
         // sensor running on its own internal timeout (~minutes).
         if (measurementStarted) {
             runCatching {
-                withTimeoutOrNull(2_000) { conn.writePacket(ColmiProtocol.liveHrStopRequest()) }
+                // NonCancellable: Breathe ends the stream by cancelling, and a cancelled coroutine cannot suspend.
+                withContext(NonCancellable) { withTimeoutOrNull(2_000) { conn.writePacket(ColmiProtocol.liveHrStopRequest()) } }
             }.onFailure { Log.w("Settings", "Live HR stop failed", it) }
         }
         conn.disconnect()

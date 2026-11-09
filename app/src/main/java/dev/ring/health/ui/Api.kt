@@ -6,6 +6,7 @@ import dev.ring.health.Prefs.vmUrl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -85,6 +86,19 @@ object Api {
 
     /** DELETE /sleep drops the override, back to the ring's times. */
     suspend fun clearSleep(ctx: Context, date: LocalDate) = call(ctx, "/sleep?date=$date", "DELETE") as? JsonObject
+
+    /** POST /breathe; [samples] are (epoch ms, bpm), kept only inside [startMs, endMs]. True on 2xx. */
+    suspend fun postBreathe(ctx: Context, startMs: Long, endMs: Long, rounds: Int, feelBefore: Int?, feelAfter: Int?, samples: List<Pair<Long, Int>>): Boolean {
+        val start = startMs / 1000
+        val end = maxOf(endMs / 1000, start + 1)
+        val pts = samples.filter { it.first / 1000.0 in start.toDouble()..end.toDouble() && it.second in 30..220 }.takeLast(1200)
+            .map { JsonArray(listOf(JsonPrimitive(it.first / 1000.0), JsonPrimitive(it.second))) }
+        val body = JsonObject(mapOf(
+            "start" to JsonPrimitive(start), "end" to JsonPrimitive(end), "rounds" to JsonPrimitive(rounds),
+            "feel_before" to JsonPrimitive(feelBefore), "feel_after" to JsonPrimitive(feelAfter), "samples" to JsonArray(pts),
+        ))
+        return call(ctx, "/breathe", "POST", body.toString()) != null
+    }
 
     private val probe = client.newBuilder().callTimeout(3, TimeUnit.SECONDS).build()
     // Session cache of the last probe, keyed by URL+token so editing either re-probes.
