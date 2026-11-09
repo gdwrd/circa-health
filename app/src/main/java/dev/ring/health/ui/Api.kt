@@ -73,6 +73,10 @@ object Api {
     /** Body is a subset of the backend settings keys; returns the full settings, or null on failure. */
     suspend fun patchSettings(ctx: Context, body: Map<String, JsonPrimitive>) = call(ctx, "/settings", "PATCH", JsonObject(body).toString()) as? JsonObject
 
+    /** PATCH /workouts relabels one detected workout ([start] = its unix start); returns `{workouts: [...]}` for the day. */
+    suspend fun setWorkoutKind(ctx: Context, date: LocalDate, start: Long, kind: String) =
+        call(ctx, "/workouts", "PATCH", JsonObject(mapOf("date" to JsonPrimitive(date.toString()), "start" to JsonPrimitive(start), "kind" to JsonPrimitive(kind))).toString()) as? JsonObject
+
     private val probe = client.newBuilder().callTimeout(3, TimeUnit.SECONDS).build()
     // Session cache of the last probe, keyed by URL+token so editing either re-probes.
     private var cache: Pair<String, Boolean>? = null

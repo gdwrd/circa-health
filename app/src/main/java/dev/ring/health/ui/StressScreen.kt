@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -33,11 +35,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberColumnCartesianLayer
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLineCartesianLayer
 import com.patrykandpatrick.vico.compose.cartesian.rememberCartesianChart
@@ -138,21 +136,23 @@ fun StressScreen(backend: Boolean?) {
             }
         }
         if (samples.isNotEmpty()) item { ThroughTheDay(samples) }
-        if (st != null) item {
-            val min = ((st["stressed_hours"].num() ?: 0.0) * 60).roundToInt()
+        val restorative = d["inputs"].obj()?.get("restorative_min").num()
+        if (st != null || restorative != null) item {
+            val tiles = listOf(
+                Triple("Daytime stress load", st?.get("stressed_hours").num()?.let { it * 60 }, "in the stressed zone while awake"),
+                Triple("Restorative time", restorative, "calm heart rate, little movement"),
+            )
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                Text("Daytime stress load", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-                InsetCard {
-                    Column(Modifier.padding(AppSpace.l)) {
-                        Text(
-                            buildAnnotatedString {
-                                val unit = SpanStyle(fontSize = 17.sp, color = c.secondaryLabel)
-                                append((min / 60).toString()); withStyle(unit) { append(" h ") }
-                                append((min % 60).toString()); withStyle(unit) { append(" min") }
-                            },
-                            style = AppType.largeTitle,
-                        )
-                        Text("Time in the stressed zone while awake", style = AppType.subhead, color = c.secondaryLabel)
+                Text("Load and recovery", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
+                Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                    tiles.forEach { (label, min, line) ->
+                        InsetCard(Modifier.weight(1f).fillMaxHeight()) {
+                            Column(Modifier.padding(AppSpace.l)) {
+                                Text(label, style = AppType.footnote, color = c.secondaryLabel)
+                                Text(min?.let { duration(it.roundToInt()) } ?: "—", style = AppType.title)
+                                Text(line, style = AppType.footnote, color = c.secondaryLabel)
+                            }
+                        }
                     }
                 }
             }

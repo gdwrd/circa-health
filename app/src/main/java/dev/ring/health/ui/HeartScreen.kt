@@ -8,6 +8,13 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.MonitorHeart
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.DirectionsBike
+import androidx.compose.material.icons.rounded.DirectionsWalk
+import androidx.compose.material.icons.rounded.FitnessCenter
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
+import androidx.compose.material3.TextButton
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -109,7 +116,10 @@ fun HeartScreen(backend: Boolean?) {
     var med by remember { mutableStateOf<JsonObject?>(null) }
     var rhr90 by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
     var date by remember { mutableStateOf(LocalDate.now()) }
-    var inputs by remember { mutableStateOf<JsonObject?>(null) }
+    var day by remember { mutableStateOf<JsonObject?>(null) }
+    var workouts by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
+    var journalWorkout by remember { mutableStateOf<Set<String>>(emptySet()) } // dates with a journal "workout"
+    var editing by remember { mutableStateOf<JsonObject?>(null) }
     var bp by remember { mutableStateOf<List<Triple<LocalDate, Int, Int>>>(emptyList()) }
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
@@ -117,7 +127,8 @@ fun HeartScreen(backend: Boolean?) {
         hr = (Api.hr(ctx, date).obj()?.get("points") as? JsonArray)
             ?.mapNotNull { o -> o.obj()?.let { p -> p["t"].num()?.let { t -> p["bpm"].num()?.let { t to it } } } }
             ?.sortedBy { it.first }
-        inputs = Api.today(ctx, date).obj()?.get("inputs").obj()
+        day = Api.today(ctx, date).obj()
+        workouts = (day?.get("workouts") as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
     }
     suspend fun load() {
         rhr = trend(Api.trends(ctx, "rhr", 30))
@@ -127,6 +138,7 @@ fun HeartScreen(backend: Boolean?) {
             medStarted = s["medication_started"].str()?.takeIf { it.isNotBlank() }
         }
         val es = (Api.journal(ctx, 30).obj()?.get("entries") as? JsonArray)?.mapNotNull { it.obj() }.orEmpty().reversed() // oldest first
+        journalWorkout = es.filter { it["kind"].str() == "workout" }.mapNotNull { it["date"].str() }.toSet()
         doses = es.filter { it["kind"].str() == "medication" }.mapNotNull {
             runCatching { LocalDate.parse(it["date"].str()).atTime(LocalTime.parse(it["value"].str())).atZone(ZoneId.systemDefault()).toEpochSecond() }.getOrNull()
         }
@@ -145,6 +157,7 @@ fun HeartScreen(backend: Boolean?) {
     LaunchedEffect(date) { loadDay() }
 
     val c = AppTheme.colors
+    val inputs = day?.get("inputs").obj()
     LargeTitleScaffold("Heart", refreshing = refreshing, onRefresh = {
         scope.launch { refreshing = true; try { load(); loadDay() } finally { refreshing = false } }
     }) {
@@ -173,9 +186,13 @@ fun HeartScreen(backend: Boolean?) {
                     val windows = shown.map { (it - t0) / SLOT_S to (it + windowH * 3600 - t0) / SLOT_S }
                     val xy = pts.map { (it.first - t0) / SLOT_S to it.second }
                     val byX = xy.toMap()
+                    val spans = workouts.mapNotNull { w -> w["start"].num()?.let { s -> w["end"].num()?.let { e -> (s - t0) / SLOT_S to (e - t0) / SLOT_S } } }
                     Chart(
                         listOf(xy), c.heart, true, 72, 0, x = 0.0..287.0,
-                        decorations = if (windows.isEmpty()) emptyList() else listOf(DoseWindows(windows, c.heart.toArgb())),
+                        decorations = listOfNotNull(
+                            spans.takeIf { it.isNotEmpty() }?.let { DoseWindows(it, c.heart.toArgb(), alpha = 31, line = false) },
+                            windows.takeIf { it.isNotEmpty() }?.let { DoseWindows(it, c.heart.toArgb()) },
+                        ),
                         marker = { x -> "${byX[x]?.roundToInt()} bpm · ${clock(t0 + x * SLOT_S)}" },
                     ) { x -> clock(t0 + x * SLOT_S).replace(":00 ", " ") }
                     shown.forEach { t ->
@@ -203,11 +220,98 @@ fun HeartScreen(backend: Boolean?) {
                 }
             }
         }
+        if (workouts.isNotEmpty()) item {
+            val cardio = day?.get("cardio").obj()
+            val mins = (cardio?.get("minutes") as? JsonArray)?.sumOf { it.num() ?: 0.0 }?.roundToInt() ?: 0
+            Section("Workouts") {
+                Text(
+                    "Cardio load ${cardio?.get("load").num()?.roundToInt() ?: "—"} · $mins min in zones", style = AppType.footnote, color = c.secondaryLabel,
+                    modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.m, bottom = AppSpace.m),
+                )
+                workouts.forEach { w ->
+                    Hairline(Modifier.padding(start = AppSpace.l))
+                    WorkoutRow(w) { editing = w }
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                Box(Modifier.padding(AppSpace.l)) {
+                    if (date.toString() in journalWorkout) Text("In your journal", style = AppType.footnote, color = c.secondaryLabel)
+                    else TintButton("Add to journal") {
+                        scope.launch { if (Api.addJournal(ctx, date.toString(), "workout") != null) journalWorkout = journalWorkout + date.toString() }
+                    }
+                }
+            }
+        }
         item { TrendCard("Resting heart rate · 30 days", rhr, "bpm", c.heart) }
         item { TrendCard("Heart rate variability · 30 days", hrv, "ms", c.hrv) }
         medStarted?.let { st -> item { MedicationCard(med, st, rhr90) } }
         if (bp.isNotEmpty()) item { BloodPressureCard(bp) }
     }
+    editing?.let { w ->
+        val cur = w["kind"].str()
+        AlertDialog(
+            onDismissRequest = { editing = null },
+            containerColor = c.card,
+            title = { Text("What was this?") },
+            text = {
+                Column {
+                    KINDS.forEach { (k, name) ->
+                        Text(
+                            name + if (k == cur) "  ✓" else "",
+                            style = AppType.body, color = if (k == cur) c.tint else c.label,
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                editing = null
+                                val start = w["start"].num()?.toLong() ?: return@clickable
+                                scope.launch {
+                                    (Api.setWorkoutKind(ctx, date, start, k)?.get("workouts") as? JsonArray)?.let { a -> workouts = a.mapNotNull { it.obj() } }
+                                }
+                            }.padding(vertical = AppSpace.m),
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton({ editing = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+private val KINDS = listOf("walk" to "Walk", "ride" to "Ride", "workout" to "Workout")
+
+/** "Walk · 42 min" / avg bpm, then "2:10–2:52 PM · max 141 · load 6", " · guessed" until the user confirms the kind. */
+@Composable
+private fun WorkoutRow(w: JsonObject, onClick: () -> Unit) {
+    val c = AppTheme.colors
+    val kind = w["kind"].str()
+    val icon = when (kind) { "walk" -> Icons.Rounded.DirectionsWalk; "ride" -> Icons.Rounded.DirectionsBike; else -> Icons.Rounded.FitnessCenter }
+    val a = clock(w["start"].num() ?: 0.0)
+    val b = clock(w["end"].num() ?: 0.0)
+    // "2:10–2:52 PM": drop the start's AM/PM when both share it.
+    val span = (if (!a.last().isDigit() && a.takeLast(3) == b.takeLast(3)) a.dropLast(3) else a) + "–" + b
+    val guessed = if (w["confirmed"].str() == "true") "" else " · guessed"
+    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = AppSpace.l, top = AppSpace.m, bottom = AppSpace.m), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, tint = c.heart, modifier = Modifier.size(28.dp))
+        Column(Modifier.weight(1f).padding(start = AppSpace.m)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("${KINDS.firstOrNull { it.first == kind }?.second ?: "Workout"} · ${duration(w["minutes"].num()?.roundToInt() ?: 0)}", style = AppType.body, modifier = Modifier.weight(1f))
+                Text("avg ${w["avg_bpm"].num()?.roundToInt()} bpm", style = AppType.subhead, color = c.secondaryLabel)
+            }
+            Text(
+                "$span · max ${w["max_bpm"].num()?.roundToInt()} · load ${w["load"].num()?.roundToInt()}$guessed",
+                style = AppType.footnote, color = c.secondaryLabel,
+            )
+        }
+        Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = c.secondaryLabel, modifier = Modifier.padding(end = AppSpace.s))
+    }
+}
+
+/** Same as Today's tinted button (private there). */
+@Composable
+private fun TintButton(text: String, onClick: () -> Unit) {
+    val c = AppTheme.colors
+    Text(
+        text, style = AppType.headline, color = c.tint, textAlign = TextAlign.Center,
+        modifier = Modifier.fillMaxWidth().clip(AppShape.small).background(c.tint.copy(alpha = 0.12f)).clickable(onClick = onClick).padding(vertical = AppSpace.m),
+    )
 }
 
 @Composable
@@ -359,8 +463,8 @@ private fun Chart(
     )
 }
 
-/** Active windows shaded in the heart colour at 8 % with a line at each dose; [windows] are (dose, end) in chart x. */
-private class DoseWindows(private val windows: List<Pair<Double, Double>>, private val color: Int) : Decoration {
+/** Spans shaded in [color] at [alpha] (8 % doses, 12 % workouts), a line at each start when [line]; [windows] are (start, end) in chart x. */
+private class DoseWindows(private val windows: List<Pair<Double, Double>>, private val color: Int, private val alpha: Int = 20, private val line: Boolean = true) : Decoration {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
     override fun drawUnderLayers(context: CartesianDrawingContext) = with(context) {
@@ -368,9 +472,9 @@ private class DoseWindows(private val windows: List<Pair<Double, Double>>, priva
         fun px(x: Double) = b.left + layerDimensions.startPadding + ((x - ranges.minX) / ranges.xStep).toFloat() * layerDimensions.xSpacing - scroll
         windows.forEach { (dose, end) ->
             paint.color = color
-            paint.alpha = 20
+            paint.alpha = alpha
             canvas.drawRect(px(dose).coerceIn(b.left, b.right), b.top, px(end).coerceIn(b.left, b.right), b.bottom, paint)
-            if (dose >= ranges.minX && dose <= ranges.maxX) {
+            if (line && dose >= ranges.minX && dose <= ranges.maxX) {
                 paint.alpha = 200
                 paint.strokeWidth = dpToPx(1.5f)
                 canvas.drawLine(px(dose), b.top, px(dose), b.bottom, paint)
