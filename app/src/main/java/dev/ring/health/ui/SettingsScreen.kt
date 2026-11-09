@@ -85,6 +85,8 @@ import dev.ring.health.Prefs.lastSyncMs
 import dev.ring.health.Prefs.ringAddress
 import dev.ring.health.Prefs.sleepNeedHours
 import dev.ring.health.Prefs.usageAccess
+import dev.ring.health.Prefs.phoneSensor
+import dev.ring.health.Prefs.lastScreenMs
 import dev.ring.health.Prefs.stepGoal
 import dev.ring.health.Prefs.syncIntervalMin
 import dev.ring.health.Prefs.vmUrl
@@ -120,6 +122,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var batteryOk by remember { mutableStateOf(MainActivity.isIgnoringBatteryOptimizations(ctx)) }
     fun notifyOk() = ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
     var usageOk by remember { mutableStateOf(ctx.usageAccess) }
+    var phoneOn by remember { mutableStateOf(ctx.phoneSensor) }
     var notifyGranted by remember { mutableStateOf(notifyOk()) }
     var pickInterval by remember { mutableStateOf(false) }
     var showLog by remember { mutableStateOf(false) }
@@ -217,8 +220,16 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
         item {
             Section("Phone", "Screen on/off times fix nights where you scrolled in bed. Only the times are sent." +
-                if (usageOk) "" else " Switch greyed out? In App info, tap ⋮ › Allow restricted settings first.") {
-                ChevronRow("Phone as sleep sensor", if (usageOk) "On" else "Off") { ctx.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
+                if (phoneOn && !usageOk) " Allow Usage access for Circa to start. Greyed out? In App info, tap ⋮ › Allow restricted settings first." else "") {
+                SwitchRow("Phone as sleep sensor", phoneOn) { on ->
+                    if (on && ctx.lastScreenMs != 0L) ctx.lastScreenMs = System.currentTimeMillis()  // never send the time it was off
+                    ctx.phoneSensor = on; phoneOn = on
+                    if (on && !ctx.usageAccess) ctx.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                }
+                if (phoneOn && !usageOk) {
+                    Hairline(Modifier.padding(start = AppSpace.l))
+                    ChevronRow("Usage access", "Off") { ctx.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
+                }
             }
         }
         item {

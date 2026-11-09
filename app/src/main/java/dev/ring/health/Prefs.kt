@@ -15,6 +15,7 @@ object Prefs {
     private const val KEY_LAST_SYNC_MS    = "last_sync_ms"
     private const val KEY_LAST_SLEEP_MS   = "last_sleep_ms"
     private const val KEY_LAST_SCREEN_MS  = "last_screen_ms"
+    private const val KEY_PHONE_SENSOR    = "phone_sensor"
     private const val KEY_SLEEP_SCHEMA    = "sleep_schema"
     private const val KEY_SYNC_INTERVAL   = "sync_interval_min"
     private const val KEY_ASKED_BATTERY   = "asked_battery"
@@ -65,6 +66,11 @@ object Prefs {
     var Context.lastScreenMs: Long
         get() = prefs(this).getLong(KEY_LAST_SCREEN_MS, 0L)
         set(v) = prefs(this).edit().putLong(KEY_LAST_SCREEN_MS, v).apply()
+
+    /** Settings › Phone switch; off (default) = screen times are never read, whatever Usage access says. */
+    var Context.phoneSensor: Boolean
+        get() = prefs(this).getBoolean(KEY_PHONE_SENSOR, false)
+        set(v) = prefs(this).edit().putBoolean(KEY_PHONE_SENSOR, v).apply()
 
     /** Usage access, granted by the user in system Settings; needed to read screen on/off events. */
     val Context.usageAccess: Boolean

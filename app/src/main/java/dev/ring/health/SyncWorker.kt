@@ -41,6 +41,7 @@ import dev.ring.health.Prefs.lastCharging
 import dev.ring.health.Prefs.lastDeepSyncDay
 import dev.ring.health.Prefs.lastScreenMs
 import dev.ring.health.Prefs.lastSleepMs
+import dev.ring.health.Prefs.phoneSensor
 import dev.ring.health.Prefs.usageAccess
 import dev.ring.health.Prefs.staleWarned
 import dev.ring.health.Prefs.sleepSchema
@@ -208,9 +209,10 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             val store = SampleStore.get(applicationContext)
             val ctx = applicationContext
             val now = System.currentTimeMillis()
-            val screen = if (ctx.usageAccess) screenMetrics(ctx, if (ctx.lastScreenMs == 0L) now - 7 * 86_400_000L else ctx.lastScreenMs, now) else emptyList()
+            val phone = ctx.phoneSensor && ctx.usageAccess
+            val screen = if (phone) screenMetrics(ctx, if (ctx.lastScreenMs == 0L) now - 7 * 86_400_000L else ctx.lastScreenMs, now) else emptyList()
             store.add(metrics + screen)
-            if (ctx.usageAccess) ctx.lastScreenMs = screen.maxOfOrNull { it.timestampMs } ?: now
+            if (phone) ctx.lastScreenMs = screen.maxOfOrNull { it.timestampMs } ?: now
             val pusher = MetricsPusher(vmUrl, applicationContext.apiToken)
             var sent = 0
             while (true) {
