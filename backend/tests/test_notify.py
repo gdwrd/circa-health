@@ -558,3 +558,33 @@ def test_experiment_ended_is_quiet(monkeypatch) -> None:
     at(monkeypatch, 8)
     notify.evaluate(set())
     assert kinds() == []
+
+
+def test_calm_readiness_band_word_no_number(monkeypatch) -> None:
+    db.set_settings({"calm": "1", "birth_year": "1990"})
+    for i in range(1, 15):  # a cardio baseline: outside calm mode the body would end with "Cardio target 8–11."
+        db.save_day(D - timedelta(i), (None, None, None), {"inputs": {"cardio_load": 10.0}}, {})
+    for i, (score, word) in enumerate(((85, "Ready"), (84, "Steady"), (70, "Steady"), (69, "Take it easy"))):
+        d = D + timedelta(i)
+        seed(d, score, {"resting_hr": 90.0, "hrv_balance": 40.0})
+        at(monkeypatch, 8, day=d)
+        notify.evaluate({d})
+        n = notify.pending()[-1]
+        assert (n["kind"], n["title"], n["body"]) == ("readiness", word, "Lowest factor: heart rate variability.")
+    seed(d + timedelta(1), 90)  # no contributors
+    at(monkeypatch, 8, day=d + timedelta(1))
+    notify.evaluate({d + timedelta(1)})
+    assert (notify.pending()[-1]["title"], notify.pending()[-1]["body"]) == ("Ready", "Based on last night's sleep.")
+
+
+def test_calm_morning_band_word_no_score(monkeypatch) -> None:
+    db.set_settings({"calm": "1"})
+    for ready, title in ((85, "Ready"), (84, "Steady"), (70, "Steady"), (69, "Take it easy"), (None, "Last night")):
+        seed_morning(78, ready)
+        at(monkeypatch, 9)
+        notify.evaluate(set())
+        (n,) = notify.pending()
+        assert (n["kind"], n["title"], n["body"]) == ("morning", title, "7 h 15 min asleep")
+        assert n["extra"] == {"open": "sleep"}
+        with closing(db.connect()) as con, con:
+            con.execute("DELETE FROM notifications")  # test db: lets the once-a-day rule fire for the next score

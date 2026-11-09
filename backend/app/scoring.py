@@ -25,6 +25,14 @@ def baseline(values_14d: list[float | None]) -> float | None:
     return mean(vals) if len(vals) >= 5 else None
 
 
+def confidence(coverage: float, present: int, total: int) -> str:
+    """How much data backs a score: coverage = share of its hours with ring data, present/total = non-null contributors."""
+    share = present / total if total else 0.0
+    if coverage < 0.5 or share < 0.5:
+        return "low"
+    return "high" if coverage >= 0.8 and share >= 0.7 else "medium"
+
+
 def sleep_score(session: dict, need_min: float) -> dict:
     """session: total_min (asleep), awake_min, rem_min, deep_min, midpoint_h (local hour 0-24),
     regularity_sd (minutes, from regularity(); None while learning)."""

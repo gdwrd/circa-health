@@ -198,6 +198,7 @@ def test_sleep_depth_naps_regularity_spo2_wear(tmp_path, monkeypatch) -> None:
     assert i["bed_start"] == 660 and i["bed_end"] == 1100  # 23:00 / 06:20 as minutes after noon
     # worn: hours 3, 8, 9; awake = 24 - 7 (night) - 2 (naps); hour 12 has 0 steps but the ring was off
     assert i["worn_hours"] == 3 and c["wear"] == {"worn_hours": 2, "awake_hours": 15}
+    assert c["confidence"] == {"sleep": "low", "readiness": "low", "activity": "low"}  # HR in 2 of 8 night hours; 2/15 worn
     assert c["activity"]["inactive_hours"] == 100  # 1 inactive worn hour; counting ring-off hours would give 0
     monkeypatch.setattr(main, "_today", lambda: d)
     monkeypatch.setattr(main, "_vitals", lambda: {})
@@ -487,3 +488,38 @@ def test_experiments_start_422_409_stop() -> None:
         assert j["active"] is None and [(p["id"], p["ended"]) for p in j["past"]] == [(a["id"], today)]
         j = c.post("/experiments", json={"kind": "alcohol", "metric": "hrv", "days": 10}, headers=H).json()  # stopped: free
         assert j["active"]["days"] == 10 and [p["id"] for p in j["past"]] == [a["id"]]  # ended, never deleted
+
+
+def test_calm_setting_round_trip_and_today() -> None:
+    with TestClient(app) as c:
+        assert c.get("/settings", headers=H).json()["calm"] == "" and c.get("/today", headers=H).json()["calm"] is False
+        for bad in ({"calm": 1}, {"calm": True}, {"calm": "0"}, {"calm": "yes"}, {"calm": None}):
+            assert c.patch("/settings", json=bad, headers=H).status_code == 422, bad
+        assert c.patch("/settings", json={"calm": "1"}, headers=H).json()["calm"] == "1"
+        assert c.get("/settings", headers=H).json()["calm"] == "1" and c.get("/today", headers=H).json()["calm"] is True
+        assert c.patch("/settings", json={"calm": ""}, headers=H).json()["calm"] == ""
+        assert c.get("/today", headers=H).json()["calm"] is False
+
+
+def test_confidence_saved_and_passed_through_today(monkeypatch) -> None:
+    """Yesterday (all 24 h past): 23:00-07:00 night, ring worn all night and all day, no baselines yet."""
+    monkeypatch.delenv("TZ", raising=False)
+    d = date.today() - timedelta(1)
+    m = samples.midnight(d).timestamp()
+    ss, es = m - 3600, m + 7 * 3600
+    load({"biometric_sleep_end_ts": {ss: es}, "biometric_sleep_total_min": {ss: 450.0},
+          "biometric_sleep_awake_min": {ss: 30.0}, "biometric_sleep_rem_min": {ss: 90.0},
+          "biometric_sleep_deep_min": {ss: 80.0},
+          "biometric_hr_bpm": {t: 54.0 if t < es else 70.0 for t in range(int(ss), int(m) + 86400, 300)},
+          "biometric_steps": {m + 3600 * h: 500.0 for h in range(8, 21)}})
+    main._score_day(d)
+    row = db.days(d, d)[0]
+    # sleep 6/7 contributors (regularity learning); readiness 2/7 (no baselines); activity 2/4 (no week of history)
+    want = {"sleep": "high", "readiness": "low", "activity": "medium"}
+    assert row["c"]["confidence"] == want and row["c"]["wear"] == {"worn_hours": 17, "awake_hours": 17}
+    db.save_day(d - timedelta(3), (81, 72, 65), {}, {})  # a day scored before confidence existed
+    db.save_day(d - timedelta(2), (None, None, 40), {"confidence": {"sleep": None, "readiness": None, "activity": "low"}}, {})
+    with TestClient(app) as c:
+        assert c.get(f"/today?date={d}", headers=H).json()["confidence"] == want
+        assert c.get(f"/today?date={d - timedelta(3)}", headers=H).json()["confidence"] is None
+        assert c.get(f"/today?date={d - timedelta(2)}", headers=H).json()["confidence"]["sleep"] is None

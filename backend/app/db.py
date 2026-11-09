@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS samples(metric TEXT, ts INTEGER, value REAL, PRIMARY 
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 INSERT OR IGNORE INTO settings VALUES('step_goal','8000'),('sleep_need_min','450'),('medication_started',''),
   ('medication_time','08:00'),('medication_window_h','8'),('birth_year',''),('low_step_kind','workout'),('muted',''),
-  ('wake_weekday',''),('wake_weekend','');
+  ('wake_weekday',''),('wake_weekend',''),('calm','');
 CREATE TABLE IF NOT EXISTS workout_kind(date TEXT, start INTEGER, kind TEXT, PRIMARY KEY(date, start));
 CREATE TABLE IF NOT EXISTS sleep_override(date TEXT PRIMARY KEY, start INTEGER, "end" INTEGER);
 CREATE TABLE IF NOT EXISTS breath_session(start INTEGER PRIMARY KEY, "end" INTEGER, rounds INTEGER,

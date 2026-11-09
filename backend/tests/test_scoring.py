@@ -3,8 +3,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.scoring import (activity_score, baseline, bedtime_window, low_index, readiness_score, regularity, resilience,
-                         robust, sleep_debt, sleep_score, strain, stress_zones, tonight)
+from app.scoring import (activity_score, baseline, bedtime_window, confidence, low_index, readiness_score, regularity,
+                         resilience, robust, sleep_debt, sleep_score, strain, stress_zones, tonight)
 
 GOOD = {"total_min": 480, "awake_min": 8, "rem_min": 100, "deep_min": 100, "midpoint_h": 2.0, "regularity_sd": 20}
 SHORT = {"total_min": 240, "awake_min": 20, "rem_min": 40, "deep_min": 30, "midpoint_h": 1.0}
@@ -135,3 +135,12 @@ def test_bedtime_window_learning_flat_ok():
 
 def test_tonight() -> None:
     assert tonight(1140, 450, 40) == {"asleep_by_min": 650, "in_bed_by_min": 635, "sleep_min": 490, "extra_min": 40}
+
+
+def test_confidence_thresholds() -> None:
+    assert confidence(0.8, 7, 10) == "high"  # both exactly at their floor
+    assert confidence(0.79, 7, 7) == "medium" and confidence(1.0, 6, 10) == "medium"
+    assert confidence(0.5, 2, 4) == "medium"  # 0.5 is not below 0.5
+    assert confidence(0.49, 7, 7) == "low" and confidence(1.0, 3, 7) == "low"  # either one alone makes it low
+    assert confidence(1.0, 5, 7) == "high" and confidence(1.0, 3, 4) == "high"
+    assert confidence(1.0, 0, 0) == "low"  # no contributors at all

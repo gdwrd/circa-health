@@ -7,6 +7,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
+from math import ceil
 from statistics import mean, median
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request, Response
@@ -119,6 +120,7 @@ def _score_day(d: date) -> None:
     inputs: dict = {"sleep_min": n and n["total_min"], "nap_min": sum(x["total_min"] for x in naps)}
     extra: dict = {"naps": naps, "regularity": None, "spo2": None, "hr_low_t": None}
     sleep = ready = None
+    cover = 0.0
     if n:
         s, e = datetime.fromtimestamp(n["start"], samples.tz()), datetime.fromtimestamp(n["end"], samples.tz())
         mid = datetime.fromtimestamp((n["start"] + n["end"]) / 2, samples.tz())
@@ -130,6 +132,8 @@ def _score_day(d: date) -> None:
         sleep = scoring.sleep_score({**n, "midpoint_h": mid.hour + mid.minute / 60, "regularity_sd": sd}, need)
         hrs = {t: v for t, v in samples.raw("biometric_hr_bpm", s, e).items() if v > 0}
         hr = list(hrs.values())
+        # share of the night's hours (counted from its start) with a worn HR sample
+        cover = len({int((t - n["start"]) // 3600) for t in hrs if t < n["end"]}) / max(ceil((n["end"] - n["start"]) / 3600), 1)
         low = scoring.low_index(hr) if hr else None
         hrv = [v for v in samples.raw("biometric_hrv_rmssd", s, e).values() if v > 0]
         sp = [v for v in samples.raw("biometric_spo2_pct", s, e).values() if v > 0]
@@ -200,10 +204,17 @@ def _score_day(d: date) -> None:
     med_short = bool(med) and med > (d - timedelta(14)).isoformat() and rb["rhr"] is None
     sig["reason"] = "medication" if med_short else "baseline" if sig["index"] is None else None
 
+    def conf(r: dict | None, coverage: float) -> str | None:  # evidence only: never changes a score
+        c = r and r["contributors"]
+        return c and scoring.confidence(coverage, sum(v is not None for v in c.values()), len(c))
+
     scores = tuple(r and r["score"] for r in (sleep, ready, activity))
+    worn_share = wear["worn_hours"] / wear["awake_hours"] if wear["awake_hours"] else 0.0
     contributors = {"sleep": sleep and sleep["contributors"], "readiness": ready and ready["contributors"],
                     "activity": activity and activity["contributors"], "inputs": inputs, "stress": zones, "session": n,
-                    "signals": sig, "sleep_extra": extra, "wear": wear, "cardio": load, "workouts": workouts}
+                    "signals": sig, "sleep_extra": extra, "wear": wear, "cardio": load, "workouts": workouts,
+                    "confidence": {"sleep": conf(sleep, cover), "readiness": conf(ready, cover),
+                                   "activity": conf(activity, worn_share)}}
     kept = {k: v for k, v in base.items() if v is not None}
     db.save_day(d, scores, contributors, kept)
 
@@ -289,9 +300,11 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
     m, days = notify.cardio_base(d)
     wk = db.breaths(d - timedelta(6), d)
     mins = lambda xs: round(sum((b["end"] - b["start"]) / 60 for b in xs), 1)
-    status = "needs_age" if not db.settings()["birth_year"] else "learning" if m is None else "ok"
+    cfg = db.settings()
+    status = "needs_age" if not cfg["birth_year"] else "learning" if m is None else "ok"
     return {
         "status": "ok" if n >= 5 else "learning", "date": d.isoformat(), "baseline_days": f"{n}/14",
+        "calm": cfg["calm"] == "1", "confidence": row["c"].get("confidence"),
         **{k: {"score": row.get(f"{k}_score"), "contributors": row["c"].get(k)} for k in ("sleep", "readiness", "activity")},
         "stress": row["c"].get("stress"),
         "resilience": scoring.resilience([r["inputs"].get("stress_load") for r in rows],
@@ -647,7 +660,7 @@ def _settings_out() -> dict:
             "medication_started": s["medication_started"], "medication_time": s["medication_time"],
             "medication_window_h": float(s["medication_window_h"]), "birth_year": s["birth_year"],
             "low_step_kind": s["low_step_kind"], "muted": s["muted"],
-            "wake_weekday": s["wake_weekday"], "wake_weekend": s["wake_weekend"]}
+            "wake_weekday": s["wake_weekday"], "wake_weekend": s["wake_weekend"], "calm": s["calm"]}
 
 
 def _year_ok(v: object) -> bool:
@@ -670,7 +683,7 @@ def _started_ok(v: object) -> bool:
 SETTINGS = {"step_goal": lambda v: _num(v, 1000, 100000), "sleep_need_min": lambda v: _num(v, 240, 720),
             "medication_started": _started_ok, "medication_time": lambda v: isinstance(v, str) and HHMM.fullmatch(v),
             "medication_window_h": lambda v: _num(v, 1, 24), "birth_year": _year_ok,
-            "low_step_kind": lambda v: v in ("ride", "workout"),
+            "low_step_kind": lambda v: v in ("ride", "workout"), "calm": lambda v: v in ("", "1"),
             "wake_weekday": lambda v: v == "" or isinstance(v, str) and HHMM.fullmatch(v),
             "wake_weekend": lambda v: v == "" or isinstance(v, str) and HHMM.fullmatch(v),
             "muted": lambda v: isinstance(v, str) and (v == "" or all(k in notify.KINDS for k in v.split(",")))}
