@@ -216,7 +216,8 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             }
         }
         item {
-            Section("Phone", "Screen on/off times fix nights where you scrolled in bed. Only the times are sent.") {
+            Section("Phone", "Screen on/off times fix nights where you scrolled in bed. Only the times are sent." +
+                if (usageOk) "" else " Switch greyed out? In App info, tap ⋮ › Allow restricted settings first.") {
                 ChevronRow("Phone as sleep sensor", if (usageOk) "On" else "Off") { ctx.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
             }
         }
