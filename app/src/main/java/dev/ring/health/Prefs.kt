@@ -25,6 +25,7 @@ object Prefs {
     private const val KEY_CHARGING        = "charging"
     private const val KEY_BATTERY_WARNED  = "battery_warned"
     private const val KEY_CHARGED_TOLD    = "charged_told"
+    private const val KEY_BATTERY_ALERTS  = "battery_alerts"
     private const val KEY_TODAY_JSON      = "today_json"
     private const val KEY_TODAY_JSON_MS   = "today_json_ms"
 
@@ -109,6 +110,11 @@ object Prefs {
     var Context.chargedTold: Boolean
         get() = prefs(this).getBoolean(KEY_CHARGED_TOLD, false)
         set(v) = prefs(this).edit().putBoolean(KEY_CHARGED_TOLD, v).apply()
+
+    /** Settings > Notifications > Ring battery: the low and charged alerts. */
+    var Context.batteryAlerts: Boolean
+        get() = prefs(this).getBoolean(KEY_BATTERY_ALERTS, true)
+        set(v) = prefs(this).edit().putBoolean(KEY_BATTERY_ALERTS, v).apply()
 
     /** Last /today body for the home-screen widget, and when it was fetched. */
     var Context.todayJson: String

@@ -1,10 +1,12 @@
 package dev.ring.health.ui
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.content.Context
+import android.content.pm.PackageManager
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -36,6 +38,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.graphics.luminance
+import androidx.core.content.ContextCompat
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -72,6 +75,7 @@ import dev.ring.health.MetricsPusher
 import dev.ring.health.MainActivity
 import dev.ring.health.R
 import dev.ring.health.Prefs.apiToken
+import dev.ring.health.Prefs.batteryAlerts
 import dev.ring.health.Prefs.lastBatteryPct
 import dev.ring.health.Prefs.lastCharging
 import dev.ring.health.Prefs.lastSyncMs
@@ -83,7 +87,6 @@ import dev.ring.health.Prefs.vmUrl
 import dev.ring.health.SyncLog
 import dev.ring.health.SyncWorker
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -110,6 +113,8 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var lastSync by remember { mutableStateOf(ctx.lastSyncMs) }
     var interval by remember { mutableIntStateOf(ctx.syncIntervalMin) }
     var batteryOk by remember { mutableStateOf(MainActivity.isIgnoringBatteryOptimizations(ctx)) }
+    fun notifyOk() = ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+    var notifyGranted by remember { mutableStateOf(notifyOk()) }
     var pickInterval by remember { mutableStateOf(false) }
     var showLog by remember { mutableStateOf(false) }
     DisposableEffect(activity) {
@@ -117,6 +122,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             if (e == Lifecycle.Event.ON_RESUME) {
                 lastSync = ctx.lastSyncMs
                 batteryOk = MainActivity.isIgnoringBatteryOptimizations(ctx)
+                notifyGranted = notifyOk()
             }
         }
         activity.lifecycle.addObserver(obs)
@@ -125,9 +131,6 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
 
     var scanning by remember { mutableStateOf(false) }
     var scanResults by remember { mutableStateOf<List<ScanResult>?>(null) }
-    var measuring by remember { mutableStateOf(false) }
-    var liveText by remember { mutableStateOf("") }
-    var liveJob by remember { mutableStateOf<Job?>(null) }
 
     fun startScan() {
         if (!hasPermissions()) { requestPermissions(); return }
@@ -157,29 +160,17 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
     }
 
-    fun measureHeartRate() {
-        if (liveJob?.isActive == true) return
-        if (!hasPermissions()) { requestPermissions(); return }
-        val address = ctx.ringAddress
-        if (address.isNullOrBlank()) {
-            Toast.makeText(ctx, "Set ring address first", Toast.LENGTH_SHORT).show()
-            return
-        }
-        measuring = true
-        liveText = "Connecting to ring…"
-        liveJob = activity.lifecycleScope.launch {
-            val result = runLiveHr(ctx.applicationContext, address) { liveText = it }
-            measuring = false
-            liveText = result
-        }
-    }
-
     // Backend-only settings; null hides the section (no backend or unreachable).
     var med by remember { mutableStateOf<JsonObject?>(null) }
     var pickStart by remember { mutableStateOf(false) }
     var pickTime by remember { mutableStateOf(false) }
     var pickWindow by remember { mutableStateOf(false) }
-    LaunchedEffect(url, token) { med = Api.settings(ctx) }
+    var pickLowStep by remember { mutableStateOf(false) }
+    var birth by remember { mutableStateOf("") }
+    LaunchedEffect(url, token) {
+        med = Api.settings(ctx)
+        birth = (med?.get("birth_year") as? JsonPrimitive)?.contentOrNull.orEmpty()
+    }
     fun patchMed(key: String, v: JsonPrimitive) {
         activity.lifecycleScope.launch { Api.patchSettings(ctx, mapOf(key to v))?.let { med = it } }
     }
@@ -188,23 +179,38 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
 
     LargeTitleScaffold("Settings") {
         item {
-            Section("Ring") {
-                FieldRow("Address", ring, "Not configured") { ring = it.trim(); ctx.ringAddress = ring.takeIf { a -> a.isNotEmpty() } }
-                Hairline(Modifier.padding(start = AppSpace.l))
-                ButtonRow(if (scanning) "Scanning…" else "Scan for ring", enabled = !scanning, onClick = ::startScan)
-                Hairline(Modifier.padding(start = AppSpace.l))
+            Section("Ring", "Each sync reads new data from the ring and pushes it to the server.") {
                 ValueRow("Last sync", if (lastSync == 0L) "Never" else SimpleDateFormat("d MMM, ", Locale.getDefault()).format(Date(lastSync)) + clock(lastSync / 1000.0))
-            }
-        }
-        item {
-            Section("Server", "Point at the backend (:8429) or straight at VictoriaMetrics (:8428).") {
-                FieldRow("URL", url, "http://host:8429", KeyboardType.Uri) { url = it.trim(); ctx.vmUrl = url }
                 Hairline(Modifier.padding(start = AppSpace.l))
-                FieldRow("Token", token, "Optional", KeyboardType.Password, password = true) { token = it.trim(); ctx.apiToken = token }
+                ButtonRow("Sync now") {
+                    SyncWorker.runNow(ctx)
+                    Toast.makeText(ctx, "Sync started", Toast.LENGTH_SHORT).show()
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                val battery = ctx.lastBatteryPct
+                val stretch = when {
+                    interval <= 0 -> ""
+                    ctx.lastCharging && interval < 30 -> " · 30 min while charging"
+                    battery in 0..20 && interval < 15 -> " · 15 min on low battery"
+                    else -> ""
+                }
+                ChevronRow("Sync every", intervalLabel(interval) + stretch) { pickInterval = true }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ChevronRow("Sync log", "") { showLog = true }
             }
         }
         item {
-            Section("Goals") {
+            Section("You", "Your birth year sets your maximum heart rate for cardio zones. Goals shape the Activity and Sleep scores.") {
+                // Birth year is stored by the backend; without one there are no cardio zones.
+                if (med != null) {
+                    FieldRow("Birth year", birth, "Not set", KeyboardType.Number) {
+                        birth = it.filter(Char::isDigit).take(4)
+                        val y = birth.toIntOrNull()
+                        if (birth.isEmpty()) patchMed("birth_year", JsonPrimitive(""))
+                        else if (y != null && birth.length == 4 && y in 1900..LocalDate.now().year) patchMed("birth_year", JsonPrimitive(birth))
+                    }
+                    Hairline(Modifier.padding(start = AppSpace.l))
+                }
                 FieldRow("Step goal", steps, "8000", KeyboardType.Number) {
                     steps = it.filter(Char::isDigit)
                     steps.toIntOrNull()?.let { n -> ctx.stepGoal = n }
@@ -233,38 +239,48 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                     }
                 }
             }
-        }
-        item {
-            Section(
-                "Background sync",
-                "Each sync reads new data from the ring and pushes it to the server. " +
-                    "Android delays background work while battery optimisation is on.",
-            ) {
-                val battery = ctx.lastBatteryPct
-                val stretch = when {
-                    interval <= 0 -> ""
-                    ctx.lastCharging && interval < 30 -> " · 30 min while charging"
-                    battery in 0..20 && interval < 15 -> " · 15 min on low battery"
-                    else -> ""
+            item {
+                Section("Workouts", "The ring can't tell cycling from a gym session — both show few steps. Pick what you do most; you can change any session on the Heart screen.") {
+                    ChevronRow("Low-step sessions are", lowStepLabel((s["low_step_kind"] as? JsonPrimitive)?.contentOrNull)) { pickLowStep = true }
                 }
-                ChevronRow("Every", intervalLabel(interval) + stretch) { pickInterval = true }
-                Hairline(Modifier.padding(start = AppSpace.l))
-                ChevronRow("Battery", if (batteryOk) "Unrestricted" else "Optimised") {
-                    if (!batteryOk) MainActivity.requestBatteryExemption(ctx)
-                    else Toast.makeText(ctx, "Already unrestricted", Toast.LENGTH_SHORT).show()
-                }
-                Hairline(Modifier.padding(start = AppSpace.l))
-                ChevronRow("Sync log", "") { showLog = true }
             }
         }
         item {
-            Section("Actions", liveText.ifEmpty { null }) {
-                ButtonRow("Sync now") {
-                    SyncWorker.runNow(ctx)
-                    Toast.makeText(ctx, "Sync started", Toast.LENGTH_SHORT).show()
+            Section(
+                "Notifications",
+                if (notifyGranted) "Notifications arrive with a sync, so they can run a few minutes late."
+                else "Allow notifications for Circa in Android settings to receive these.",
+            ) {
+                med?.let { s ->
+                    val muted = (s["muted"] as? JsonPrimitive)?.contentOrNull.orEmpty().split(',').filter(String::isNotEmpty)
+                    NOTIFY_KINDS.forEach { (kind, title) ->
+                        SwitchRow(title, kind !in muted, enabled = notifyGranted) { on ->
+                            patchMed("muted", JsonPrimitive((if (on) muted - kind else muted + kind).joinToString(",")))
+                        }
+                        Hairline(Modifier.padding(start = AppSpace.l))
+                    }
                 }
+                SwitchRow("Ring battery", ctx.batteryAlerts, enabled = notifyGranted) { ctx.batteryAlerts = it }
+            }
+        }
+        item {
+            Section(
+                "Setup",
+                "Point the server at the backend (:8429) or straight at VictoriaMetrics (:8428). " +
+                    "Android delays background sync while battery optimisation is on.",
+            ) {
+                FieldRow("Address", ring, "Not configured") { ring = it.trim(); ctx.ringAddress = ring.takeIf { a -> a.isNotEmpty() } }
                 Hairline(Modifier.padding(start = AppSpace.l))
-                ButtonRow(if (measuring) "Measuring…" else "Measure heart rate now", enabled = !measuring, onClick = ::measureHeartRate)
+                ButtonRow(if (scanning) "Scanning…" else "Scan for ring", enabled = !scanning, onClick = ::startScan)
+                Hairline(Modifier.padding(start = AppSpace.l))
+                FieldRow("URL", url, "http://host:8429", KeyboardType.Uri) { url = it.trim(); ctx.vmUrl = url }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                FieldRow("Token", token, "Optional", KeyboardType.Password, password = true) { token = it.trim(); ctx.apiToken = token }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ChevronRow("Android battery", if (batteryOk) "Unrestricted" else "Optimised") {
+                    if (!batteryOk) MainActivity.requestBatteryExemption(ctx)
+                    else Toast.makeText(ctx, "Already unrestricted", Toast.LENGTH_SHORT).show()
+                }
             }
         }
         item {
@@ -332,6 +348,31 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         )
     }
 
+    if (pickLowStep) {
+        val cur = (med?.get("low_step_kind") as? JsonPrimitive)?.contentOrNull
+        AlertDialog(
+            onDismissRequest = { pickLowStep = false },
+            containerColor = c.card,
+            title = { Text("Low-step sessions are") },
+            text = {
+                Column {
+                    listOf("ride", "workout").forEach { k ->
+                        Text(
+                            lowStepLabel(k) + if (k == cur) "  ✓" else "",
+                            style = AppType.body, color = if (k == cur) c.tint else c.label,
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                patchMed("low_step_kind", JsonPrimitive(k))
+                                pickLowStep = false
+                            }.padding(vertical = AppSpace.m),
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton({ pickLowStep = false }) { Text("Cancel") } },
+        )
+    }
+
     if (pickTime) {
         TimePickDialog((med?.get("medication_time") as? JsonPrimitive)?.contentOrNull ?: "08:00", { pickTime = false }) {
             pickTime = false
@@ -373,6 +414,14 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
 private val INTERVALS = listOf(5, 15, 30, 60, 0)
 
 private fun intervalLabel(m: Int) = if (m <= 0) "Off" else "$m min"
+
+private fun lowStepLabel(k: String?) = if (k == "ride") "Rides" else "Workouts"
+
+/** Backend notification kinds (`/settings.muted`) in Settings order. */
+private val NOTIFY_KINDS = listOf(
+    "morning" to "Morning sleep", "readiness" to "Readiness", "bedtime" to "Wind down", "inactivity" to "Time to move",
+    "strain" to "Body signals", "checkin" to "Journal check-in", "weekly" to "Your week", "monthly" to "Your month",
+)
 
 /** Temporary debug view of [SyncLog]: ring reads and server pushes, newest first. */
 @Composable
@@ -487,11 +536,11 @@ private fun ChevronRow(title: String, value: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun SwitchRow(title: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+private fun SwitchRow(title: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
     var on by remember(checked) { mutableStateOf(checked) }
     Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
-        Text(title, style = AppType.body, modifier = Modifier.weight(1f))
-        Switch(on, { on = it; onChange(it) }, colors = iosSwitchColors())
+        Text(title, style = AppType.body, color = if (enabled) AppTheme.colors.label else AppTheme.colors.secondaryLabel, modifier = Modifier.weight(1f))
+        Switch(on, { on = it; onChange(it) }, enabled = enabled, colors = iosSwitchColors())
     }
 }
 

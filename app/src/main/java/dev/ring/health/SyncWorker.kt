@@ -31,6 +31,7 @@ import dev.ring.health.ColmiProtocol.SleepSession
 import dev.ring.health.ColmiProtocol.Spo2Sample
 import dev.ring.health.ColmiProtocol.StressSample
 import dev.ring.health.Prefs.apiToken
+import dev.ring.health.Prefs.batteryAlerts
 import dev.ring.health.Prefs.batteryWarned
 import dev.ring.health.Prefs.chargedTold
 import dev.ring.health.Prefs.lastActivityMs
@@ -453,6 +454,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         val full = b.charging && b.level == 100
         if (!low && ctx.batteryWarned) ctx.batteryWarned = false
         if (!b.charging) ctx.chargedTold = false
+        if (!ctx.batteryAlerts) return
         val granted = ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
         if (!granted) return
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
