@@ -200,23 +200,33 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 activitySamples, stressSamples, spo2Samples, sleepSessions
             )
 
-            if (metrics.isEmpty()) {
-                Log.i(TAG, "No new metrics to push")
-                log("Server: nothing new to push")
-            } else {
-                val pusher = MetricsPusher(vmUrl, applicationContext.apiToken)
-                val pushed = pusher.push(metrics)
-                log("Server: ${if (pushed) "pushed" else "push FAILED for"} ${metrics.size} metrics to $vmUrl (${pusher.lastResult})")
-                if (!pushed) {
+            // Everything read is kept on the phone; every unsent row goes out, so a failed push is retried with no age limit.
+            val store = SampleStore.get(applicationContext)
+            store.add(metrics)
+            val pusher = MetricsPusher(vmUrl, applicationContext.apiToken)
+            var sent = 0
+            while (true) {
+                val chunk = store.unsent(5000)
+                if (chunk.isEmpty()) break
+                if (!pusher.push(chunk)) {
+                    log("Server: push FAILED for ${chunk.size} samples to $vmUrl (${pusher.lastResult}), ${store.stats().third} waiting")
                     scheduleNext(applicationContext)
                     return Result.success()
                 }
-
+                store.markSent(chunk)
+                sent += chunk.size
+            }
+            if (sent == 0) {
+                Log.i(TAG, "No new metrics to push")
+                log("Server: nothing new to push")
+            } else {
+                log("Server: pushed $sent samples to $vmUrl (${pusher.lastResult})")
+                runCatching { postPending() }.onSuccess { n -> if (n > 0) log("Server: showed $n notifications") }
+            }
+            if (metrics.isNotEmpty()) {
                 sleepSessions.maxOfOrNull { it.endMs }
                     ?.let { applicationContext.lastSleepMs = it }
                 applicationContext.sleepSchema = 4
-
-                runCatching { postPending() }.onSuccess { n -> if (n > 0) log("Server: showed $n notifications") }
             }
 
             // Widget snapshot (a failed push returned above); plain VM answers /today 404 (null), so the widget keeps "Open to sync".
@@ -231,7 +241,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             applicationContext.lastSyncMs = System.currentTimeMillis()
             applicationContext.staleWarned = false
             if (deep) applicationContext.lastDeepSyncDay = todayKey
-            Log.i(TAG, "Sync complete, pushed ${metrics.size} metrics")
+            Log.i(TAG, "Sync complete, pushed $sent samples")
             scheduleNext(applicationContext)
             Result.success()
 
@@ -389,7 +399,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         }
 
         // ── Heart rate: raw 5-min samples (ring's native granularity) ─────
-        // Aggregations like RHR (overnight min) are computed in Grafana.
+        // Aggregations like RHR (overnight min) are computed in PromQL / the backend.
         for (s in hrSamples.filter { it.bpm > 0 }) {
             metrics += Metric("biometric_hr_bpm", labels, s.bpm.toDouble(), s.timestampMs)
         }

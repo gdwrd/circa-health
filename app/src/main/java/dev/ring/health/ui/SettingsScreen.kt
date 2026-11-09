@@ -74,6 +74,7 @@ import dev.ring.health.Metric
 import dev.ring.health.MetricsPusher
 import dev.ring.health.MainActivity
 import dev.ring.health.R
+import dev.ring.health.SampleStore
 import dev.ring.health.Prefs.apiToken
 import dev.ring.health.Prefs.batteryAlerts
 import dev.ring.health.Prefs.lastBatteryPct
@@ -177,6 +178,11 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         activity.lifecycleScope.launch { Api.patchSettings(ctx, mapOf(key to v))?.let { med = it } }
     }
 
+    // (stored, oldest ts, waiting) of the phone's sample history; re-read on open and after "Send all history".
+    var stored by remember { mutableStateOf(Triple(0, 0L, 0)) }
+    var storedTick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(storedTick) { stored = withContext(Dispatchers.IO) { SampleStore.get(ctx).stats() } }
+
     if (showLog) return SyncLogScreen { showLog = false }
 
     LargeTitleScaffold(
@@ -279,7 +285,10 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             Section(
                 "Setup",
                 "Point the server at the backend (:8429) or straight at VictoriaMetrics (:8428). " +
-                    "Android delays background sync while battery optimisation is on.",
+                    "Android delays background sync while battery optimisation is on.\n\n" +
+                    if (stored.first == 0) "Stored on this phone: no samples yet"
+                    else "Stored on this phone: ${"%,d".format(stored.first)} samples since " +
+                        SimpleDateFormat("d MMM yyyy", Locale.getDefault()).format(Date(stored.second)) + " · ${"%,d".format(stored.third)} waiting to send",
             ) {
                 FieldRow("Address", ring, "Not configured") { ring = it.trim(); ctx.ringAddress = ring.takeIf { a -> a.isNotEmpty() } }
                 Hairline(Modifier.padding(start = AppSpace.l))
@@ -292,6 +301,15 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 ChevronRow("Android battery", if (batteryOk) "Unrestricted" else "Optimised") {
                     if (!batteryOk) MainActivity.requestBatteryExemption(ctx)
                     else Toast.makeText(ctx, "Already unrestricted", Toast.LENGTH_SHORT).show()
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ButtonRow("Send all history") {
+                    activity.lifecycleScope.launch {
+                        withContext(Dispatchers.IO) { SampleStore.get(ctx).markAllUnsent() }
+                        storedTick++
+                        SyncWorker.runNow(ctx)
+                        Toast.makeText(ctx, "Sync started", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
         }
