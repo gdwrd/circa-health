@@ -414,8 +414,8 @@ private fun Hypnogram(segs: List<Seg>, startS: Double, endS: Double, hr: List<Hr
             val m = measurer.measure("Heart", label)
             drawText(m, topLeft = Offset(0f, (y0 + y1) / 2 - m.size.height / 2f))
             val path = Path()
-            hr.forEachIndexed { i, p ->  // a gap over 10 min (ring off) breaks the line
-                if (i == 0 || p.t - hr[i - 1].t > 600) path.moveTo(x(p.t), y(p.bpm)) else path.lineTo(x(p.t), y(p.bpm))
+            hr.forEachIndexed { i, p ->  // ring samples every 15 min; a gap over 30 min (ring off) breaks the line
+                if (i == 0 || p.t - hr[i - 1].t > 1800) path.moveTo(x(p.t), y(p.bpm)) else path.lineTo(x(p.t), y(p.bpm))
             }
             drawPath(path, c.heart, style = Stroke(1.5.dp.toPx()))
             low?.let { p ->
