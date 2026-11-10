@@ -768,6 +768,27 @@ def journal_insights() -> dict:
     return {"kinds": kinds}
 
 
+@api.get("/marks")
+def marks() -> dict:
+    """The named things (settings mark_N) with their marks of the last 90 days and what came before them.
+    A mark is a sample mark_N = 1; a 2 at the same timestamp cancelled it; marks before mark_N_since belong to
+    whatever the slot was called before."""
+    d, cfg = _today(), db.settings()
+    start = d - timedelta(insights.DAYS)
+    rows = db.days(start, d)
+    nt, day = insights.nights(rows), {r["date"]: r["inputs"] for r in rows}
+    things = []
+    for i in (1, 2, 3):
+        name, since = cfg[f"mark_{i}"], cfg[f"mark_{i}_since"]
+        if not name:
+            continue
+        raw = samples.raw(f"mark_{i}", samples.midnight(start), samples.midnight(d + timedelta(1)))
+        ts = sorted(t for t, v in raw.items() if v == 1 and _dt(t).date().isoformat() >= since)
+        things.append({"slot": i, "name": name, "since": since, "n": len(ts), "marks": ts[-20:],
+                       **insights.before({_dt(t).date() for t in ts}, nt, day)})
+    return {"things": things}
+
+
 @api.get("/journal/bp")
 def journal_bp(days: int = 30) -> dict:
     since = _today() - timedelta(min(max(days, 1), 365) - 1)
@@ -821,7 +842,8 @@ def _settings_out() -> dict:
             "medication_started": s["medication_started"], "medication_time": s["medication_time"],
             "medication_window_h": float(s["medication_window_h"]), "birth_year": s["birth_year"],
             "low_step_kind": s["low_step_kind"], "muted": s["muted"],
-            "wake_weekday": s["wake_weekday"], "wake_weekend": s["wake_weekend"], "calm": s["calm"], "guess": s["guess"]}
+            "wake_weekday": s["wake_weekday"], "wake_weekend": s["wake_weekend"], "calm": s["calm"], "guess": s["guess"],
+            **{k: s[k] for i in (1, 2, 3) for k in (f"mark_{i}", f"mark_{i}_since")}}
 
 
 def _year_ok(v: object) -> bool:
@@ -849,7 +871,9 @@ SETTINGS = {"step_goal": lambda v: _num(v, 1000, 100000), "sleep_need_min": lamb
             "low_step_kind": lambda v: v in ("ride", "workout"), "calm": lambda v: v in ("", "1"), "guess": lambda v: v in ("", "1"),
             "wake_weekday": lambda v: v == "" or isinstance(v, str) and HHMM.fullmatch(v),
             "wake_weekend": lambda v: v == "" or isinstance(v, str) and HHMM.fullmatch(v),
-            "muted": lambda v: isinstance(v, str) and (v == "" or all(k in notify.KINDS for k in v.split(",")))}
+            "muted": lambda v: isinstance(v, str) and (v == "" or all(k in notify.KINDS for k in v.split(","))),
+            # a thing to mark: its name, '' = unused; mark_N_since is set here, never by the client
+            **{f"mark_{i}": lambda v: isinstance(v, str) and len(v) <= 24 and v == v.strip() for i in (1, 2, 3)}}
 
 
 @api.get("/settings")
@@ -862,7 +886,9 @@ def patch_settings(tasks: BackgroundTasks, body: dict = Body(...)) -> dict:
     if not body or any(k not in SETTINGS or not SETTINGS[k](v) for k, v in body.items()):
         raise HTTPException(422, "bad settings")
     old = _settings_out()
-    db.set_settings({k: str(v) for k, v in body.items()})
+    # a slot named from empty starts clean (a rename keeps its since); its older samples stay and stop counting
+    since = {f"{k}_since": _today().isoformat() for k, v in body.items() if k.startswith("mark_") and v and not old[k]}
+    db.set_settings({k: str(v) for k, v in body.items()} | since)
     new = _settings_out()
     if any(old[k] != new[k] for k in ("step_goal", "sleep_need_min", "birth_year", "low_step_kind")):
         tasks.add_task(rescore, {_today() - timedelta(i) for i in range(14)})  # the startup backfill's window

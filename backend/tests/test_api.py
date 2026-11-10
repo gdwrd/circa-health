@@ -844,3 +844,46 @@ def test_last_time_cost_and_note_validation() -> None:
         assert put("alcohol+stress", text="x" * 280).status_code == 200 and put("signals", text="x").status_code == 200
         assert put("alcohol", text=" ").json()["last_time"] == event  # empty text removes the note
         assert sorted(r["key"] for r in db.query("SELECT key FROM note")) == ["alcohol+stress", "signals"]
+
+
+def test_marks_pushed_line_value_2_cancels_and_since_filters() -> None:
+    with TestClient(app) as c:
+        d, now = main._today(), int(time.time())
+        things = lambda: c.get("/marks", headers=H).json()["things"]
+        push = lambda v, t: c.post("/api/v1/import/prometheus", content=f'mark_1{{device="phone"}} {v} {t * 1000}\n',
+                                   headers=H).status_code
+        assert c.get("/marks").status_code == 401 and things() == []
+        old = now - 5 * 86400
+        assert push(1, old) == 204 and things() == []  # stored, but the slot has no name
+        c.patch("/settings", json={"mark_1": "Migraine"}, headers=H)
+        (t,) = things()  # the mark from before the slot was named does not count
+        assert set(t) == {"slot", "name", "since", "n", "marks", "status", "need", "n_with", "n_without", "pattern"}
+        assert (t["slot"], t["name"], t["since"], t["n"], t["marks"]) == (1, "Migraine", d.isoformat(), 0, [])
+        assert (t["status"], t["need"], t["n_with"], t["pattern"]) == ("learning", 3, 0, None)
+        assert push(1, now) == 204 and push(1, now - 1) == 204
+        assert (things()[0]["n"], things()[0]["marks"], things()[0]["n_with"]) == (2, [now - 1, now], 1)
+        assert push(2, now - 1) == 204  # undo: larger wins, the row stays
+        assert (things()[0]["n"], things()[0]["marks"]) == (1, [now])
+        assert [r[0] for r in db.query("SELECT value FROM samples WHERE metric='mark_1' ORDER BY ts")] == [1, 2, 1]
+        db.set_settings({"mark_1_since": (d - timedelta(10)).isoformat()})
+        assert things()[0]["marks"] == [old, now]
+        c.patch("/settings", json={"mark_3": "Nap"}, headers=H)
+        assert [(x["slot"], x["name"], x["n"]) for x in things()] == [(1, "Migraine", 2), (3, "Nap", 0)]
+
+
+def test_mark_naming_sets_since_and_renaming_keeps_it(monkeypatch) -> None:
+    with TestClient(app) as c:
+        patch = lambda **body: c.patch("/settings", json=body, headers=H)
+        s = c.get("/settings", headers=H).json()
+        assert all(s[f"mark_{i}"] == s[f"mark_{i}_since"] == "" for i in (1, 2, 3))
+        for bad in ({"mark_1": "x" * 25}, {"mark_1": 5}, {"mark_1": None}, {"mark_1": " x"}, {"mark_4": "x"},
+                    {"mark_1_since": "2026-01-01"}):
+            assert patch(**bad).status_code == 422, bad
+        d = main._today()
+        j = patch(mark_2="x" * 24).json()
+        assert (j["mark_2"], j["mark_2_since"], j["mark_1_since"]) == ("x" * 24, d.isoformat(), "")
+        monkeypatch.setattr(main, "_today", lambda: d + timedelta(3))
+        j = patch(mark_2="Headache", calm="1").json()
+        assert (j["mark_2"], j["mark_2_since"]) == ("Headache", d.isoformat())  # a rename keeps it
+        assert patch(mark_2="").json()["mark_2_since"] == d.isoformat()
+        assert patch(mark_2="Run").json()["mark_2_since"] == (d + timedelta(3)).isoformat()  # a reused slot starts clean

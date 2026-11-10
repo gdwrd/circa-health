@@ -10,12 +10,14 @@ NIGHT_KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "stress", "tr
 NIGHT = ("sleep_score", "deep_min", "rem_min", "hrv", "rhr", "total_min", "awake_min", "bed_start", "wind_down", "felt")
 EXPERIMENT_KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "breathe", "phone_in_bed")
 MED = ("day_hr", "rhr", "hrv", "bed_start", "total_min", "sleep_score")
+BEFORE = ("total_min", "awake_min", "deep_min", "hrv", "rhr", "bed_start", "sleep_score", "felt", "stress_load", "steps")
 UNITS = {"sleep_score": "pts", "readiness_score": "pts", "deep_min": "min", "rem_min": "min", "total_min": "min", "awake_min": "min",
-         "bed_start": "min", "wind_down": "min", "hrv": "ms", "rhr": "bpm", "day_hr": "bpm", "strain": "pts", "felt": "pts"}
+         "bed_start": "min", "wind_down": "min", "hrv": "ms", "rhr": "bpm", "day_hr": "bpm", "strain": "pts", "felt": "pts",
+         "stress_load": "h", "steps": "steps"}
 FLOORS = {"rhr": 1.5, "day_hr": 1.5, "hrv": 5.0, "awake_min": 10.0,  # same floors as scoring.FLOORS
           # minimum spreads so near-identical values (5 min grid bed times) are never "strong"
           "bed_start": 15.0, "wind_down": 15.0, "total_min": 15.0, "deep_min": 5.0, "rem_min": 5.0, "sleep_score": 3.0, "readiness_score": 3.0,
-          "strain": 5.0, "felt": 5.0}
+          "strain": 5.0, "felt": 5.0, "stress_load": 0.5, "steps": 1000.0}
 
 
 def effect(with_: list[float], without: list[float], floor: float = 0.0) -> dict | None:
@@ -170,6 +172,30 @@ def last_time(eps: list[dict], sig: dict[date, dict], today: date) -> dict | Non
         if len(run) >= 2:
             before = {"first": run[0], "nights": len(run)}
     return {"why": "signals", "key": "signals", "nights": s["streak"], "before": before}
+
+
+def before(marked: set[date], nt: dict[date, dict], day: dict[date, dict]) -> dict:
+    """What came before a marked day: the night that ended that morning plus the day before's stress_load and steps.
+    marked: local dates with a mark; nt: nights(); day: inputs per date. With = the first day of each run of marked
+    days, without = unmarked days not next to a marked one; only days with a daily row count.
+    pattern (None without a top effect): for the top metric a day "looks like it" when its value is past the midpoint
+    of the two means on the marked side; hits / marked = with-days that did / that have a value, alike = with and
+    without days that did (neighbours and later days of a run are in neither)."""
+    def o(d: date) -> dict:
+        y = day.get(d - timedelta(1), {})
+        return {**nt.get(d, {}), "stress_load": y.get("stress_load"), "steps": y.get("steps")}
+
+    days = sorted(set(nt) | set(day))
+    w = [o(d) for d in days if d in marked and d - timedelta(1) not in marked]
+    wo = [o(d) for d in days if not {d - timedelta(1), d, d + timedelta(1)} & marked]
+    out = compare(w, wo, BEFORE)
+    pattern = None
+    if out.get("top"):
+        e = out["top"][0]
+        m, mid = e["metric"], (e["with"] + e["without"]) / 2
+        like = lambda x: x.get(m) is not None and (x[m] - mid) * e["delta"] > 0
+        pattern = {"metric": m, "hits": sum(map(like, w)), "marked": e["n_with"], "alike": sum(map(like, w + wo))}
+    return {**out, "pattern": pattern}
 
 
 def _hhmm(m: float) -> str:

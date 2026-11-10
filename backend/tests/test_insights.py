@@ -316,3 +316,42 @@ def test_last_time_signals_finds_the_run_before_and_none_when_calm() -> None:
     assert insights.last_time([], {t: sig[t] | {"streak": 1}}, t) is None
     assert insights.last_time([], {t: sig[t] | {"level": "calm"}}, t) is None
     assert insights.last_time([], {}, t) is None
+
+
+def marked_rows(marked: set[date], n: int = 30) -> tuple[dict[date, dict], dict[date, dict]]:
+    """n days to TODAY: hrv 30 on a marked morning, and 3 h stress / 2000 steps the day before it."""
+    rows = [row(TODAY - timedelta(i), hrv=30 if TODAY - timedelta(i) in marked else 50) for i in range(n)]
+    for r in rows:
+        hard = r["date"] + timedelta(1) in marked
+        r["inputs"] |= {"stress_load": 3.0 if hard else 1.0, "steps": 2000.0 if hard else 8000.0}
+    return insights.nights(rows), {r["date"]: r["inputs"] for r in rows}
+
+
+def test_before_a_run_counts_once_and_neighbours_stay_out() -> None:
+    first = {TODAY - timedelta(i) for i in (3, 8, 13)}
+    nt, day = marked_rows(first)
+    b = insights.before(first | {TODAY - timedelta(2)}, nt, day)  # day 2 of a run: marked, hrv 50, not a new one
+    assert (b["status"], b["n_with"], b["n_without"]) == ("ok", 3, 20)  # 30 days - 4 marked - 6 next to one
+    e = {x["metric"]: x for x in b["all"]}
+    assert (e["hrv"]["delta"], e["hrv"]["n_with"], e["hrv"]["strong"]) == (-20, 3, True)
+    assert (e["stress_load"]["unit"], e["stress_load"]["delta"], e["stress_load"]["strong"]) == ("h", 2, True)
+    assert (e["steps"]["unit"], e["steps"]["delta"], e["steps"]["n_without"]) == ("steps", -6000, 19)  # no day before the oldest
+    assert [x["metric"] for x in b["top"]] == ["steps", "hrv"] and e["total_min"]["delta"] == 0
+
+
+def test_before_learning_under_three_marked_days() -> None:
+    two = {TODAY - timedelta(i) for i in (3, 8)}
+    assert insights.before(two, *marked_rows(two)) == {"status": "learning", "need": 1, "n_with": 2, "n_without": 24,
+                                                        "pattern": None}
+    assert insights.before(set(), {}, {}) == {"status": "learning", "need": 3, "n_with": 0, "n_without": 0, "pattern": None}
+
+
+def test_before_pattern_counts_both_sides() -> None:
+    marked = {TODAY - timedelta(i) for i in (3, 8, 13, 18)}
+    low = {TODAY - timedelta(i) for i in (3, 8, 13, 22, 25, 4)}  # 3 marked mornings, 2 unmarked ones, 1 next to a mark
+    rows = [row(TODAY - timedelta(i), hrv=30 if TODAY - timedelta(i) in low else 50) for i in range(30)]
+    b = insights.before(marked, insights.nights(rows), {r["date"]: r["inputs"] for r in rows})
+    assert [x["metric"] for x in b["top"]] == ["hrv"]  # 35 with, 47.8 without: under 41.4 looks like it
+    assert b["pattern"] == {"metric": "hrv", "hits": 3, "marked": 4, "alike": 5}
+    calm = insights.before(marked, *marked_rows(set()))  # nothing differs: no top effect, no pattern
+    assert calm["status"] == "ok" and calm["top"] == [] and calm["pattern"] is None
