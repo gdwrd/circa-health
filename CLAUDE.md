@@ -2,7 +2,7 @@
 
 Colmi R02 ring → Android app (`app/`, package `dev.ring.health`) → backend (`/api/v1/import/prometheus`, samples stored in `ring.db`).
 The Python backend (`backend/`) serves that import path, stores the samples and computes Sleep / Readiness / Activity scores.
-The plans are `docs/PLAN.md` … `docs/PLAN9.md` (current: `PLAN9.md`); the task ledger is `NEXTSTEPS.md`.
+The plans are `docs/PLAN.md` … `docs/PLAN10.md` (current: `PLAN10.md`); the task ledger is `NEXTSTEPS.md`.
 
 ## Token Economy & Workflow
 - Ponytail applies: smallest complete change, code first, minimal prose. No abstractions, options or "for later" code.
