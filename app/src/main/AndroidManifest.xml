@@ -44,6 +44,13 @@
 
         <receiver android:name=".WorkoutActionReceiver" android:exported="false" />
 
+        <!-- Drive check: ACL_CONNECTED is on the implicit-broadcast exception list, so this runs with the app closed -->
+        <receiver android:name=".DriveCheckReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+            </intent-filter>
+        </receiver>
+
         <receiver
             android:name=".widget.RingWidgetReceiver"
             android:exported="true"

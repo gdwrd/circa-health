@@ -2,6 +2,7 @@ package dev.ring.health.ui
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
@@ -20,7 +21,10 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -87,6 +91,10 @@ import dev.ring.health.R
 import dev.ring.health.SampleStore
 import dev.ring.health.Prefs.apiToken
 import dev.ring.health.Prefs.batteryAlerts
+import dev.ring.health.Prefs.carAddress
+import dev.ring.health.Prefs.carName
+import dev.ring.health.driveFacts
+import dev.ring.health.driveWarning
 import dev.ring.health.Prefs.goalsPushed
 import dev.ring.health.Prefs.hasStoredGoals
 import dev.ring.health.Prefs.lastBatteryPct
@@ -141,6 +149,9 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var listenOk by remember { mutableStateOf(ctx.notificationAccess) }
     var holdOn by remember { mutableStateOf(ctx.holdPlace) }
     var notifyGranted by remember { mutableStateOf(notifyOk()) }
+    var car by remember { mutableStateOf(ctx.carName) }
+    var pickCar by remember { mutableStateOf<List<BluetoothDevice>?>(null) } // the bonded devices while the Car dialog is open
+    var driveNow by remember { mutableStateOf(System.currentTimeMillis()) }
     var pickInterval by remember { mutableStateOf(false) }
     var showLog by remember { mutableStateOf(false) }
     val stopScan = remember { arrayOfNulls<() -> Unit>(1) } // set while a scan runs
@@ -152,6 +163,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 notifyGranted = notifyOk()
                 usageOk = ctx.usageAccess
                 listenOk = ctx.notificationAccess
+                driveNow = System.currentTimeMillis()
             }
         }
         activity.lifecycle.addObserver(obs)
@@ -311,6 +323,23 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 if (holdOn && !listenOk) {
                     Hairline(Modifier.padding(start = AppSpace.l))
                     ChevronRow("Notification access", "Off") { haptic.tick(); ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+                }
+            }
+        }
+        item {
+            Section("Driving", "When your phone connects to this Bluetooth device, Circa checks last night's sleep and how long you have been awake, " +
+                "and warns once if you are short. It never says you are fine to drive. It needs the ring on since you woke up.") {
+                ChevronRow("Car", car.ifEmpty { "None" }) {
+                    haptic.tick()
+                    if (!hasPermissions()) requestPermissions()
+                    else pickCar = (ctx.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter?.bondedDevices.orEmpty().toList()
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                val facts = remember(driveNow) { driveFacts(ctx, driveNow) }
+                Column(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = AppSpace.l, vertical = AppSpace.s), verticalArrangement = Arrangement.Center) {
+                    Text("Right now", style = AppType.body)
+                    Text(facts?.let { "Last 24 h: ${it.asleep} asleep · awake ${it.awake}" } ?: "No fresh ring data", style = AppType.subhead, color = c.secondaryLabel)
+                    facts?.let(::driveWarning)?.let { Text(it.first, style = AppType.subhead, color = c.signalHigh) }
                 }
             }
         }
@@ -489,6 +518,34 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             },
             confirmButton = {},
             dismissButton = { TextButton({ pickInterval = false }) { Text("Cancel") } },
+        )
+    }
+
+    pickCar?.let { devices ->
+        AlertDialog(
+            onDismissRequest = { pickCar = null },
+            containerColor = c.card,
+            title = { Text("Car") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    (listOf("" to "None") + devices.map { it.address to (it.name?.takeIf(String::isNotBlank) ?: it.address) }).forEach { (address, name) ->
+                        val cur = address == ctx.carAddress
+                        Text(
+                            name + if (cur) "  ✓" else "",
+                            style = AppType.body, color = if (cur) c.tint else c.label,
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                haptic.tick()
+                                ctx.carAddress = address
+                                car = if (address.isEmpty()) "" else name
+                                ctx.carName = car
+                                pickCar = null
+                            }.padding(vertical = AppSpace.m),
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton({ pickCar = null }) { Text("Cancel") } },
         )
     }
 

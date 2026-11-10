@@ -31,6 +31,9 @@ object Prefs {
     private const val KEY_BREATH_ROUNDS   = "breath_rounds"
     private const val KEY_SUGGEST_DISMISSED = "suggest_dismissed"
     private const val KEY_HOLD_PLACE      = "hold_place"
+    private const val KEY_CAR_ADDRESS     = "car_address"
+    private const val KEY_CAR_NAME        = "car_name"
+    private const val KEY_DRIVE_WARNED    = "drive_warned_wake"
 
     private fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -92,6 +95,20 @@ object Prefs {
     /** Notification access, granted by the user in system Settings; needed to see what is playing. */
     val Context.notificationAccess: Boolean
         get() = packageName in NotificationManagerCompat.getEnabledListenerPackages(this)
+
+    /** Settings › Driving: the Bluetooth device whose connect runs the drive check; "" = off. */
+    var Context.carAddress: String
+        get() = prefs(this).getString(KEY_CAR_ADDRESS, "") ?: ""
+        set(v) = prefs(this).edit().putString(KEY_CAR_ADDRESS, v).apply()
+
+    var Context.carName: String
+        get() = prefs(this).getString(KEY_CAR_NAME, "") ?: ""
+        set(v) = prefs(this).edit().putString(KEY_CAR_NAME, v).apply()
+
+    /** The wake time (unix s) the drive warning was already shown for; one warning per wake period. */
+    var Context.driveWarnedWake: Long
+        get() = prefs(this).getLong(KEY_DRIVE_WARNED, 0L)
+        set(v) = prefs(this).edit().putLong(KEY_DRIVE_WARNED, v).apply()
 
     /** Minutes between background syncs (ring read + push); 0 = background sync off. */
     var Context.syncIntervalMin: Int
