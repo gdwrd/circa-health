@@ -491,6 +491,42 @@ def test_tonight_unset_keeps_old_rule(monkeypatch) -> None:
     assert kinds() == ["bedtime"] and notify.pending()[0]["body"] == "Your usual bedtime is 23:00."
 
 
+def alarm(h: int, m: int, sent_h: int = 21, day: date = D) -> None:
+    """phone_next_alarm at h:m on the morning after D, sent (stamped) at sent_h:00 on D."""
+    t = datetime(day.year, day.month, day.day, sent_h).timestamp()
+    load({"phone_next_alarm": {t: datetime(2026, 11, 10, h, m).timestamp()}})
+
+
+def test_tonight_takes_wake_from_the_phone_alarm(monkeypatch) -> None:
+    at(monkeypatch, 22)
+    alarm(6, 30)
+    assert notify.tonight(D)["wake_min"] == 1110  # no wake time in Settings
+    db.set_settings({"wake_weekday": "07:00"})
+    assert notify.tonight(D)["wake_min"] == 1110  # the alarm beats the settings
+
+
+def test_tonight_ignores_an_alarm_outside_03_to_14(monkeypatch) -> None:
+    at(monkeypatch, 22)
+    alarm(15, 0)  # an afternoon timer
+    assert notify.tonight(D) is None
+    db.set_settings({"wake_weekday": "07:00"})
+    assert notify.tonight(D)["wake_min"] == 1140
+
+
+def test_tonight_without_alarm_uses_settings(monkeypatch) -> None:
+    at(monkeypatch, 22)
+    db.set_settings({"wake_weekday": "07:00"})
+    assert notify.tonight(D)["wake_min"] == 1140
+
+
+def test_tonight_ignores_a_stale_alarm_sample(monkeypatch) -> None:
+    at(monkeypatch, 22)
+    alarm(6, 30, sent_h=9)  # 13 h old
+    assert notify.tonight(D) is None
+    db.set_settings({"wake_weekday": "07:00"})
+    assert notify.tonight(D)["wake_min"] == 1140
+
+
 def test_wake_settings_patch() -> None:
     with TestClient(app) as c:
         assert c.get("/settings", headers=H).json()["wake_weekday"] == ""

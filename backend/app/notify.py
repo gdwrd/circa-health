@@ -122,9 +122,15 @@ def debt(end: date) -> dict | None:
 
 
 def tonight(d: date) -> dict | None:
-    """Plan for the night after evening d from the usual wake time (weekend = nights before Sat/Sun); None when unset."""
+    """Plan for the night after evening d from the phone's next alarm (latest of the last 12 h, if it falls 03:00-14:00 on d + 1),
+    else the usual wake time (weekend = nights before Sat/Sun); None when neither is set."""
     s = db.settings()
-    wake = s["wake_weekend" if (d + timedelta(1)).weekday() >= 5 else "wake_weekday"]
+    lo = (samples.midnight(d + timedelta(1)) + timedelta(hours=3)).timestamp()
+    alarm = list(samples.raw("phone_next_alarm", _now() - timedelta(hours=12), _now()).values())
+    if alarm and lo <= alarm[-1] < lo + 11 * 3600:
+        wake = f"{datetime.fromtimestamp(alarm[-1], samples.tz()):%H:%M}"
+    else:
+        wake = s["wake_weekend" if (d + timedelta(1)).weekday() >= 5 else "wake_weekday"]
     if not wake:
         return None
     h, m = map(int, wake.split(":"))

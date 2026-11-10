@@ -1,6 +1,7 @@
 package dev.ring.health
 
 import android.annotation.SuppressLint
+import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.Manifest
@@ -247,7 +248,10 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             val now = System.currentTimeMillis()
             val phone = ctx.phoneSensor && ctx.usageAccess
             val screen = if (phone) screenMetrics(ctx, if (ctx.lastScreenMs == 0L) now - 7 * 86_400_000L else ctx.lastScreenMs, now) else emptyList()
-            store.add(metrics + screen)
+            // shortcut: stamped at the hour and the larger value wins inside it, so an alarm moved earlier within the same hour is ignored until the next hour, upgrade if that bites
+            val alarm = (ctx.getSystemService(Context.ALARM_SERVICE) as AlarmManager).nextAlarmClock?.triggerTime
+            val alarmRows = if (phone && alarm != null) listOf(Metric("phone_next_alarm", mapOf("device" to "colmi_r02"), alarm / 1000.0, now - now % 3_600_000L)) else emptyList()
+            store.add(metrics + screen + alarmRows)
             if (phone) ctx.lastScreenMs = screen.maxOfOrNull { it.timestampMs } ?: now
             val pusher = MetricsPusher(vmUrl, applicationContext.apiToken)
             var sent = 0
