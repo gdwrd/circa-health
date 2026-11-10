@@ -833,7 +833,7 @@ def test_last_time_cost_and_note_validation() -> None:
         assert kinds["alcohol"]["cost"] == cost and "cost" not in kinds["stress"]
         db.add_journal(d.isoformat(), "alcohol", None, None, 0)
         event = {"why": "event", "key": "alcohol", "kinds": ["alcohol"], "nights": 0, "last": d.isoformat(),
-                 "before": {"first": (d - timedelta(10)).isoformat(), "nights": 2}, "price": cost, "note": None}
+                 "before": {"first": (d - timedelta(10)).isoformat(), "nights": 2}, "price": cost, "deltas": {}, "usual": {}, "note": None}
         assert last() == event and last(f"?date={d - timedelta(1)}") is None
 
         assert c.put("/notes/alcohol", json={"text": "x"}).status_code == 401

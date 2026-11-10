@@ -295,7 +295,9 @@ def test_last_time_event_has_the_time_before_and_the_price() -> None:
     es = eps({E0: {"alcohol"}, t: {"alcohol"}}, 40, 30, 10, today=t)
     assert insights.last_time(es, {}, t) == {
         "why": "event", "key": "alcohol", "kinds": ["alcohol"], "nights": 0, "last": t,
-        "before": {"first": E0, "nights": 2}, "price": {"status": "learning", "n": 1}}
+        "before": {"first": E0, "nights": 2}, "price": {"status": "learning", "n": 1}, "deltas": {}, "usual": {}}
+    night = insights.last_time(eps({E0: {"alcohol"}}, 40, today=E0 + timedelta(1)), {}, E0 + timedelta(1))  # night 1: its flagged inputs
+    assert (night["deltas"], night["usual"]) == ({"rhr": 6.0}, {"rhr": 55.0})
 
 
 def test_last_time_closed_only_on_the_first_calm_morning() -> None:

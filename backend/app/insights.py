@@ -161,7 +161,8 @@ def last_time(eps: list[dict], sig: dict[date, dict], today: date) -> dict | Non
         before = next(({"first": b["first"], "nights": b["nights"]} for b in reversed(eps)
                        if b["first"] < e["first"] and b["key"] == e["key"] and b["state"] in ("closed", "capped")), None)
         return {"why": "event" if opened else "closed", "key": e["key"], "kinds": e["kinds"], "nights": e["nights"],
-                "last": e["last"], "before": before, "price": prices(eps).get(e["key"])}  # a mixed key has no price
+                "last": e["last"], "before": before, "price": prices(eps).get(e["key"]),  # a mixed key has no price
+                "deltas": e["deltas"], "usual": e["usual"]}  # the first night's flagged inputs
     s = sig.get(today) or {}
     if s.get("level") not in ("elevated", "high") or (s.get("streak") or 0) < 2:
         return None

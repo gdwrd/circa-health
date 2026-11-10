@@ -110,9 +110,12 @@ object Api {
     suspend fun guess(ctx: Context, date: String, value: Int?) = postToday(ctx, "/guess", mapOf("date" to JsonPrimitive(date), "value" to JsonPrimitive(value)))
     suspend fun verdict(ctx: Context, date: String, v: Int) = postToday(ctx, "/guess/verdict", mapOf("date" to JsonPrimitive(date), "verdict" to JsonPrimitive(v)))
 
-    /** The reply also replaces the cached GET `/today`: offline, the app must not show the gate or the verdict chips again. */
-    private suspend fun postToday(ctx: Context, path: String, body: Map<String, JsonPrimitive>): JsonObject? =
-        (call(ctx, path, "POST", JsonObject(body).toString()) as? JsonObject)?.also { r ->
+    /** PUT /notes/{key} ([key] = `/today.last_time.key`; empty [text] removes the note). Returns the new `/today`, or null on failure. */
+    suspend fun putNote(ctx: Context, key: String, text: String) = postToday(ctx, "/notes/$key", mapOf("text" to JsonPrimitive(text)), "PUT")
+
+    /** The reply also replaces the cached GET `/today`: offline, the app must not show the gate, the verdict chips or the old note again. */
+    private suspend fun postToday(ctx: Context, path: String, body: Map<String, JsonPrimitive>, method: String = "POST"): JsonObject? =
+        (call(ctx, path, method, JsonObject(body).toString()) as? JsonObject)?.also { r ->
             withContext(Dispatchers.IO) { runCatching { cacheFile(ctx, "/today").apply { parentFile!!.mkdirs() }.writeText(r.toString()) } }
         }
 

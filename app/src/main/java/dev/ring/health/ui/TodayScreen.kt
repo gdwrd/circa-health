@@ -126,6 +126,8 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.TextRange
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import java.time.LocalDate
@@ -358,6 +360,10 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
             }
         }
         d["signals"].obj()?.let { item { BodySignals(it, medStarted) } }
+        // An event logged today with no night, no earlier episode and no note has nothing to show yet.
+        d["last_time"].obj()?.takeIf { (it["nights"].num() ?: 0.0) > 0 || it["before"].obj() != null || it["price"].obj()?.get("status").str() == "ok" || it["note"].str() != null }?.let { lt ->
+            item { LastTimeCard(lt) { text -> scope.launch { answered(Api.putNote(ctx, lt["key"].str().orEmpty(), text), false) } } }
+        }
         item {
             val v = d["vitals"].obj()
             val tiles = listOf("Heart rate" to ("hr" to "bpm"), "HRV" to ("hrv" to "ms"), "SpO₂ · latest" to ("spo2" to "%"), "Ring battery" to ("battery" to "%"))
@@ -1308,6 +1314,132 @@ private fun BodySignals(s: JsonObject, medStarted: String?) {
     }
 }
 
+/** "1 night", "2 nights", "1.5 nights" (a median). */
+private fun nightsText(v: Double) = if (v == 1.0) "1 night" else "${if (v % 1 == 0.0) v.roundToInt().toString() else v.toString()} nights"
+
+/** `/today.last_time`: how long the raised nights after an event (or a run with no event) lasted before, plus the user's note to themselves. */
+@Composable
+private fun LastTimeCard(lt: JsonObject, onNote: (String) -> Unit) {
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    var editing by remember { mutableStateOf(false) }
+    val why = lt["why"].str()
+    val n = lt["nights"].num()?.roundToInt() ?: 0
+    val before = lt["before"].obj()
+    val was = before?.get("nights").num()?.roundToInt()
+    val first = runCatching { LocalDate.parse(before?.get("first").str()) }.getOrNull()
+    val usual = lt["price"].obj()?.takeIf { it["status"].str() == "ok" }?.get("nights").num()
+    val expect = if (why == "closed") 0 else kotlin.math.ceil(usual ?: was?.toDouble() ?: 0.0).toInt()
+    val after = "After " + join((lt["kinds"] as? JsonArray)?.mapNotNull { LOGGED[it.str()] }.orEmpty().ifEmpty { listOf("what you logged") })
+    val dm = DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())
+    val note = lt["note"].str()
+    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+        Text("Last time", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
+        InsetCard {
+            Column(Modifier.fillMaxWidth().padding(start = AppSpace.l, top = AppSpace.l, end = AppSpace.l, bottom = AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                if (n > 0 || expect > 0) Row(verticalAlignment = Alignment.CenterVertically) {
+                    WalkDown(
+                        n, expect, ring = why != "signals", closed = why == "closed", modifier = Modifier.weight(1f),
+                        describe = when (why) {
+                            "closed" -> "Signals raised for ${nightsText(n.toDouble())} after the event, then back to calm."
+                            "event" -> "${nightsText(n.toDouble())} raised since the event." + if (expect > 0) " It usually takes ${nightsText(expect.toDouble())}." else ""
+                            else -> "${nightsText(n.toDouble())} raised in a row." + if (expect > 0) " Last time it lasted ${nightsText(expect.toDouble())}." else ""
+                        },
+                    )
+                    if (why == "closed") Text(nightsText(n.toDouble()), style = AppType.headline, modifier = Modifier.padding(start = AppSpace.m))
+                }
+                when (why) {
+                    "event" -> {
+                        Text(after, style = AppType.headline)
+                        if (n > 0) Text("Night $n: ${if (n > 1) "still " else ""}above your usual.", style = AppType.subhead)
+                        // The first night's flagged inputs.
+                        val usualBy = lt["usual"].obj()
+                        lt["deltas"].obj()?.mapNotNull { (k, v) -> flagLine(k, v.num(), usualBy?.get(k).num()) }?.forEach { Text(it, style = AppType.subhead) }
+                        if (first != null && was != null) Text(
+                            "Last time (${first.format(dm)}): " + if (was == 0) "no raised nights." else "back to usual after ${nightsText(was.toDouble())}.", style = AppType.subhead,
+                        )
+                        if (usual != null) Text(if (usual == 0.0) "Usually no extra nights for you." else "Usually ${nightsText(usual)} for you.", style = AppType.subhead, color = c.secondaryLabel)
+                    }
+                    "closed" -> {
+                        Text("Back in your usual range.", style = AppType.headline)
+                        val on = runCatching { " on " + LocalDate.parse(lt["last"].str()).format(DateTimeFormatter.ofPattern("EEEE", Locale.getDefault())) }.getOrDefault("")
+                        Text("$after$on: ${nightsText(n.toDouble())}.", style = AppType.subhead)
+                    }
+                    else -> {
+                        Text("This has happened before.", style = AppType.headline)
+                        if (first != null && was != null) {
+                            val end = first.plusDays(was - 1L)
+                            val range = first.format(if (first.month == end.month) DateTimeFormatter.ofPattern("d") else dm) + " to " + end.format(dm)
+                            Text("Last time your signals ran high ($range), it lasted ${nightsText(was.toDouble())}.", style = AppType.subhead)
+                        }
+                    }
+                }
+                if (note != null) {
+                    Text(note, style = AppType.subhead, modifier = Modifier.padding(top = AppSpace.xs))
+                    Text("You wrote this last time.", style = AppType.footnote, color = c.secondaryLabel)
+                }
+                Text(
+                    if (note == null) "Leave a note for next time" else "Edit note", style = AppType.body, color = c.tint,
+                    modifier = Modifier.clip(AppShape.small).clickable(role = Role.Button) { haptic.tick(); editing = true }.padding(vertical = AppSpace.s),
+                )
+            }
+        }
+    }
+    if (editing) {
+        // Cursor after the existing text, so an edit continues it.
+        var field by remember { mutableStateOf(TextFieldValue(note.orEmpty(), TextRange(note.orEmpty().length))) }
+        val text = field.text
+        AlertDialog(
+            onDismissRequest = { editing = false }, containerColor = c.card, titleContentColor = c.label, textContentColor = c.label,
+            title = { Text("Note for next time", style = AppType.title) },
+            confirmButton = { TextButton({ haptic.tick(); editing = false; onNote(text.trim()) }) { Text("Save", color = c.tint) } },
+            dismissButton = { TextButton({ haptic.tick(); editing = false }) { Text("Cancel", color = c.tint) } },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
+                    Box(Modifier.fillMaxWidth().clip(AppShape.small).background(c.secondaryLabel.copy(alpha = 0.12f)).padding(AppSpace.m)) {
+                        if (text.isEmpty()) Text("What helped, what you would do differently", style = AppType.body, color = c.secondaryLabel)
+                        BasicTextField(
+                            field, { field = if (it.text.length > 280) it.copy(text = it.text.take(280)) else it }, textStyle = AppType.body.copy(color = c.label),
+                            cursorBrush = SolidColor(c.tint), modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp),
+                        )
+                    }
+                    Text("${text.length}/280", style = AppType.footnote, color = c.secondaryLabel)
+                }
+            },
+        )
+    }
+}
+
+/** The mirror of [LeadStrip]: the event as a hollow ring, then one dot per raised night walking down; faint dots = the nights
+ *  it took before ([usual]); [closed] lands on a calm dot and ends with a dashed tear line. */
+@Composable
+private fun WalkDown(nights: Int, usual: Int, ring: Boolean, closed: Boolean, describe: String, modifier: Modifier) {
+    val c = AppTheme.colors
+    val reduce = LocalReduceMotion.current
+    val fall = remember { Animatable(if (reduce) 1f else 0f) }
+    LaunchedEffect(fall) { fall.animateTo(1f, tween(600)) }
+    Canvas(modifier.height(36.dp).semantics { contentDescription = describe }) {
+        val slot = size.width / 8
+        val r = minOf(slot * 0.3f, 5.dp.toPx())
+        val top = r * 1.4f
+        val base = size.height - r * 1.4f
+        val total = maxOf(nights, usual).coerceIn(1, 6) // raised nights the 8 slots have room for, between the event and calm
+        for (i in 0..total + 1) {
+            val o = Offset(slot * (i + 0.5f), top + (base - top) * fall.value * i / (total + 1))
+            when {
+                i == 0 -> if (ring) drawCircle(c.secondaryLabel, r * 1.2f, o, style = Stroke(r * 0.4f))
+                i <= nights -> drawCircle(if (i == 1) c.signalHigh else c.signalElevated, r, o)
+                closed -> drawCircle(c.signalCalm, r, o)
+                i <= usual + 1 -> drawCircle(c.secondaryLabel.copy(alpha = 0.35f), r * 0.7f, o)
+            }
+        }
+        if (closed) drawLine(
+            c.secondaryLabel, Offset(size.width - 1f, 0f), Offset(size.width - 1f, size.height), 1.dp.toPx(),
+            pathEffect = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx())),
+        )
+    }
+}
+
 @Composable
 private fun Contributor(name: String, value: Double?, color: Color, info: String?) {
     val c = AppTheme.colors
@@ -1424,6 +1556,13 @@ private fun WhatAffectsYou(kinds: List<Pair<String, JsonObject>>, onTest: (() ->
                     LeadStrip(n)
                     Text("Your body signals rose about $n ${if (n == 1) "day" else "days"} before you felt sick.", style = AppType.subhead)
                 } }
+                // Kinds with 3 finished episodes of their own: the median raised nights after one.
+                val cost = k["cost"].obj()?.takeIf { it["status"].str() == "ok" }?.let { p -> p["nights"].num()?.let { v -> @Composable {
+                    Text(
+                        (if (v == 0.0) "Usually no extra nights" else "Usually costs you ${nightsText(v)}") + " · ${p["n"].num()?.roundToInt() ?: 0} times",
+                        style = AppType.subhead, color = c.secondaryLabel,
+                    )
+                } } }
                 Column(Modifier.fillMaxWidth().clickable(enabled = ok) { haptic.tick(); open = !open }.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
                     if (!ok) {
                         val need = 3 - nWith
@@ -1434,6 +1573,7 @@ private fun WhatAffectsYou(kinds: List<Pair<String, JsonObject>>, onTest: (() ->
                         )
                         stress?.invoke()
                         lead?.invoke()
+                        cost?.invoke()
                         return@Column
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1457,6 +1597,7 @@ private fun WhatAffectsYou(kinds: List<Pair<String, JsonObject>>, onTest: (() ->
                             )
                         }
                     }
+                    cost?.invoke()
                     AnimatedVisibility(open) {
                         Column(verticalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
                             (k["all"] as? JsonArray)?.mapNotNull { e -> e.obj()?.let { sentence(kind, it) } }?.forEach { Text(it, style = AppType.subhead) }
