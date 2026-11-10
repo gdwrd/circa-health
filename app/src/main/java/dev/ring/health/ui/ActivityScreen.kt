@@ -220,17 +220,21 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
             dismissButton = { TextButton({ editing = null }) { Text("Cancel") } },
         )
     }
-    if (adding) AddWorkout(date, { adding = false }) { start, end, kind ->
-        val a = Api.addWorkout(ctx, date, start, end, kind)?.get("workouts") as? JsonArray
+    if (adding) AddWorkout(date, { adding = false }) { on, start, end, kind ->
+        val a = Api.addWorkout(ctx, on, start, end, kind)?.get("workouts") as? JsonArray
         // load before closing (closing cancels this coroutine): the day's journal entry is new
-        if (a != null) { workouts = a.mapNotNull { it.obj() }; load(); adding = false }
+        // the reply lists the start day's workouts: not the shown day's when the start is the evening before
+        if (a != null) { if (on == date) workouts = a.mapNotNull { it.obj() }; load(); adding = false }
         a != null
     }
 }
 
-/** Kind, start and end on [date] for a workout the ring missed. [save] returns false to keep the dialog open. */
+/**
+ * Kind, start and end on [date] for a workout the ring missed; an end before the start means it began the evening
+ * before, and [save] gets that day. [save] returns false to keep the dialog open.
+ */
 @Composable
-private fun AddWorkout(date: LocalDate, onDismiss: () -> Unit, save: suspend (Long, Long, String) -> Boolean) {
+private fun AddWorkout(date: LocalDate, onDismiss: () -> Unit, save: suspend (LocalDate, Long, Long, String) -> Boolean) {
     val c = AppTheme.colors
     val now = remember { LocalTime.now().withSecond(0).withNano(0) }
     var kind by remember { mutableStateOf("ride") }
@@ -259,6 +263,7 @@ private fun AddWorkout(date: LocalDate, onDismiss: () -> Unit, save: suspend (Lo
                 }
                 Text(
                     if (failed) "Couldn't save. It must last 5 minutes to 12 hours, and the server must be reachable."
+                    else if (end < start) "It starts the evening before and is listed on that day."
                     else "Heart rate and load show only what the ring measured in that time.",
                     style = AppType.footnote, color = c.secondaryLabel,
                 )
@@ -267,7 +272,8 @@ private fun AddWorkout(date: LocalDate, onDismiss: () -> Unit, save: suspend (Lo
         confirmButton = {
             TextButton({
                 val zone = ZoneId.systemDefault()
-                scope.launch { failed = !save(date.atTime(start).atZone(zone).toEpochSecond(), date.atTime(end).atZone(zone).toEpochSecond(), kind) }
+                val on = if (end < start) date.minusDays(1) else date
+                scope.launch { failed = !save(on, on.atTime(start).atZone(zone).toEpochSecond(), date.atTime(end).atZone(zone).toEpochSecond(), kind) }
             }) { Text("Save", color = c.tint) }
         },
         dismissButton = { TextButton(onDismiss) { Text("Cancel", color = c.tint) } },
