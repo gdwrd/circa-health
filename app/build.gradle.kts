@@ -69,4 +69,5 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.haze)
     implementation(libs.androidx.glance.appwidget)
+    implementation(libs.play.services.location)
 }

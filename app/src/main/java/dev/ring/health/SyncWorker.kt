@@ -40,6 +40,7 @@ import dev.ring.health.Prefs.lastBatteryPct
 import dev.ring.health.Prefs.lastCharging
 import dev.ring.health.Prefs.lastDeepSyncDay
 import dev.ring.health.Prefs.lastScreenMs
+import dev.ring.health.Prefs.phoneMoves
 import dev.ring.health.Prefs.phoneSensor
 import dev.ring.health.Prefs.usageAccess
 import dev.ring.health.Prefs.staleWarned
@@ -72,6 +73,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
     override suspend fun doWork(): Result {
         val log = { msg: String -> SyncLog.add(applicationContext, msg) }
         log("Sync started")
+        if (applicationContext.phoneMoves) registerMoves(applicationContext)
 
         val address = applicationContext.ringAddress
         if (address.isNullOrBlank()) {

@@ -20,6 +20,11 @@ import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import dev.ring.health.Prefs.phoneMoves
+import dev.ring.health.registerMoves
+import dev.ring.health.unregisterMoves
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -150,6 +155,13 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var phoneOn by remember { mutableStateOf(ctx.phoneSensor) }
     var listenOk by remember { mutableStateOf(ctx.notificationAccess) }
     var holdOn by remember { mutableStateOf(ctx.holdPlace) }
+    var movesOn by remember { mutableStateOf(ctx.phoneMoves) }
+    var movesDenied by remember { mutableIntStateOf(0) } // SwitchRow keeps its own state: a new key redraws it off
+    val askMoves = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        ctx.phoneMoves = ok; movesOn = ok
+        if (!ok) movesDenied++
+        if (ok) registerMoves(ctx)
+    }
     var notifyGranted by remember { mutableStateOf(notifyOk()) }
     var car by remember { mutableStateOf(ctx.carName) }
     var pickCar by remember { mutableStateOf<List<BluetoothDevice>?>(null) } // the bonded devices while the Car dialog is open
@@ -319,7 +331,9 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 (if (phoneOn && !usageOk) " Allow Usage access for Circa to start. Greyed out? In App info, tap ⋮ › Allow restricted settings first." else "") +
                 "\n\nHold my place shows where in a podcast or audiobook you fell asleep. Android calls the permission notification access; " +
                 "Circa only uses it to see what is playing and never reads your notifications." +
-                if (holdOn && !listenOk) " Allow Notification access for Circa to start. Greyed out? In App info, tap ⋮ › Allow restricted settings first." else "") {
+                (if (holdOn && !listenOk) " Allow Notification access for Circa to start. Greyed out? In App info, tap ⋮ › Allow restricted settings first." else "") +
+                "\n\nNotice rides and walks lets your phone tell Circa when you start and stop walking, running or cycling, and adds them to Activity. " +
+                "Android calls the permission physical activity; Circa never reads your location.") {
                 SwitchRow("Phone as sleep sensor", phoneOn) { on ->
                     if (on && ctx.lastScreenMs != 0L) ctx.lastScreenMs = System.currentTimeMillis()  // never send the time it was off
                     ctx.phoneSensor = on; phoneOn = on
@@ -339,6 +353,15 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 if (holdOn && !listenOk) {
                     Hairline(Modifier.padding(start = AppSpace.l))
                     ChevronRow("Notification access", "Off") { haptic.tick(); ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                key(movesDenied) {
+                    SwitchRow("Notice rides and walks", movesOn) { on ->
+                        haptic.tick()
+                        if (!on) { ctx.phoneMoves = false; movesOn = false; unregisterMoves(ctx) }
+                        else if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED) { ctx.phoneMoves = true; movesOn = true; registerMoves(ctx) }
+                        else askMoves.launch(Manifest.permission.ACTIVITY_RECOGNITION)
+                    }
                 }
             }
         }

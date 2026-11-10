@@ -37,6 +37,8 @@ object Prefs {
     private const val KEY_DRIVE_WARNED    = "drive_warned_wake"
     private const val KEY_MARK_NAMES      = "mark_names"
     private const val KEY_SHOW_NUMBERS    = "show_numbers"
+    private const val KEY_PHONE_MOVES     = "phone_moves"
+    private const val KEY_OPEN_MOVE       = "open_move"
 
     private fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -99,6 +101,16 @@ object Prefs {
     var Context.holdDismissed: String
         get() = prefs(this).getString(KEY_HOLD_DISMISSED, "") ?: ""
         set(v) = prefs(this).edit().putString(KEY_HOLD_DISMISSED, v).apply()
+
+    /** Settings › Phone switch; off (default) = no activity transitions are registered and no ride or walk is written. */
+    var Context.phoneMoves: Boolean
+        get() = prefs(this).getBoolean(KEY_PHONE_MOVES, false)
+        set(v) = prefs(this).edit().putBoolean(KEY_PHONE_MOVES, v).apply()
+
+    /** The move in progress as "metric|startMs" (phone_walk / phone_ride / phone_run); "" = none. */
+    var Context.openMove: String
+        get() = prefs(this).getString(KEY_OPEN_MOVE, "") ?: ""
+        set(v) = prefs(this).edit().putString(KEY_OPEN_MOVE, v).apply()
 
     /** Notification access, granted by the user in system Settings; needed to see what is playing. */
     val Context.notificationAccess: Boolean

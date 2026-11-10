@@ -361,7 +361,7 @@ private fun WorkoutRow(w: JsonObject, open: Boolean, onClick: () -> Unit) {
     // A workout entered by hand has bpm / load only where the ring measured something.
     val detail = listOfNotNull(
         span, w["max_bpm"].num()?.let { "max ${it.roundToInt()}" }, w["load"].num()?.let { "load ${it.roundToInt()}" },
-        if (w["manual"].str() == "true") "added by you" else if (w["confirmed"].str() == "true") null else "guessed",
+        if (w["manual"].str() == "true") "added by you" else if (w["phone"].str() == "true") "noticed by your phone" else if (w["confirmed"].str() == "true") null else "guessed",
     ).joinToString(" · ")
     Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = AppSpace.l, top = AppSpace.m, bottom = AppSpace.m), verticalAlignment = Alignment.CenterVertically) {
         Icon(icon, null, tint = c.heart, modifier = Modifier.size(28.dp))
