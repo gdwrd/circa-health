@@ -249,6 +249,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
     var hrv by remember { mutableStateOf<List<Double>>(emptyList()) }
     var hold by remember { mutableStateOf<Hold?>(null) }
     var holdGone by remember { mutableStateOf(ctx.holdDismissed) }
+    var reply by remember { mutableStateOf<String?>(null) } // the feeling the NowCard answers
     var marks by remember { mutableStateOf<List<JsonObject>>(emptyList()) } // `/marks.things`: one per named thing
     LaunchedEffect(journalDate) {
         if (journalDate == null) return@LaunchedEffect
@@ -300,6 +301,9 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
                 Text(LocalDate.now().format(DateTimeFormatter.ofPattern("EEEE d MMMM", Locale.getDefault())), style = AppType.headline)
             }
         }
+        val day = d["date"].str().orEmpty() // the server's day, never the phone's clock
+        item { RightNow(day, scope, { reply = it }) { Api.today(ctx).obj()?.let { data = it } } }
+        reply?.let { f -> item { NowCard(f, d, { text -> scope.launch { answered(Api.putNote(ctx, "now_$f", text), false) } }, onBreathe) { reply = null } } }
         // Ring until the 14-day baseline is full (backend "learning" ends at 5 days, when baselines start).
         val n = d["baseline_days"].str()?.substringBefore('/')?.toIntOrNull() ?: 0
         if (n < 14) item {
@@ -314,7 +318,6 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
             }
         }
         val guess = d["guess"].obj()
-        val day = d["date"].str().orEmpty() // the server's day, never the phone's clock
         val calm = d["calm"].str() == "true"
         // Gate: nothing below is composed until the guess is in, so no ring, tint or coach line gives the answer away.
         if (guess?.get("pending").str() == "true") {
@@ -1423,29 +1426,156 @@ private fun LastTimeCard(lt: JsonObject, onNote: (String) -> Unit) {
             }
         }
     }
-    if (editing) {
-        // Cursor after the existing text, so an edit continues it.
-        var field by remember { mutableStateOf(TextFieldValue(note.orEmpty(), TextRange(note.orEmpty().length))) }
-        val text = field.text
-        AlertDialog(
-            onDismissRequest = { editing = false }, containerColor = c.card, titleContentColor = c.label, textContentColor = c.label,
-            title = { Text("Note for next time", style = AppType.title) },
-            confirmButton = { TextButton({ haptic.tick(); editing = false; onNote(text.trim()) }) { Text("Save", color = c.tint) } },
-            dismissButton = { TextButton({ haptic.tick(); editing = false }) { Text("Cancel", color = c.tint) } },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
-                    Box(Modifier.fillMaxWidth().clip(AppShape.small).background(c.secondaryLabel.copy(alpha = 0.12f)).padding(AppSpace.m)) {
-                        if (text.isEmpty()) Text("What helped, what you would do differently", style = AppType.body, color = c.secondaryLabel)
-                        BasicTextField(
-                            field, { field = if (it.text.length > 280) it.copy(text = it.text.take(280)) else it }, textStyle = AppType.body.copy(color = c.label),
-                            cursorBrush = SolidColor(c.tint), modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp),
-                        )
-                    }
-                    Text("${text.length}/280", style = AppType.footnote, color = c.secondaryLabel)
+    if (editing) NoteDialog(note, { editing = false }, onNote)
+}
+
+/** The 280-character note dialog; [onNote] gets the trimmed text (empty removes the note). */
+@Composable
+private fun NoteDialog(note: String?, onDismiss: () -> Unit, onNote: (String) -> Unit) {
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    // Cursor after the existing text, so an edit continues it.
+    var field by remember { mutableStateOf(TextFieldValue(note.orEmpty(), TextRange(note.orEmpty().length))) }
+    val text = field.text
+    AlertDialog(
+        onDismissRequest = onDismiss, containerColor = c.card, titleContentColor = c.label, textContentColor = c.label,
+        title = { Text("Note for next time", style = AppType.title) },
+        confirmButton = { TextButton({ haptic.tick(); onDismiss(); onNote(text.trim()) }) { Text("Save", color = c.tint) } },
+        dismissButton = { TextButton({ haptic.tick(); onDismiss() }) { Text("Cancel", color = c.tint) } },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
+                Box(Modifier.fillMaxWidth().clip(AppShape.small).background(c.secondaryLabel.copy(alpha = 0.12f)).padding(AppSpace.m)) {
+                    if (text.isEmpty()) Text("What helped, what you would do differently", style = AppType.body, color = c.secondaryLabel)
+                    BasicTextField(
+                        field, { field = if (it.text.length > 280) it.copy(text = it.text.take(280)) else it }, textStyle = AppType.body.copy(color = c.label),
+                        cursorBrush = SolidColor(c.tint), modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp),
+                    )
                 }
-            },
-        )
+                Text("${text.length}/280", style = AppType.footnote, color = c.secondaryLabel)
+            }
+        },
+    )
+}
+
+private val FEELINGS = listOf("tired", "flat", "wired", "good")
+
+/** Tap: now. Long press: an earlier time today. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun NowPill(label: String, onLong: () -> Unit, onTap: () -> Unit) {
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    Text(
+        label, style = AppType.footnote.copy(fontWeight = FontWeight.Medium), color = c.label,
+        modifier = Modifier.clip(RoundedCornerShape(50)).background(c.secondaryLabel.copy(alpha = 0.16f))
+            .combinedClickable(role = Role.Button, onLongClickLabel = "Pick an earlier time", onLongClick = { haptic.tick(); onLong() }) { haptic.tick(); onTap() }
+            .padding(horizontal = 14.dp, vertical = 9.dp),
+    )
+}
+
+/**
+ * Right now: four feelings and four intakes. A feeling or intake is the sample `moment_<kind>` (stored first, pushed once,
+ * Undo = value 2 at the same second); Dose is a medication journal row. [onFeeling] gets the feeling just tapped, null when undone.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun RightNow(day: String, scope: CoroutineScope, onFeeling: (String?) -> Unit, reload: suspend () -> Unit) {
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    val ctx = LocalContext.current
+    var just by remember { mutableStateOf<Triple<String, Long, Int?>?>(null) } // kind, epoch ms, journal id (dose) that Undo takes back
+    var gone by remember { mutableStateOf(emptySet<String>()) }
+    var pick by remember { mutableStateOf<String?>(null) }
+    fun put(kind: String, at: Long) {
+        if (kind == "dose") {
+            scope.launch {
+                val hhmm = Instant.ofEpochMilli(at).atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("HH:mm"))
+                val id = Api.addJournal(ctx, day, "medication", hhmm)
+                if (id == null) Toast.makeText(ctx, "Not saved. Try again.", Toast.LENGTH_SHORT).show() else { just = Triple(kind, at, id); reload() }
+            }
+            return
+        }
+        var ts = at
+        while ("$kind@$ts" in gone) ts += 1000 // an undone second stays undone (the larger value wins): the new moment moves one on
+        just = Triple(kind, ts, null)
+        if (kind in FEELINGS) onFeeling(kind)
+        scope.launch { mark(ctx, "moment_$kind", ts, false); reload() }
     }
+    fun undo(j: Triple<String, Long, Int?>) {
+        just = null
+        val id = j.third
+        if (id != null) { scope.launch { Api.deleteJournal(ctx, id); reload() }; return }
+        gone = gone + "${j.first}@${j.second}"
+        if (j.first in FEELINGS) onFeeling(null)
+        scope.launch { mark(ctx, "moment_${j.first}", j.second, true); reload() }
+    }
+    LaunchedEffect(just) { if (just != null) { delay(10_000); just = null } }
+    val pills = @Composable { kinds: List<String> ->
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+            kinds.forEach { k -> NowPill(k.replaceFirstChar { it.uppercase() }, { pick = k }) { put(k, System.currentTimeMillis() / 1000 * 1000) } }
+        }
+    }
+    InsetCard {
+        Column(Modifier.fillMaxWidth().padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+            Text("How are you right now?", style = AppType.headline)
+            pills(FEELINGS)
+            Text("Just had", style = AppType.headline, modifier = Modifier.padding(top = AppSpace.xs))
+            pills(listOf("coffee", "alcohol", "meal", "dose"))
+            just?.let { j ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("${j.first.replaceFirstChar { it.uppercase() }} · ${clock(j.second / 1000.0)}", style = AppType.subhead, color = c.secondaryLabel)
+                    Text(
+                        "Undo", style = AppType.footnote.copy(fontWeight = FontWeight.Medium), color = c.tint,
+                        modifier = Modifier.padding(start = AppSpace.xs).clip(RoundedCornerShape(50)).clickable(role = Role.Button) { haptic.tick(); undo(j) }.padding(horizontal = AppSpace.m, vertical = 9.dp),
+                    )
+                }
+            }
+        }
+    }
+    pick?.let { k ->
+        TimePickDialog(LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm")), { pick = null }) { hhmm ->
+            pick = null
+            val ts = LocalDate.now().atTime(LocalTime.parse(hhmm)).atZone(ZoneId.systemDefault()).toEpochSecond() * 1000
+            if (ts > System.currentTimeMillis()) return@TimePickDialog Toast.makeText(ctx, "Pick a time earlier today.", Toast.LENGTH_SHORT).show()
+            put(k, ts)
+        }
+    }
+}
+
+/** After a feeling tap: what the ring and the log say right now (`/today.drive`, `/today.now`), your own note for this feeling, Breathe. */
+@Composable
+private fun NowCard(feeling: String, d: JsonObject, onNote: (String) -> Unit, onBreathe: () -> Unit, onClose: () -> Unit) {
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    var editing by remember { mutableStateOf(false) }
+    val drive = d["drive"].obj()
+    val now = d["now"].obj()
+    val note = now?.get("notes").obj()?.get(feeling).str()
+    val awakeH = drive?.let { ((it["as_of"].num() ?: return@let null) - (it["wake"].num() ?: return@let null)) / 3600 }?.toInt()?.takeIf { it >= 1 }
+    val facts = listOfNotNull(
+        drive?.get("sleep_min").num()?.roundToInt()?.takeIf { it > 0 }?.let { "${duration(it)} of sleep" },
+        awakeH?.let { "awake $it h" },
+        now?.get("dose").str()?.let { "dose at ${clock(it)}" + (now?.get("dose_end").str()?.let { e -> ", active until about ${clock(e)}" } ?: "") },
+        now?.get("still_h").num()?.roundToInt()?.takeIf { it >= 1 }?.let { "no walk for $it h" },
+    ).joinToString(" · ")
+    InsetCard {
+        Column(Modifier.fillMaxWidth().padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+            if (facts.isNotEmpty()) Text(facts, style = AppType.subhead, color = c.secondaryLabel)
+            Text(if (note != null) "Last time you wrote: $note" else "What would help right now? Leave yourself a note for next time.", style = AppType.subhead)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(
+                    if (note == null) "Leave a note" else "Edit note", style = AppType.body, color = c.tint,
+                    modifier = Modifier.clip(AppShape.small).clickable(role = Role.Button) { haptic.tick(); editing = true }.padding(vertical = AppSpace.s),
+                )
+                Text(
+                    "Close", style = AppType.body, color = c.tint,
+                    modifier = Modifier.clip(AppShape.small).clickable(role = Role.Button) { haptic.tick(); onClose() }.padding(vertical = AppSpace.s),
+                )
+            }
+            TintButton("Breathe") { haptic.tick(); onBreathe() }
+        }
+    }
+    if (editing) NoteDialog(note, { editing = false }, onNote)
 }
 
 /** Hold my place: where in last night's podcast or audiobook sleep began. "Jump there" only while the player still holds that item. */
@@ -1746,7 +1876,7 @@ private fun MarkCard(t: JsonObject, scope: CoroutineScope, reload: suspend () ->
     var pick by remember { mutableStateOf(false) }
     fun put(ts: Long, cancel: Boolean) {
         if (cancel) { gone = gone + ts; just = null } else { added = added + ts; just = ts }
-        scope.launch { mark(ctx, slot, ts, cancel); reload() }
+        scope.launch { mark(ctx, "mark_$slot", ts, cancel); reload() }
     }
     LaunchedEffect(just) { if (just != null) { delay(10_000); just = null } }
     val times = ((t["marks"] as? JsonArray)?.mapNotNull { it.num()?.toLong()?.times(1000) }.orEmpty() + added).distinct().filter { it !in gone }

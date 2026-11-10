@@ -99,7 +99,7 @@ class MarkAction : ActionCallback {
         val slot = context.markNames.indexOfFirst { it.isNotEmpty() } + 1
         if (slot == 0) return
         val ts = System.currentTimeMillis()
-        mark(context, slot, ts)
+        mark(context, "mark_$slot", ts)
         updateAppWidgetState(context, glanceId) { it[MARKED] = ts }
         MarkWidget().update(context, glanceId)
     }
