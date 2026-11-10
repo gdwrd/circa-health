@@ -663,6 +663,13 @@ def test_settings_goal_change_rescores_last_14_days(monkeypatch) -> None:
     assert seen == [{date.today() - timedelta(i) for i in range(14)}]
 
 
+def test_rescore_holds_the_lock_while_scoring(monkeypatch) -> None:
+    seen: list[bool] = []
+    monkeypatch.setattr(main, "_score_day", lambda d: seen.append(main.RESCORE_LOCK.locked()))
+    main.rescore({date.today()})
+    assert seen == [True] and not main.RESCORE_LOCK.locked()
+
+
 def test_month_unknown_workout_and_journal_kind() -> None:
     db.save_day(date(2026, 10, 2), (None, None, None), {"workouts": [{"minutes": 30, "load": 2.0, "kind": "run"}]}, {})
     db.add_journal("2026-10-02", "bogus", None, None, 0)

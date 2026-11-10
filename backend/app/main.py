@@ -258,20 +258,24 @@ def _score_day(d: date) -> None:
     db.save_day(d, scores, contributors, kept)
 
 
+RESCORE_LOCK = threading.Lock()  # startup backfill, PATCH /settings and ingest overlap; rescore never calls itself
+
+
 def rescore(dates: set[date]) -> None:
-    try:
-        db.backup()  # a failed backup never blocks scoring
-    except Exception:
-        log.exception("backup failed")
-    for d in sorted(dates):
+    with RESCORE_LOCK:
         try:
-            _score_day(d)
+            db.backup()  # a failed backup never blocks scoring
         except Exception:
-            log.exception("rescore %s failed", d)
-    try:
-        notify.evaluate(dates)
-    except Exception:
-        log.exception("notify failed")
+            log.exception("backup failed")
+        for d in sorted(dates):
+            try:
+                _score_day(d)
+            except Exception:
+                log.exception("rescore %s failed", d)
+        try:
+            notify.evaluate(dates)
+        except Exception:
+            log.exception("notify failed")
 
 
 @asynccontextmanager
@@ -294,14 +298,17 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+async def _raw_body(request: Request) -> bytes:
+    return await request.body()
+
+
 @api.post("/api/v1/import/prometheus")
-async def ingest(request: Request, tasks: BackgroundTasks) -> Response:
-    body = await request.body()
+def ingest(body: bytes = Depends(_raw_body)) -> Response:
     rows = samples.parse(body)
     if not rows:
         raise HTTPException(400, "no samples")
     samples.put(rows)
-    tasks.add_task(rescore, samples.dates_in_body(body))
+    rescore(samples.dates_in_body(body))  # scored before the 204: the app reads /today and reminders right after
     return Response(status_code=204)
 
 
