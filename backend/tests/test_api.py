@@ -483,6 +483,27 @@ def test_sleep_override_edit_rescore_delete(tmp_path, monkeypatch) -> None:
         assert c.get(f"/sleep?date={d}", headers=H).json()["edited"] is False
 
 
+def test_sleep_override_drops_sessions_inside_its_span(tmp_path, monkeypatch) -> None:
+    """Ring sessions 23:00-03:00 and 03:20-07:00 edited to 23:00-07:00: the second is not a nap; a 13:00 nap stays."""
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "span.db"))
+    monkeypatch.delenv("TZ", raising=False)
+    db.init()
+    d = date.today() - timedelta(1)
+    m = int(samples.midnight(d).timestamp())
+    a, b, nap = m - 3600, m + 200 * 60, m + 13 * 3600
+    load({"biometric_sleep_end_ts": {a: a + 240 * 60, b: b + 220 * 60},
+          "biometric_sleep_total_min": {a: 240.0, b: 220.0}})
+    monkeypatch.setattr(main, "_vitals", lambda: {})
+    db.set_sleep_override(d, a, m + 7 * 3600)
+    main._score_day(d)
+    i = db.days(d, d)[0]["inputs"]
+    assert (i["sleep_min"], i["nap_min"]) == (480, 0)
+    load({"biometric_sleep_end_ts": {nap: nap + 1800}, "biometric_sleep_total_min": {nap: 30.0}})
+    main._score_day(d)
+    i = db.days(d, d)[0]["inputs"]
+    assert (i["sleep_min"], i["nap_min"]) == (480, 30)
+
+
 def test_breathe_sessions_journal_hr_today(tmp_path, monkeypatch) -> None:
     import sqlite3
     monkeypatch.delenv("TZ", raising=False)

@@ -71,12 +71,12 @@ def _sessions(d: date) -> list[dict]:
             total = max((e - s) / 60 - a, 0.0)
             m |= {"start": s, "end": e, "awake_min": a, "total_min": total,
                   "rem_min": min(m["rem_min"], total), "deep_min": min(m["deep_min"], total)}
-    if o := db.sleep_override(d):  # the user's bed/wake times replace the main session; naps untouched
+    if o := db.sleep_override(d):  # the user's bed/wake times replace the main session and any session inside their span
         span = (o[1] - o[0]) / 60
         n = kept[0] if kept else {"awake_min": 0.0, "rem_min": 0.0, "deep_min": 0.0}
         cap = {k: min(n[k], span) for k in ("awake_min", "rem_min", "deep_min")}
-        kept[:1] = [{"start": o[0], "end": o[1], "total_min": max(span - cap["awake_min"], 0.0), **cap,
-                     "phone_min": n.get("phone_min", 0.0)}]
+        kept = [{"start": o[0], "end": o[1], "total_min": max(span - cap["awake_min"], 0.0), **cap,
+                 "phone_min": n.get("phone_min", 0.0)}] + [s for s in kept[1:] if s["end"] <= o[0] or s["start"] >= o[1]]
     return kept
 
 
