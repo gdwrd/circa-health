@@ -173,7 +173,7 @@ def _inactivity(now: datetime, dates: set[date]) -> None:
         if s and s["start"] < end.timestamp() and s["end"] > start.timestamp():
             return
     steps = samples.grid("biometric_steps", start, end - timedelta(seconds=1), 3600, 3540)
-    if not steps or sum(steps.values()):  # empty: ring off or not synced
+    if sum(steps.values()):  # the ring sends no row for an hour without steps
         return
     if any(v > 0 for v in samples.raw("biometric_hr_bpm", start, end).values()):  # hr 0 = not worn
         _add("inactivity", "Time to move", "No steps in the last 2 hours.", now)

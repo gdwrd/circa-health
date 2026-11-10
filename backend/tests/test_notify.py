@@ -123,6 +123,18 @@ def test_inactivity_quiet_when_unworn(monkeypatch) -> None:
     assert kinds() == []
 
 
+def test_inactivity_fires_without_step_rows(monkeypatch) -> None:
+    seed(D)
+    m = samples.midnight(D).timestamp()  # the ring sends no steps row for an hour without steps
+    load({"biometric_hr_bpm": {m + 3600 * h + 300: 0.0 for h in range(24)}})
+    at(monkeypatch, 12, 30)
+    notify.evaluate(set())
+    assert kinds() == []  # not worn
+    load({"biometric_hr_bpm": {m + 3600 * h + 300: 60.0 for h in range(24)}})
+    notify.evaluate(set())
+    assert kinds() == ["inactivity"]
+
+
 def test_inactivity_skips_night_and_late_hours(monkeypatch) -> None:
     seed(D)
     at(monkeypatch, 8, 30)  # hours 06-08 sit inside the night session / before 08:00
