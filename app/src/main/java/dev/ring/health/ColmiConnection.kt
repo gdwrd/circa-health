@@ -32,6 +32,7 @@ class ColmiConnection(private val context: Context, private val address: String)
     // Channels for sequential GATT operations
     private val descriptorWriteCh = Channel<Boolean>(1)
     private val charWriteCh       = Channel<Boolean>(1)
+    private val charReadCh        = Channel<ByteArray?>(1)
 
     // Incoming notification channels — unbounded so we never drop a packet
     val notifyV1 = Channel<ByteArray>(Channel.UNLIMITED)
@@ -58,6 +59,18 @@ class ColmiConnection(private val context: Context, private val address: String)
 
         override fun onCharacteristicWrite(g: BluetoothGatt, char: BluetoothGattCharacteristic, status: Int) {
             charWriteCh.trySend(status == BluetoothGatt.GATT_SUCCESS)
+        }
+
+        // API 33+ path
+        override fun onCharacteristicRead(g: BluetoothGatt, char: BluetoothGattCharacteristic, value: ByteArray, status: Int) {
+            charReadCh.trySend(if (status == BluetoothGatt.GATT_SUCCESS) value.copyOf() else null)
+        }
+
+        // Pre-API-33 path
+        @Deprecated("Deprecated in API 33")
+        override fun onCharacteristicRead(g: BluetoothGatt, char: BluetoothGattCharacteristic, status: Int) {
+            @Suppress("DEPRECATION")
+            charReadCh.trySend(if (status == BluetoothGatt.GATT_SUCCESS) char.value?.copyOf() else null)
         }
 
         // API 33+ path
@@ -120,6 +133,15 @@ class ColmiConnection(private val context: Context, private val address: String)
     // Write a raw command to the V2 command characteristic (sleep).
     suspend fun writeCommand(data: ByteArray, timeoutMs: Long = 5_000): Boolean {
         return writeToChar(ColmiProtocol.CHAR_COMMAND, data, timeoutMs)
+    }
+
+    // Read a text characteristic (Device Information); null when the ring lacks it or the read fails.
+    suspend fun readString(charUuid: UUID, timeoutMs: Long = 5_000): String? {
+        val g = gatt ?: return null
+        val char = g.services.flatMap { it.characteristics }.find { it.uuid == charUuid } ?: return null
+        while (charReadCh.tryReceive().isSuccess) Unit // a late answer must not answer this read
+        if (!g.readCharacteristic(char)) return null
+        return withTimeoutOrNull(timeoutMs) { charReadCh.receive() }?.toString(Charsets.US_ASCII)?.trim { it <= ' ' }
     }
 
     fun disconnect() {

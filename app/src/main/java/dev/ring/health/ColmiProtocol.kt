@@ -19,6 +19,9 @@ object ColmiProtocol {
     val CHAR_NOTIFY_V2: UUID = UUID.fromString("de5bf729-d711-4e47-af26-65e3012a5dc7")
 
     val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+    // Standard Device Information strings, e.g. firmware "R02_3.00.06_240523", hardware "R02_V3.0".
+    val CHAR_FIRMWARE_REV: UUID = UUID.fromString("00002a26-0000-1000-8000-00805f9b34fb")
+    val CHAR_HARDWARE_REV: UUID = UUID.fromString("00002a27-0000-1000-8000-00805f9b34fb")
 
     // ── Command bytes ──────────────────────────────────────────────────────
     const val CMD_BATTERY: Byte           = 0x03

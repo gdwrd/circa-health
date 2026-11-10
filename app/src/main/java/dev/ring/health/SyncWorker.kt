@@ -125,6 +125,17 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             val battery = collectBattery(conn)
             if (battery != null) onBattery(battery)
 
+            // ── Hardware / firmware version ───────────────────────────────
+            // Tells the ring variants apart (R02_V3.0, RY02_V3.0, RT02R_V3.1 ...); logged once per app start.
+            if (!ringVersionLogged) {
+                val hw = conn.readString(ColmiProtocol.CHAR_HARDWARE_REV)
+                val fw = conn.readString(ColmiProtocol.CHAR_FIRMWARE_REV)
+                if (hw != null || fw != null) {
+                    ringVersionLogged = true
+                    log("Ring: hardware ${hw ?: "unknown"}, firmware ${fw ?: "unknown"}")
+                }
+            }
+
             // ── HR log interval ───────────────────────────────────────────
             // The ring ships logging one reading per 15 min; the backend's workout detection needs one per 5 min.
             conn.writePacket(ColmiProtocol.hrLogSettingsRequest())
@@ -591,6 +602,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
     companion object {
         /** True while runLiveHr (Measure now, Breathe) holds the ring; a sync then skips its turn. */
         @Volatile internal var liveHrActive = false
+        @Volatile private var ringVersionLogged = false
 
         // Kick off the first sync immediately; each run re-schedules the next one.
         // PeriodicWorkRequest has a hard 15-min OS floor, so we use self-chaining
