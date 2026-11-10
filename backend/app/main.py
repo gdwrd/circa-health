@@ -47,7 +47,7 @@ def _sessions(d: date) -> list[dict]:
     ends = samples.raw("biometric_sleep_end_ts", lo, hi)
     parts = {k: samples.raw(f"biometric_sleep_{k}_min", lo, hi) for k in ("total", "awake", "rem", "deep")}
     for t, total in parts["total"].items():  # sessions pushed before app v1.1 have no end_ts
-        ends.setdefault(t, t + (total + parts["awake"].get(t, 0.0)) * 60)
+        ends.setdefault(t, t + total * 60)
     out = []
     for end in set(ends.values()):
         if datetime.fromtimestamp(end, samples.tz()).date() != d:
@@ -57,7 +57,7 @@ def _sessions(d: date) -> list[dict]:
     kept: list[dict] = []
     for s in sorted(out, key=lambda s: -s["total_min"]):
         if all(s["end"] <= k["start"] or s["start"] >= k["end"] for k in kept):  # overlap = re-sent copy, not a nap
-            kept.append(s)
+            kept.append(s | {"total_min": max(s["total_min"] - s["awake_min"], 0.0)})  # wire total is end - start, awake included
     if kept:  # screen-on time inside the night is awake; sleep starts when the phone is put down
         m = kept[0]
         g = samples.grid("biometric_sleep_stage", *(datetime.fromtimestamp(m[k], samples.tz()) for k in ("start", "end")), 300, 10800)

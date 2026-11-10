@@ -36,7 +36,7 @@ def test_ingest_rescores_and_today_has_sleep_score(monkeypatch) -> None:
         assert j["activity"]["score"] is not None and j["vitals"]["hr"] == (54 if max(hr) <= es else 70)
         assert j["vitals"]["battery"] == 80
         s = c.get("/sleep", headers=H).json()
-        assert s["session"]["total_min"] == 420 and s["stages"]
+        assert s["session"]["total_min"] == 390 and s["stages"]  # 420 span - 30 awake
         t = c.get("/trends?metric=sleep&days=7", headers=H).json()
         assert t["points"][-1]["value"] == j["sleep"]["score"]
         assert c.get("/trends?metric=bogus", headers=H).status_code == 422
@@ -94,6 +94,17 @@ def test_night_without_end_ts(monkeypatch) -> None:
     load({"biometric_sleep_total_min": {t0: 420.0}})
     n = main._sessions(d)[0]
     assert n is not None and n["end"] == t0 + 420 * 60 and n["total_min"] == 420 and n["start"] == t0
+
+
+def test_total_min_is_span_minus_awake() -> None:
+    """The app pushes total = end - start, awake included; asleep is what is left."""
+    d = date.today() - timedelta(1)
+    t0 = samples.midnight(d).timestamp() - 3600
+    load({"biometric_sleep_end_ts": {t0: t0 + 480 * 60}, "biometric_sleep_total_min": {t0: 480.0},
+          "biometric_sleep_awake_min": {t0: 30.0}})
+    main._score_day(d)
+    c = db.days(d, d)[0]["c"]
+    assert c["inputs"]["sleep_min"] == 450 and c["sleep"]["efficiency"] == scoring._lin(450 / 480, 0.75, 0.95)
 
 
 def _strain_day(monkeypatch, d: date, calm: bool = False) -> None:
@@ -189,7 +200,7 @@ def test_sleep_depth_naps_regularity_spo2_wear(tmp_path, monkeypatch) -> None:
     main._score_day(d)
     c = db.days(d, d)[0]["c"]
     i, x = c["inputs"], c["sleep_extra"]
-    assert i["sleep_min"] == 420 and i["nap_min"] == 35 and [n["total_min"] for n in x["naps"]] == [35]
+    assert i["sleep_min"] == 400 and i["nap_min"] == 30 and [n["total_min"] for n in x["naps"]] == [30]  # span - awake
     assert c["readiness"]["sleep_balance"] == scoring._lin(430, 240, db.setting("sleep_need_min"))  # 400 + 30 nap
     assert x["regularity"] == {"sd_min": 0, "nights": 6, "bed_start_median": 660, "bed_end_median": 1100}
     assert c["sleep"]["regularity"] == 100
@@ -392,7 +403,7 @@ def test_sleep_override_edit_rescore_delete(tmp_path, monkeypatch) -> None:
     main._score_day(d)
     with TestClient(app) as c:
         ring = c.get(f"/sleep?date={d}", headers=H).json()
-        assert ring["edited"] is False and ring["session"]["total_min"] == 420
+        assert ring["edited"] is False and ring["session"]["total_min"] == 400
         assert ring["stages"][0] == {"t": t0 + 300, "stage": 1} and {p["stage"] for p in ring["stages"]} == {1, 2, 3}
         start, end = m - 1800, m + 5 * 3600
         s = c.patch("/sleep", json={"date": d.isoformat(), "start": start, "end": end}, headers=H).json()
