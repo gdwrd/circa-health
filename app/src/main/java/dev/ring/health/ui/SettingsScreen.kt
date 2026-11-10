@@ -58,6 +58,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -134,6 +135,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var notifyGranted by remember { mutableStateOf(notifyOk()) }
     var pickInterval by remember { mutableStateOf(false) }
     var showLog by remember { mutableStateOf(false) }
+    val stopScan = remember { arrayOfNulls<() -> Unit>(1) } // set while a scan runs
     DisposableEffect(activity) {
         val obs = LifecycleEventObserver { _, e ->
             if (e == Lifecycle.Event.ON_RESUME) {
@@ -144,7 +146,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             }
         }
         activity.lifecycle.addObserver(obs)
-        onDispose { activity.lifecycle.removeObserver(obs) }
+        onDispose { activity.lifecycle.removeObserver(obs); stopScan[0]?.invoke() }
     }
 
     var scanning by remember { mutableStateOf(false) }
@@ -166,9 +168,10 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
         scanning = true
         scanner.startScan(callback)
-        activity.lifecycleScope.launch {
+        val job = activity.lifecycleScope.launch {
             delay(5_000)
             scanner.stopScan(callback)
+            stopScan[0] = null
             scanning = false
             if (found.isEmpty()) {
                 Toast.makeText(ctx, "No BLE devices found", Toast.LENGTH_SHORT).show()
@@ -176,6 +179,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 scanResults = found.toList()
             }
         }
+        stopScan[0] = { job.cancel(); scanner.stopScan(callback) }
     }
 
     // Backend-only settings; null hides the section (no backend or unreachable).
@@ -190,8 +194,9 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         med = Api.settings(ctx)
         birth = (med?.get("birth_year") as? JsonPrimitive)?.contentOrNull.orEmpty()
     }
+    var patchFailed by remember { mutableIntStateOf(0) } // key of the backend switches: a failed PATCH resets them to the stored value
     fun patchMed(key: String, v: JsonPrimitive) {
-        activity.lifecycleScope.launch { Api.patchSettings(ctx, mapOf(key to v))?.let { med = it } }
+        activity.lifecycleScope.launch { Api.patchSettings(ctx, mapOf(key to v))?.let { med = it } ?: patchFailed++ }
     }
 
     // (stored, oldest ts, waiting) of the phone's sample history; re-read on open and after "Send all history".
@@ -294,9 +299,11 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                         ChevronRow(title, (s[k] as? JsonPrimitive)?.contentOrNull.orEmpty().ifEmpty { null }?.let(::clock) ?: "Off") { pickWake = k }
                     }
                     Hairline(Modifier.padding(start = AppSpace.l))
-                    SwitchRow("Calm mode", (s["calm"] as? JsonPrimitive)?.contentOrNull == "1") { on ->
-                        haptic.tick()
-                        patchMed("calm", JsonPrimitive(if (on) "1" else ""))
+                    key(patchFailed) {
+                        SwitchRow("Calm mode", (s["calm"] as? JsonPrimitive)?.contentOrNull == "1") { on ->
+                            haptic.tick()
+                            patchMed("calm", JsonPrimitive(if (on) "1" else ""))
+                        }
                     }
                 }
             }
@@ -305,8 +312,10 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             val started = (s["medication_started"] as? JsonPrimitive)?.contentOrNull.orEmpty()
             item {
                 Section("Medication", "Used to mark doses on the Heart screen and to compare your heart rate with the days before you started.") {
-                    SwitchRow("I take medication", started.isNotEmpty()) { on ->
-                        patchMed("medication_started", JsonPrimitive(if (on) LocalDate.now().toString() else ""))
+                    key(patchFailed) {
+                        SwitchRow("I take medication", started.isNotEmpty()) { on ->
+                            patchMed("medication_started", JsonPrimitive(if (on) LocalDate.now().toString() else ""))
+                        }
                     }
                     if (started.isNotEmpty()) {
                         Hairline(Modifier.padding(start = AppSpace.l))
@@ -333,8 +342,10 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 med?.let { s ->
                     val muted = (s["muted"] as? JsonPrimitive)?.contentOrNull.orEmpty().split(',').filter(String::isNotEmpty)
                     NOTIFY_KINDS.forEach { (kind, title) ->
-                        SwitchRow(title, kind !in muted, enabled = notifyGranted) { on ->
-                            patchMed("muted", JsonPrimitive((if (on) muted - kind else muted + kind).joinToString(",")))
+                        key(patchFailed) {
+                            SwitchRow(title, kind !in muted, enabled = notifyGranted) { on ->
+                                patchMed("muted", JsonPrimitive((if (on) muted - kind else muted + kind).joinToString(",")))
+                            }
                         }
                         Hairline(Modifier.padding(start = AppSpace.l))
                     }

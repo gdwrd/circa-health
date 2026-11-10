@@ -494,9 +494,11 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         val pending = Api.notifications(ctx) as? JsonArray ?: return 0
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(NotificationChannel("health", "Health", NotificationManager.IMPORTANCE_DEFAULT))
+        var shown = 0
         for (n in pending) {
             val o = n.jsonObject
             val id = o["id"]!!.jsonPrimitive.int
+            if (!Api.ack(ctx, id)) continue // ack first: a failed ack would re-alert on every sync
             val intent = Intent(ctx, MainActivity::class.java)
             (o["extra"] as? JsonObject)?.forEach { (k, v) -> intent.putExtra(k, v.jsonPrimitive.content) }
             // request code = id: each notification keeps its own extras
@@ -509,9 +511,9 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 .setAutoCancel(true)
                 .build()
             nm.notify(1000 + id, notif) // offset keeps clear of the sync notification id
-            Api.ack(ctx, id)
+            shown++
         }
-        return pending.size
+        return shown
     }
 
     /** Stores the level and posts "battery low" / "charged" once per discharge / charge. Skipped without permission. */

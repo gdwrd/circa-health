@@ -138,7 +138,7 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
             // One point per day (the last reading): a line series needs distinct x values.
             bp = es.filter { it["kind"].str() == "bp" }.mapNotNull { e ->
                 val v = e["value"].str()?.split("/")?.mapNotNull { it.toIntOrNull() }
-                if (v?.size == 2) Triple(LocalDate.parse(e["date"].str()), v[0], v[1]) else null
+                if (v?.size == 2) runCatching { Triple(LocalDate.parse(e["date"].str()), v[0], v[1]) }.getOrNull() else null
             }.associateBy { it.first }.values.toList()
         }
         if (medStarted != null) {

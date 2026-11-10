@@ -174,13 +174,12 @@ object ColmiProtocol {
             minutesOffset = 9 * 5 + (packetNr - 2) * 13 * 5
         }
 
-        val midnight = midnightMs(dayCal)
         val samples = mutableListOf<HrSample>()
         for (i in startIndex until value.size - 1) {
             val bpm = value[i].toInt() and 0xff
             if (bpm != 0) {
                 val minuteOfDay = minutesOffset + (i - startIndex) * 5
-                val tsMs = midnight + minuteOfDay * 60_000L
+                val tsMs = slotMs(dayCal, minuteOfDay)
                 samples += HrSample(tsMs, bpm)
             }
         }
@@ -203,13 +202,12 @@ object ColmiProtocol {
             minutesOffset = 12 * 30 + (packetNr - 2) * 13 * 30
         }
 
-        val midnight = midnightMs(dayCal)
         val samples = mutableListOf<HrvSample>()
         for (i in startIndex until value.size - 1) {
             val v = value[i].toInt() and 0xff
             if (v != 0) {
                 val minuteOfDay = minutesOffset + (i - startIndex) * 30
-                val tsMs = midnight + minuteOfDay * 60_000L
+                val tsMs = slotMs(dayCal, minuteOfDay)
                 samples += HrvSample(tsMs, v)
             }
         }
@@ -253,13 +251,12 @@ object ColmiProtocol {
         val minutesOffset = if (packetNr == 1) 0
                             else 12 * 30 + (packetNr - 2) * 13 * 30
 
-        val midnight = midnightMs(dayCal)
         val samples = mutableListOf<StressSample>()
         for (i in startIndex until value.size - 1) {
             val v = value[i].toInt() and 0xff
             if (v != 0) {
                 val minuteOfDay = minutesOffset + (i - startIndex) * 30
-                samples += StressSample(midnight + minuteOfDay * 60_000L, v)
+                samples += StressSample(slotMs(dayCal, minuteOfDay), v)
             }
         }
         return samples
@@ -365,9 +362,10 @@ object ColmiProtocol {
         return if (hi > 9 || lo > 9) null else hi * 10 + lo
     }
 
-    private fun midnightMs(cal: Calendar): Long {
+    // Wall-clock hour and minute, not midnight + minutes: that is an hour off after a DST change.
+    private fun slotMs(cal: Calendar, minuteOfDay: Int): Long {
         return Calendar.getInstance().apply {
-            set(cal.get(Calendar.YEAR), cal.get(Calendar.MONTH), cal.get(Calendar.DAY_OF_MONTH), 0, 0, 0)
+            set(cal.get(Calendar.YEAR), cal.get(Calendar.MONTH), cal.get(Calendar.DAY_OF_MONTH), minuteOfDay / 60, minuteOfDay % 60, 0)
             set(Calendar.MILLISECOND, 0)
         }.timeInMillis
     }

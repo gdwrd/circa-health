@@ -109,11 +109,10 @@ private val SCORES = setOf("sleep", "readiness", "activity")
 private class Pts(val first: LocalDate, val last: LocalDate, val v: List<Pair<Double, Double>>, val b: List<Pair<Double, Double>>)
 
 private fun parse(json: JsonElement?, div: Double): Pts? {
-    val pts = (json.obj()?.get("points") as? JsonArray)?.mapNotNull { it.obj() } ?: return null
-    val dates = pts.map { LocalDate.parse((it["date"] as JsonPrimitive).content) }
-    val first = dates.firstOrNull() ?: return null
-    fun col(k: String) = pts.mapIndexedNotNull { i, o -> o[k].num()?.let { (dates[i].toEpochDay() - first.toEpochDay()).toDouble() to it / div } }
-    return Pts(first, dates.last(), col("value"), col("baseline"))
+    val pts = (json.obj()?.get("points") as? JsonArray)?.mapNotNull { e -> e.obj()?.let { o -> day(o["date"])?.let { it to o } } } ?: return null
+    val first = pts.firstOrNull()?.first ?: return null
+    fun col(k: String) = pts.mapNotNull { (d, o) -> o[k].num()?.let { (d.toEpochDay() - first.toEpochDay()).toDouble() to it / div } }
+    return Pts(first, pts.last().first, col("value"), col("baseline"))
 }
 
 private fun Metric.format(v: Double) = when (key) {
@@ -427,6 +426,7 @@ internal fun Segmented(options: List<String>, selected: Int, onSelect: (Int) -> 
 /** Line (scores, rhr, hrv) or columns (steps, time asleep) in [color]; baseline as the wide translucent band from HeartScreen. */
 @Composable
 private fun TrendChart(p: Pts, m: Metric, color: Color, avg: Double) {
+    if (p.v.isEmpty() && p.b.isEmpty()) return
     val producer = remember { CartesianChartModelProducer() }
     val hasBase = p.b.isNotEmpty()
     LaunchedEffect(p) {

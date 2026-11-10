@@ -561,10 +561,11 @@ internal class Trend(val first: LocalDate, val value: List<Pair<Double, Double>>
 
 /** `/trends` points as day offsets from the first date. */
 internal fun trend(json: JsonElement?): Trend? {
-    val pts = ((json as? JsonObject)?.get("points") as? JsonArray)?.mapNotNull { it as? JsonObject } ?: return null
-    val dates = pts.map { LocalDate.parse((it["date"] as JsonPrimitive).content) }
-    val first = dates.firstOrNull() ?: return null
-    fun col(k: String) = pts.mapIndexedNotNull { i, o -> (o[k] as? JsonPrimitive)?.doubleOrNull?.let { (dates[i].toEpochDay() - first.toEpochDay()).toDouble() to it } }
+    val pts = ((json as? JsonObject)?.get("points") as? JsonArray)?.mapNotNull { e ->
+        (e as? JsonObject)?.let { o -> (o["date"] as? JsonPrimitive)?.takeIf { it.isString }?.let { LocalDate.parse(it.content) to o } }
+    } ?: return null
+    val first = pts.firstOrNull()?.first ?: return null
+    fun col(k: String) = pts.mapNotNull { (d, o) -> (o[k] as? JsonPrimitive)?.doubleOrNull?.let { (d.toEpochDay() - first.toEpochDay()).toDouble() to it } }
     return Trend(first, col("value"), col("baseline"))
 }
 
