@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS samples(metric TEXT, ts INTEGER, value REAL, PRIMARY 
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 INSERT OR IGNORE INTO settings VALUES('step_goal','8000'),('sleep_need_min','450'),('medication_started',''),
   ('medication_time','08:00'),('medication_window_h','8'),('birth_year',''),('low_step_kind','workout'),('muted',''),
-  ('wake_weekday',''),('wake_weekend',''),('calm','');
+  ('wake_weekday',''),('wake_weekend',''),('calm',''),('guess','');
 CREATE TABLE IF NOT EXISTS workout_kind(date TEXT, start INTEGER, kind TEXT, PRIMARY KEY(date, start));
 CREATE TABLE IF NOT EXISTS workout_manual(date TEXT, start INTEGER, "end" INTEGER, kind TEXT, PRIMARY KEY(date, start));
 CREATE TABLE IF NOT EXISTS sleep_override(date TEXT PRIMARY KEY, start INTEGER, "end" INTEGER);
@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS breath_session(start INTEGER PRIMARY KEY, "end" INTEG
   stress_after REAL);
 CREATE TABLE IF NOT EXISTS experiment(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, metric TEXT, start TEXT,
   days INTEGER, plan TEXT, ended TEXT);
+CREATE TABLE IF NOT EXISTS guess(date TEXT PRIMARY KEY, value INTEGER, verdict INTEGER, ts INTEGER);
 """
 
 
@@ -108,13 +109,34 @@ def setting(key: str) -> float:
 
 
 def days(start: date, end: date) -> list[dict]:
-    """daily rows in [start, end], ascending; `inputs` = raw per-day values kept in the contributors JSON."""
-    out = []
+    """daily rows in [start, end], ascending; `inputs` = raw per-day values kept in the contributors JSON;
+    `felt` = that morning's readiness guess (read from `guess`, never stored in `daily`)."""
+    out, g = [], guesses(start, end)
     for r in query("SELECT * FROM daily WHERE date BETWEEN ? AND ? ORDER BY date", (start.isoformat(), end.isoformat())):
         c = json.loads(r["contributors"] or "{}")
         scores = {k: None if r[k] is None else int(r[k]) for k in ("sleep_score", "readiness_score", "activity_score")}
-        out.append({"date": date.fromisoformat(r["date"]), **scores, "c": c, "inputs": c.get("inputs", {})})
+        out.append({"date": date.fromisoformat(r["date"]), **scores, "c": c, "inputs": c.get("inputs", {}),
+                    "felt": g.get(r["date"], {}).get("value")})
     return out
+
+
+def guesses(start: date, end: date) -> dict[str, dict]:
+    """{iso date: {value, verdict}}; value None = skipped ("Just show me"), verdict None = not answered."""
+    return {r["date"]: {"value": r["value"], "verdict": r["verdict"]} for r in query(
+        "SELECT date, value, verdict FROM guess WHERE date BETWEEN ? AND ?", (start.isoformat(), end.isoformat()))}
+
+
+def add_guess(d: date, value: int | None, ts: int) -> None:
+    """The first answer of a day stands: no second guess after the reveal."""
+    with closing(connect()) as con, con:
+        con.execute("INSERT OR IGNORE INTO guess(date, value, ts) VALUES(?,?,?)", (d.isoformat(), value, ts))
+
+
+def set_verdict(d: date, verdict: int) -> bool:
+    """False when d has no guess with a value (none yet, or skipped)."""
+    with closing(connect()) as con, con:
+        return con.execute("UPDATE guess SET verdict=? WHERE date=? AND value IS NOT NULL",
+                           (verdict, d.isoformat())).rowcount > 0
 
 
 def baselines(metric: str, start: date, end: date) -> dict[str, float]:

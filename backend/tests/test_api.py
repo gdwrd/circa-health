@@ -730,3 +730,71 @@ def test_hourly_sums_the_repeated_hour_on_dst_fall_back(monkeypatch) -> None:
     m = samples.midnight(d).timestamp()
     load({"biometric_steps": {m + 2 * 3600: 100.0, m + 3 * 3600: 200.0, m + 4 * 3600: 50.0}})
     assert main._hourly("biometric_steps", d) == {2: 300.0, 3: 50.0}
+
+
+def test_guess_pending_first_answer_stands_and_verdict() -> None:
+    with TestClient(app) as c:
+        d = main._today()
+        day, post = d.isoformat(), lambda url, **body: c.post(url, json=body, headers=H)
+        guess = lambda: c.get("/today", headers=H).json()["guess"]
+        assert guess() == {"on": False, "pending": False, "value": None, "verdict": None,
+                           "stats": {"status": "learning", "n": 0, "need": 5}, "days": []}
+        c.patch("/settings", json={"guess": "1"}, headers=H)
+        assert guess()["on"] is True and guess()["pending"] is False  # no readiness score yet
+        db.save_day(d, (80, 72, 60), {}, {})
+        assert guess()["pending"] is True
+        assert c.post("/guess", json={"date": day, "value": 60}).status_code == 401
+        for bad in ({"date": (d - timedelta(1)).isoformat()}, {"date": None}, {"value": 101}, {"value": -1},
+                    {"value": "60"}, {"value": 60.5}, {"value": True}):
+            assert post("/guess", **{"date": day, "value": 60, **bad}).status_code == 422, bad
+        assert post("/guess/verdict", date=day, verdict=1).status_code == 422  # no guess yet
+        j = post("/guess", date=day, value=60).json()
+        assert j["date"] == day and j["readiness"]["score"] == 72
+        assert j["guess"] == {"on": True, "pending": False, "value": 60, "verdict": None,
+                              "stats": {"status": "learning", "n": 1, "need": 4}, "days": [[60, 72]]}
+        assert post("/guess", date=day, value=90).json()["guess"]["value"] == 60  # no second guess after the reveal
+        assert post("/guess", date=day, value=None).json()["guess"]["value"] == 60
+        assert db.days(d, d)[0]["felt"] == 60 and "felt" not in db.query("SELECT contributors FROM daily")[0][0]
+        for bad in ({"date": (d - timedelta(1)).isoformat()}, {"verdict": 3}, {"verdict": -1}, {"verdict": "1"},
+                    {"verdict": None}, {"verdict": True}):
+            assert post("/guess/verdict", **{"date": day, "verdict": 1, **bad}).status_code == 422, bad
+        assert post("/guess/verdict", date=day, verdict=2).json()["guess"]["verdict"] == 2
+        assert c.get(f"/today?date={d - timedelta(1)}", headers=H).json()["guess"]["value"] is None
+        assert post("/experiments", kind="alcohol", metric="felt").status_code == 200
+
+
+def test_guess_skip_stores_null() -> None:
+    with TestClient(app) as c:
+        d = main._today()
+        db.set_settings({"guess": "1"})
+        db.save_day(d, (80, 72, 60), {}, {})
+        post = lambda url, **body: c.post(url, json={"date": d.isoformat(), **body}, headers=H)
+        g = post("/guess", value=None).json()["guess"]
+        assert (g["pending"], g["value"], g["days"], g["stats"]["n"]) == (False, None, [], 0)
+        assert [tuple(r) for r in db.query("SELECT date, value, verdict FROM guess")] == [(d.isoformat(), None, None)]
+        assert post("/guess", value=70).json()["guess"]["value"] is None  # the skip is the day's answer
+        assert post("/guess/verdict", verdict=1).status_code == 422  # nothing to judge
+        assert db.days(d, d)[0]["felt"] is None
+
+
+def test_guess_stats_and_days_in_today() -> None:
+    with TestClient(app) as c:
+        d = main._today()
+        for i in range(20):  # 20 guessed mornings, each over the score: 14 pairs shown, all 20 counted
+            db.save_day(d - timedelta(i), (None, 70, None), {}, {})
+            db.add_guess(d - timedelta(i), 80 + i, i)
+        db.add_guess(d - timedelta(25), 50, 0)  # no readiness that morning: not a pair
+        g = c.get("/today", headers=H).json()["guess"]
+        assert g["days"] == [[80 + i, 70] for i in range(13, -1, -1)]  # oldest first
+        assert (g["stats"]["n"], g["stats"]["bias"], g["stats"]["same"]) == (20, 19.5, 5)
+
+
+def test_guess_setting_round_trip() -> None:
+    with TestClient(app) as c:
+        assert c.get("/settings", headers=H).json()["guess"] == ""
+        for bad in ({"guess": 1}, {"guess": True}, {"guess": "0"}, {"guess": None}):
+            assert c.patch("/settings", json=bad, headers=H).status_code == 422, bad
+        assert c.patch("/settings", json={"guess": "1"}, headers=H).json()["guess"] == "1"
+        assert c.get("/settings", headers=H).json()["guess"] == "1" and c.get("/today", headers=H).json()["guess"]["on"] is True
+        assert c.patch("/settings", json={"guess": ""}, headers=H).json()["guess"] == ""
+        assert c.get("/today", headers=H).json()["guess"]["on"] is False

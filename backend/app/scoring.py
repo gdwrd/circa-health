@@ -227,6 +227,24 @@ def resilience(stress_loads_14d: list[float | None], readiness_14d: list[float |
     return _LEVELS[(r + s) // 2]
 
 
+def band(score: float) -> int:
+    """Readiness band: 2 at 85 or more, 1 at 70 to 84, else 0."""
+    return 2 if score >= 85 else 1 if score >= 70 else 0
+
+
+def guess_stats(rows: list[tuple[int, int, int | None]]) -> dict:
+    """rows: (guess, readiness, verdict) per morning with both numbers, last 30 days; verdict = the band the
+    day turned out to be, None until answered. split = bands differ and a verdict exists; you / ring = the
+    verdict matched the guess's / the score's band."""
+    n = len(rows)
+    if n < 5:  # shortcut: 5 mornings is a pick, not measured; revisit with real guesses
+        return {"status": "learning", "n": n, "need": 5 - n}
+    split = [(band(g), band(r), v) for g, r, v in rows if v is not None and band(g) != band(r)]
+    return {"status": "ok", "n": n, "off": round(mean(abs(g - r) for g, r, _ in rows), 1),
+            "bias": round(mean(g - r for g, r, _ in rows), 1), "same": sum(band(g) == band(r) for g, r, _ in rows),
+            "split": len(split), "you": sum(v == g for g, _, v in split), "ring": sum(v == r for _, r, v in split)}
+
+
 # Strain inputs: +1 = higher is worse, -1 = lower is worse. temp is reserved (R09), always null for now.
 DIRS = {"rhr": 1, "hrv": -1, "awake": 1, "recovery": 1, "spo2": -1, "temp": 1}
 FLOORS = {"rhr": 1.5, "hrv": 5.0, "awake": 10.0, "recovery": 0.10, "spo2": 1.0}

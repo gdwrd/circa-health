@@ -44,7 +44,7 @@ def cardio_base(d: date) -> tuple[float | None, int]:
 
 
 def _word(readiness: int) -> str:
-    return "Ready" if readiness >= 85 else "Steady" if readiness >= 70 else "Take it easy"
+    return ("Take it easy", "Steady", "Ready")[scoring.band(readiness)]
 
 
 def _readiness(now: datetime, dates: set[date]) -> None:
@@ -56,6 +56,9 @@ def _readiness(now: datetime, dates: set[date]) -> None:
         return
     c = {k: v for k, v in (row["c"].get("readiness") or {}).items() if v is not None}
     low = min(c, key=lambda k: c[k], default=None)
+    if db.settings()["guess"]:  # guess first: nothing that gives the score away
+        _add("readiness", "Your scores are in", "Guess first, then see them.", now, {"open": "today"})
+        return
     if db.settings()["calm"]:  # calm mode: words, no numbers
         body = f"Lowest factor: {WORDS.get(low, low)}." if low else "Based on last night's sleep."
         _add("readiness", _word(row["readiness_score"]), body, now)
@@ -251,6 +254,9 @@ def _morning(now: datetime, dates: set[date]) -> None:
         return  # no sleep_min: night not scored yet, the next sync after the rescore fires it
     score = row["sleep_score"]
     body = f"{_duration(asleep)} asleep"
+    if db.settings()["guess"]:  # guess first: no score, no band word
+        _add("morning", "Last night", body, now, {"open": "today"})
+        return
     if db.settings()["calm"]:  # calm mode: the readiness word, no scores
         ready = row["readiness_score"]
         _add("morning", "Last night" if ready is None else _word(ready), body, now, {"open": "sleep"})

@@ -653,3 +653,17 @@ def test_workout_asks_once_per_unlabelled_session(monkeypatch) -> None:
     db.save_day(D, (None, None, None), {"workouts": [w | {"start": w["start"] + 300}]}, {})
     notify.evaluate(set())
     assert kinds() == ["workout"]
+
+
+def test_guess_readiness_and_morning_carry_no_score_or_band_word(monkeypatch) -> None:
+    db.set_settings({"guess": "1", "calm": "1", "birth_year": "1990"})  # guess wins over calm
+    seed_morning(86, 93)
+    at(monkeypatch, 9)
+    notify.evaluate({D})
+    r, m = notify.pending()
+    assert (r["kind"], r["title"], r["body"], r["extra"]) == (
+        "readiness", "Your scores are in", "Guess first, then see them.", {"open": "today"})
+    assert (m["kind"], m["title"], m["body"], m["extra"]) == ("morning", "Last night", "7 h 15 min asleep", {"open": "today"})
+    for n in (r, m):
+        text = n["title"] + n["body"]
+        assert not set("8693") & set(text) and not any(w in text for w in ("Ready", "Steady", "Take it easy"))

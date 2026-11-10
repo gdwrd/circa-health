@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.scoring import (activity_score, baseline, bedtime_window, confidence, low_index, readiness_score, regularity,
+from app.scoring import (activity_score, band, baseline, bedtime_window, confidence, guess_stats, low_index, readiness_score, regularity,
                          resilience, robust, sleep_debt, sleep_score, social_jetlag, strain, stress_zones, suggest,
                          tonight, what_if, wind_down)
 
@@ -190,3 +190,23 @@ def test_lin_equal_bounds_is_a_step():
     from app.scoring import _lin
     assert _lin(240, 240, 240) == 100 and _lin(239, 240, 240) == 0
     assert readiness_score({**NIGHT, "total_min": 300}, BASE, 8000, 8000)["score"] is not None
+
+
+def test_band_edges() -> None:
+    assert [band(s) for s in (100, 85, 84.9, 84, 70, 69.9, 0)] == [2, 2, 1, 1, 1, 0, 0]
+
+
+def test_guess_stats_learning_under_five() -> None:
+    assert guess_stats([]) == {"status": "learning", "n": 0, "need": 5}
+    assert guess_stats([(80, 70, 1)] * 4) == {"status": "learning", "n": 4, "need": 1}
+    assert guess_stats([(80, 70, 1)] * 5)["status"] == "ok"
+
+
+def test_guess_stats_off_bias_split_you_ring() -> None:
+    s = guess_stats([(90, 80, 2),      # bands 2 / 1, the day felt like 2: you
+                     (60, 75, 1),      # bands 0 / 1, felt like 1: ring
+                     (90, 60, 1),      # bands 2 / 0, felt like 1: neither
+                     (72, 90, None),   # bands differ, no verdict: not a split
+                     (75, 80, 0),      # same band: a verdict there is not a split
+                     (50, 60, None)])  # same band
+    assert s == {"status": "ok", "n": 6, "off": 14.7, "bias": -1.3, "same": 2, "split": 3, "you": 1, "ring": 1}

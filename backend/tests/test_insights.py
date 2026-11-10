@@ -206,3 +206,16 @@ def test_score_day_stores_wind_down() -> None:
           "biometric_hr_bpm": {t(-4): 90, t(-3): 90, t(-3, 30): 60, t(-2): 62, t(-2, 30): 61, **{t(h): 52 for h in range(6)}}})
     main._score_day(d)
     assert db.days(d, d)[0]["inputs"]["wind_down"] == 570  # 21:30: night p10 52 -> settled at <= 62.4
+
+
+def test_felt_is_a_night_metric_with_three_mornings_a_side() -> None:
+    alc = [TODAY - timedelta(i) for i in (3, 6, 9)]
+    rows = [row(TODAY - timedelta(i)) for i in range(10)]
+    for i, r in enumerate(rows):  # the morning after alcohol was guessed at 50, three other mornings at 80
+        r["felt"] = 50 if r["date"] - timedelta(1) in alc else 80 if i in (0, 1, 4) else None
+    assert insights.nights(rows)[TODAY]["felt"] == 80 and insights.nights([row(TODAY)])[TODAY]["felt"] is None
+    journal = [entry(d, "alcohol") for d in alc]
+    e = {x["metric"]: x for x in insights.kinds(rows, journal, TODAY, {}, "", [])["alcohol"]["all"]}["felt"]
+    assert (e["unit"], e["delta"], e["n_with"], e["n_without"], e["strong"]) == ("pts", -30, 3, 3, True)
+    rows[0]["felt"] = None  # two guessed mornings without: no effect yet
+    assert "felt" not in {x["metric"] for x in insights.kinds(rows, journal, TODAY, {}, "", [])["alcohol"]["all"]}

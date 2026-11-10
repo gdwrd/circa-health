@@ -353,6 +353,17 @@ def _what_if() -> dict | None:
     return scoring.what_if(hist, cardio.target(100, m)["lo"], db.setting("sleep_need_min"))
 
 
+def _guess(d: date, on: bool, ready: int | None) -> dict:
+    """Guess first: d's own row, plus stats and pairs over the 30 days ending at d (mornings with both numbers)."""
+    g = db.guesses(d - timedelta(29), d)
+    rows = [(r["felt"], r["readiness_score"], g[r["date"].isoformat()]["verdict"])
+            for r in db.days(d - timedelta(29), d) if r["felt"] is not None and r["readiness_score"] is not None]
+    mine = g.get(d.isoformat())
+    return {"on": on, "pending": on and d == _today() and ready is not None and mine is None,
+            "value": mine and mine["value"], "verdict": mine and mine["verdict"],
+            "stats": scoring.guess_stats(rows), "days": [[a, b] for a, b, _ in rows[-14:]]}
+
+
 @api.get("/today")
 def today(day: str | None = Query(None, alias="date")) -> dict:
     d = _day(day)
@@ -368,7 +379,8 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
     wd = [v for r in db.days(_today() - timedelta(13), _today()) if (v := r["inputs"].get("wind_down")) is not None]
     return {
         "status": "ok" if n >= 5 else "learning", "date": d.isoformat(), "baseline_days": f"{n}/14",
-        "calm": cfg["calm"] == "1", "confidence": row["c"].get("confidence"), "suggest": row["c"].get("suggest"),
+        "calm": cfg["calm"] == "1", "guess": _guess(d, cfg["guess"] == "1", row.get("readiness_score")),
+        "confidence": row["c"].get("confidence"), "suggest": row["c"].get("suggest"),
         **{k: {"score": row.get(f"{k}_score"), "contributors": row["c"].get(k)} for k in ("sleep", "readiness", "activity")},
         "stress": row["c"].get("stress"),
         "resilience": scoring.resilience([r["inputs"].get("stress_load") for r in rows],
@@ -387,6 +399,25 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
                     "wind_down_usual": median(wd) if len(wd) >= 5 else None,  # minutes after noon, 14 nights
                     "what_if": _what_if()},
     }
+
+
+@api.post("/guess")
+def post_guess(body: dict = Body(...)) -> dict:
+    """This morning's readiness guess, or value null for "Just show me"; the first answer of the day stands."""
+    value = body.get("value")
+    if body.get("date") != _today().isoformat() or not (value is None or _int(value, 0, 100)):
+        raise HTTPException(422, "bad date or value")
+    db.add_guess(_today(), value, int(time.time()))
+    return today(body["date"])
+
+
+@api.post("/guess/verdict")
+def post_verdict(body: dict = Body(...)) -> dict:
+    """The evening answer: which band the day turned out to be."""
+    if body.get("date") != _today().isoformat() or not _int(body.get("verdict"), 0, 2) \
+            or not db.set_verdict(_today(), body["verdict"]):
+        raise HTTPException(422, "bad date or verdict, or no guess today")
+    return today(body["date"])
 
 
 @api.get("/sleep")
@@ -753,7 +784,7 @@ def _settings_out() -> dict:
             "medication_started": s["medication_started"], "medication_time": s["medication_time"],
             "medication_window_h": float(s["medication_window_h"]), "birth_year": s["birth_year"],
             "low_step_kind": s["low_step_kind"], "muted": s["muted"],
-            "wake_weekday": s["wake_weekday"], "wake_weekend": s["wake_weekend"], "calm": s["calm"]}
+            "wake_weekday": s["wake_weekday"], "wake_weekend": s["wake_weekend"], "calm": s["calm"], "guess": s["guess"]}
 
 
 def _year_ok(v: object) -> bool:
@@ -778,7 +809,7 @@ def _started_ok(v: object) -> bool:
 SETTINGS = {"step_goal": lambda v: _num(v, 1000, 100000), "sleep_need_min": lambda v: _num(v, 240, 720),
             "medication_started": _started_ok, "medication_time": lambda v: isinstance(v, str) and HHMM.fullmatch(v),
             "medication_window_h": lambda v: _num(v, 1, 24), "birth_year": _year_ok,
-            "low_step_kind": lambda v: v in ("ride", "workout"), "calm": lambda v: v in ("", "1"),
+            "low_step_kind": lambda v: v in ("ride", "workout"), "calm": lambda v: v in ("", "1"), "guess": lambda v: v in ("", "1"),
             "wake_weekday": lambda v: v == "" or isinstance(v, str) and HHMM.fullmatch(v),
             "wake_weekend": lambda v: v == "" or isinstance(v, str) and HHMM.fullmatch(v),
             "muted": lambda v: isinstance(v, str) and (v == "" or all(k in notify.KINDS for k in v.split(",")))}

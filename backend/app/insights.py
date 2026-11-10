@@ -7,15 +7,15 @@ from . import samples
 
 DAYS, MIN_N = 90, 3
 NIGHT_KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "stress", "travel", "breathe", "phone_in_bed")
-NIGHT = ("sleep_score", "deep_min", "rem_min", "hrv", "rhr", "total_min", "awake_min", "bed_start", "wind_down")
+NIGHT = ("sleep_score", "deep_min", "rem_min", "hrv", "rhr", "total_min", "awake_min", "bed_start", "wind_down", "felt")
 EXPERIMENT_KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "breathe", "phone_in_bed")
 MED = ("day_hr", "rhr", "hrv", "bed_start", "total_min", "sleep_score")
 UNITS = {"sleep_score": "pts", "readiness_score": "pts", "deep_min": "min", "rem_min": "min", "total_min": "min", "awake_min": "min",
-         "bed_start": "min", "wind_down": "min", "hrv": "ms", "rhr": "bpm", "day_hr": "bpm", "strain": "pts"}
+         "bed_start": "min", "wind_down": "min", "hrv": "ms", "rhr": "bpm", "day_hr": "bpm", "strain": "pts", "felt": "pts"}
 FLOORS = {"rhr": 1.5, "day_hr": 1.5, "hrv": 5.0, "awake_min": 10.0,  # same floors as scoring.FLOORS
           # minimum spreads so near-identical values (5 min grid bed times) are never "strong"
           "bed_start": 15.0, "wind_down": 15.0, "total_min": 15.0, "deep_min": 5.0, "rem_min": 5.0, "sleep_score": 3.0, "readiness_score": 3.0,
-          "strain": 5.0}
+          "strain": 5.0, "felt": 5.0}
 
 
 def effect(with_: list[float], without: list[float], floor: float = 0.0) -> dict | None:
@@ -45,7 +45,7 @@ def nights(rows: list[dict]) -> dict[date, dict]:
                           "bed_start": st.hour * 60 + st.minute - (1440 if st.hour >= 12 else 0),
                           # inputs.wind_down is minutes after noon; - 720 puts it on the bed_start scale
                           "wind_down": None if (w := r["inputs"].get("wind_down")) is None else w - 720,
-                          "strain": (r["c"].get("signals") or {}).get("index")}
+                          "strain": (r["c"].get("signals") or {}).get("index"), "felt": r.get("felt")}
     return out
 
 
