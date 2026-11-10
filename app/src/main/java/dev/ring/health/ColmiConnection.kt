@@ -43,6 +43,8 @@ class ColmiConnection(private val context: Context, private val address: String)
             Log.d(TAG, "onConnectionStateChange status=$status state=$newState")
             val ok = newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS
             connectedDeferred.complete(ok)
+            // A lost link fails the pending receive() at once (ClosedReceiveChannelException) instead of a 10-20 s timeout each.
+            if (newState == BluetoothProfile.STATE_DISCONNECTED) { notifyV1.close(); notifyV2.close() }
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
@@ -139,6 +141,7 @@ class ColmiConnection(private val context: Context, private val address: String)
                 continue
             }
             g.setCharacteristicNotification(char, true)
+            while (descriptorWriteCh.tryReceive().isSuccess) Unit // a late ack must not answer this write
 
             val cccd = char.getDescriptor(ColmiProtocol.CCCD_UUID)
             if (cccd == null) {
@@ -172,6 +175,11 @@ class ColmiConnection(private val context: Context, private val address: String)
             Log.w(TAG, "Char not found: $charUuid")
             return false
         }
+
+        // A write starts a new exchange: late packets of the previous request (after a collect timeout) and a late ack are dropped.
+        while (notifyV1.tryReceive().isSuccess) Unit
+        while (notifyV2.tryReceive().isSuccess) Unit
+        while (charWriteCh.tryReceive().isSuccess) Unit
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             g.writeCharacteristic(char, data, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
