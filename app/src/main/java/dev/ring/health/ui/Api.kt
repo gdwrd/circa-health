@@ -106,6 +106,16 @@ object Api {
         call(ctx, "/experiments", "POST", JsonObject(mapOf("kind" to JsonPrimitive(kind), "metric" to JsonPrimitive(metric), "days" to JsonPrimitive(14))).toString()) as? JsonObject
     suspend fun stopExperiment(ctx: Context, id: Int) = call(ctx, "/experiments/$id", "DELETE") as? JsonObject
 
+    /** POST /guess ([value] null = "Just show me") and /guess/verdict (0..2); [date] is `/today.date`. Both return the new `/today`, or null on failure. */
+    suspend fun guess(ctx: Context, date: String, value: Int?) = postToday(ctx, "/guess", mapOf("date" to JsonPrimitive(date), "value" to JsonPrimitive(value)))
+    suspend fun verdict(ctx: Context, date: String, v: Int) = postToday(ctx, "/guess/verdict", mapOf("date" to JsonPrimitive(date), "verdict" to JsonPrimitive(v)))
+
+    /** The reply also replaces the cached GET `/today`: offline, the app must not show the gate or the verdict chips again. */
+    private suspend fun postToday(ctx: Context, path: String, body: Map<String, JsonPrimitive>): JsonObject? =
+        (call(ctx, path, "POST", JsonObject(body).toString()) as? JsonObject)?.also { r ->
+            withContext(Dispatchers.IO) { runCatching { cacheFile(ctx, "/today").apply { parentFile!!.mkdirs() }.writeText(r.toString()) } }
+        }
+
     /** Body is a subset of the backend settings keys; returns the full settings, or null on failure. */
     suspend fun patchSettings(ctx: Context, body: Map<String, JsonPrimitive>) = call(ctx, "/settings", "PATCH", JsonObject(body).toString()) as? JsonObject
 

@@ -86,6 +86,7 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
                 "month" -> go(TabItem.Trends) // Trends consumes it once the month card is open
                 "journal" -> { go(TabItem.Today); if (link.second == null) onLinkHandled() }
                 "workout" -> go(TabItem.Activity) // Activity consumes it once it shows that day
+                "today" -> { go(TabItem.Today); onLinkHandled() }
                 null -> {}
                 else -> onLinkHandled()
             }

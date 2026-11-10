@@ -1,6 +1,22 @@
 package dev.ring.health.ui
 
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.drag
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.setProgress
+import androidx.compose.ui.semantics.stateDescription
+import androidx.glance.appwidget.updateAll
+import dev.ring.health.Prefs.todayJson
+import dev.ring.health.Prefs.todayJsonMs
+import dev.ring.health.widget.RingWidget
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.animation.AnimatedVisibility
@@ -228,6 +244,12 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
         (Api.trends(ctx, "hrv", 14).obj()?.get("points") as? JsonArray)?.let { a -> hrv = a.mapNotNull { it.obj()?.get("value").num() } }
     }
     LaunchedEffect(Unit) { load() }
+    // Guess first: both routes answer with the new /today. [widget]: its stored snapshot follows, so it stops saying "Guess first" at once.
+    suspend fun answered(r: JsonObject?, widget: Boolean) {
+        if (r == null) return Toast.makeText(ctx, "Not saved. Try again.", Toast.LENGTH_SHORT).show()
+        data = r
+        if (widget) { ctx.todayJson = r.toString(); ctx.todayJsonMs = System.currentTimeMillis(); RingWidget().updateAll(ctx) }
+    }
 
     val c = AppTheme.colors
     LargeTitleScaffold("Today", action = actions, refreshing = refreshing, onRefresh = {
@@ -254,6 +276,15 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
                 }
             }
         }
+        val guess = d["guess"].obj()
+        val day = d["date"].str().orEmpty() // the server's day, never the phone's clock
+        val calm = d["calm"].str() == "true"
+        // Gate: nothing below is composed until the guess is in, so no ring, tint or coach line gives the answer away.
+        if (guess?.get("pending").str() == "true") {
+            item { GuessCard(calm) { v -> scope.launch { answered(Api.guess(ctx, day, v), true) } } }
+            return@LargeTitleScaffold
+        }
+        val said = guess?.get("value").num()?.roundToInt()
         item {
             val r = d["readiness"].obj()
             val score = r?.get("score").num()?.roundToInt()
@@ -266,8 +297,10 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     // Calm mode: the word until the card is tapped open, then the number with its details.
-                    if (d["calm"].str() == "true" && open != "readiness") CalmArc(calmWord("readiness", score), if (low) 0.6f else 1f)
-                    else ScoreRing((score ?: 0) / 100f, c.readiness, Modifier.size(220.dp), stroke = 20.dp, alpha = if (low) 0.6f else 1f) {
+                    val words = calm && open != "readiness"
+                    if (words) CalmArc(calmWord("readiness", score), if (low) 0.6f else 1f)
+                    // The ring's own spring is the reveal after a guess; your dot marks what you said.
+                    else ScoreRing((score ?: 0) / 100f, c.readiness, Modifier.size(220.dp), stroke = 20.dp, animate = !LocalReduceMotion.current, alpha = if (low) 0.6f else 1f, mark = said?.let { it / 100f }) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             if (score != null) Row { if (low) Text("~", style = AppType.display); CountUp(score, AppType.display) } else Text("—", style = AppType.display)
                             Text("Readiness", style = AppType.subhead, color = c.secondaryLabel)
@@ -277,8 +310,30 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
                         coachLine(score, r?.get("contributors").obj()), style = AppType.subhead, textAlign = TextAlign.Center,
                         modifier = Modifier.padding(top = AppSpace.l),
                     )
+                    if (said != null) Text(
+                        "You said ${if (words) calmWord("readiness", said) else said}.", style = AppType.subhead, color = c.secondaryLabel,
+                        textAlign = TextAlign.Center, modifier = Modifier.padding(top = AppSpace.xs),
+                    )
                 }
                 ScoreDetails("readiness", "Readiness", c.readiness, d, open == "readiness", medStarted)
+            }
+        }
+        // Evening verdict: which band the day turned out to be (0 / 1 / 2), asked once.
+        if (said != null && guess?.get("verdict").num() == null && LocalTime.now().hour >= 18) item {
+            InsetCard {
+                Column(Modifier.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
+                    Text("How did today actually go?", style = AppType.headline)
+                    Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                        listOf("Drained", "OK", "Strong").forEachIndexed { i, label ->
+                            Text(
+                                label, style = AppType.footnote.copy(fontWeight = FontWeight.Medium), color = c.label,
+                                modifier = Modifier.clip(RoundedCornerShape(50)).background(c.secondaryLabel.copy(alpha = 0.16f))
+                                    .clickable(role = Role.Button) { haptic.tick(); scope.launch { answered(Api.verdict(ctx, day, i), false) } }
+                                    .padding(horizontal = 14.dp, vertical = 9.dp),
+                            )
+                        }
+                    }
+                }
             }
         }
         item {
@@ -372,7 +427,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
         // One experiment at a time: the entry row hides while one is on the card.
         if (!kinds.isNullOrEmpty()) item { WhatAffectsYou(kinds, if (exp == null) ({ testing = true }) else null) }
     }
-    if (testing) TestDialog({ testing = false }) { kind, metric ->
+    if (testing) TestDialog(data?.get("guess").obj()?.get("on").str() == "true", { testing = false }) { kind, metric ->
         testing = false
         scope.launch { Api.startExperiment(ctx, kind, metric)?.let { exp = it["active"].obj() } }
     }
@@ -488,6 +543,31 @@ private fun ScoreDetails(key: String, name: String, color: Color, d: JsonObject,
                 Hairline(Modifier.padding(start = AppSpace.l))
                 Contributor(NAMES[n] ?: n, v.num(), color, CONTRIBUTOR_INFO[n])
             }
+            val g = d["guess"].obj()?.takeIf { key == "readiness" && it["on"].str() == "true" }
+            if (g != null) {
+                Hairline(Modifier.padding(start = AppSpace.l))
+                Column(Modifier.padding(horizontal = AppSpace.l, vertical = AppSpace.m), verticalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
+                    Text("Your guesses", style = AppType.headline)
+                    val st = g["stats"].obj()
+                    val n = st?.get("n").num()?.roundToInt() ?: 0
+                    val off = st?.get("off").num()?.roundToInt()
+                    if (st?.get("status").str() != "ok" || off == null) Text("Guess on 5 mornings to see how close you get. $n so far.", style = AppType.subhead, color = c.secondaryLabel)
+                    else {
+                        Text("Usually within $off ${if (off == 1) "point" else "points"} of the ring, over $n mornings.", style = AppType.subhead)
+                        val bias = st?.get("bias").num() ?: 0.0
+                        if (kotlin.math.abs(bias) >= 3) Text(
+                            "You tend to feel ${if (bias > 0) "better" else "worse"} than the ring says, by about ${kotlin.math.abs(bias).roundToInt()} points.", style = AppType.subhead,
+                        )
+                        val split = st?.get("split").num()?.roundToInt() ?: 0
+                        if (split >= 3) Text(
+                            "When you and the ring disagreed, your read fit the day ${st?.get("you").num()?.roundToInt() ?: 0} of $split times, the ring's ${st?.get("ring").num()?.roundToInt() ?: 0}.",
+                            style = AppType.subhead,
+                        )
+                    }
+                    val days = (g["days"] as? JsonArray)?.mapNotNull { p -> (p as? JsonArray)?.let { (it.getOrNull(0).num() ?: return@let null) to (it.getOrNull(1).num() ?: return@let null) } }.orEmpty()
+                    if (days.isNotEmpty()) Dumbbells(days)
+                }
+            }
             val since = medStarted?.let { runCatching { ChronoUnit.DAYS.between(LocalDate.parse(it), LocalDate.now()) }.getOrNull() }
             if (key == "readiness" && since != null && since in 0..60) {
                 Hairline(Modifier.padding(start = AppSpace.l))
@@ -495,6 +575,121 @@ private fun ScoreDetails(key: String, name: String, color: Color, d: JsonObject,
                     "Resting HR is compared with your 14-day baseline, which now includes days on medication; it settles after about two weeks.",
                     style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l, vertical = AppSpace.m),
                 )
+            }
+        }
+    }
+}
+
+/** "Dumbbells": up to 14 mornings, oldest first; hollow dot = your guess, filled dot = the ring's score, a thin line between. */
+@Composable
+private fun Dumbbells(days: List<Pair<Double, Double>>) {
+    val c = AppTheme.colors
+    val (g, r) = days.last()
+    Canvas(
+        Modifier.padding(top = AppSpace.s).fillMaxWidth().height(64.dp).semantics {
+            contentDescription = "Your guess against the ring on the last ${days.size} guessed mornings. Latest: you said ${g.roundToInt()}, the ring ${r.roundToInt()}."
+        },
+    ) {
+        val slot = size.width / 14
+        val dot = minOf(slot * 0.3f, 4.dp.toPx())
+        val w = 1.5.dp.toPx()
+        // The days' own range, at least 30 points tall so a small gap is not blown up.
+        val all = days.flatMap { listOf(it.first, it.second) }
+        val mid = (all.max() + all.min()) / 2
+        val span = maxOf(all.max() - all.min(), 30.0)
+        fun y(v: Double) = size.height / 2 - ((v - mid) / span).toFloat() * (size.height - 2 * dot - w)
+        days.forEachIndexed { i, (guess, score) ->
+            val x = slot * (i + 0.5f)
+            drawLine(c.secondaryLabel, Offset(x, y(guess)), Offset(x, y(score)), w)
+            drawCircle(c.readiness, dot, Offset(x, y(score)))
+            drawCircle(c.card, dot, Offset(x, y(guess)))
+            drawCircle(c.secondaryLabel, dot - w / 2, Offset(x, y(guess)), style = Stroke(w))
+        }
+    }
+}
+
+/** The gate of Guess first: shown instead of the scores until the morning's guess (or "Just show me" = null) is in. */
+@Composable
+private fun GuessCard(calm: Boolean, onGuess: (Int?) -> Unit) {
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    var v by rememberSaveable { mutableStateOf<Int?>(null) }
+    InsetCard {
+        Column(Modifier.fillMaxWidth().padding(AppSpace.xl), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("How recovered do you feel?", style = AppType.title, textAlign = TextAlign.Center)
+            GuessDial(v, calm, Modifier.padding(top = AppSpace.l)) { v = it }
+            // TintButton has no disabled state: faded and inert until a dot is placed.
+            TintButton("Lock it in", Modifier.padding(top = AppSpace.xl).alpha(if (v == null) 0.4f else 1f).semantics { if (v == null) disabled() }) {
+                v?.let { haptic.tick(); onGuess(it) }
+            }
+            Text(
+                "Just show me", style = AppType.subhead, color = c.tint,
+                modifier = Modifier.padding(top = AppSpace.s).clip(AppShape.small).clickable(role = Role.Button) { haptic.tick(); onGuess(null) }.padding(AppSpace.m),
+            )
+        }
+    }
+}
+
+/** "Your dot": the readiness ring's empty track; a tap or drag on the ring places the guess, 0..100 clockwise from 12 o'clock as ScoreRing sweeps. "?" and no dot until the first touch: a preset position would anchor the guess. */
+@Composable
+private fun GuessDial(value: Int?, calm: Boolean, modifier: Modifier, onChange: (Int) -> Unit) {
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    val now by rememberUpdatedState(value)
+    fun set(v: Int) {
+        if (v == now) return
+        if (v / 5 != now?.div(5)) haptic.tick()
+        onChange(v)
+    }
+    val word = value?.let { calmWord("readiness", it) }
+    Box(
+        modifier.size(220.dp).pointerInput(Unit) {
+            // null in the middle of the dial, where the angle means nothing.
+            fun at(p: Offset): Int? {
+                val x = p.x - size.width / 2f
+                val y = size.height / 2f - p.y
+                if (kotlin.math.hypot(x, y) < size.width / 4f) return null
+                return ((Math.toDegrees(kotlin.math.atan2(x, y).toDouble()) + 360) % 360 / 3.6).roundToInt()
+            }
+            awaitEachGesture {
+                val down = awaitFirstDown()
+                set(at(down.position) ?: return@awaitEachGesture) // a touch in the middle still scrolls the list
+                drag(down.id) { ch ->
+                    ch.consume() // keeps the list from scrolling under the finger
+                    val cur = now ?: 0
+                    // 0 and 100 share 12 o'clock: a drag stops there instead of jumping to the other end.
+                    at(ch.position)?.let { set(if (cur > 75 && it < 25) 100 else if (cur < 25 && it > 75) 0 else it) }
+                }
+            }
+        }.clearAndSetSemantics {
+            contentDescription = "How recovered you feel, 0 to 100"
+            stateDescription = if (value == null) "Not set" else if (calm) word.orEmpty() else "$value, $word"
+            progressBarRangeInfo = ProgressBarRangeInfo((value ?: 0).toFloat(), 0f..100f)
+            setProgress { set(it.roundToInt().coerceIn(0, 100)); true }
+        },
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            val w = 20.dp.toPx()
+            val topLeft = Offset(w / 2, w / 2)
+            val arc = Size(size.width - w, size.height - w)
+            drawArc(c.readiness.copy(alpha = 0.12f), 0f, 360f, false, topLeft, arc, style = Stroke(w))
+            if (value != null) {
+                // No good or bad colour before the reveal.
+                drawArc(c.secondaryLabel, -90f, 3.6f * value, false, topLeft, arc, style = Stroke(w, cap = StrokeCap.Round))
+                val a = Math.toRadians(3.6 * value)
+                val o = center + Offset(kotlin.math.sin(a).toFloat(), -kotlin.math.cos(a).toFloat()) * (arc.width / 2)
+                drawCircle(c.card, w * 0.36f, o)
+                drawCircle(c.secondaryLabel, w * 0.29f, o, style = Stroke(w * 0.14f))
+            }
+        }
+        if (value == null) Text("?", style = AppType.display, color = c.secondaryLabel)
+        else Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            // Calm mode: the word only.
+            if (calm) Text(word.orEmpty(), style = AppType.largeTitle, textAlign = TextAlign.Center, modifier = Modifier.width(150.dp))
+            else {
+                Text("$value", style = AppType.display)
+                Text(word.orEmpty(), style = AppType.subhead, color = c.secondaryLabel)
             }
         }
     }
@@ -1149,10 +1344,11 @@ internal val METRIC = mapOf(
     "hrv" to ("HRV" to "HRV"), "rhr" to ("Resting HR" to "resting heart rate"), "total_min" to ("Time asleep" to "time asleep"),
     "awake_min" to ("Awake" to "time awake"), "bed_start" to ("Bedtime" to "bedtime"), "strain" to ("Strain" to "strain index"),
     "day_hr" to ("Daytime HR" to "daytime heart rate"), "wind_down" to ("Settling" to "settling time"),
+    "felt" to ("Felt" to "how recovered you felt"),
 )
 
 // 1 = higher is better, -1 = lower is better (wind_down: later is worse); bedtime is neither.
-private val BETTER = mapOf("sleep_score" to 1, "deep_min" to 1, "rem_min" to 1, "hrv" to 1, "total_min" to 1, "rhr" to -1, "awake_min" to -1, "strain" to -1, "day_hr" to -1, "stress" to -1, "wind_down" to -1)
+private val BETTER = mapOf("sleep_score" to 1, "deep_min" to 1, "rem_min" to 1, "hrv" to 1, "total_min" to 1, "rhr" to -1, "awake_min" to -1, "strain" to -1, "day_hr" to -1, "stress" to -1, "wind_down" to -1, "felt" to 1)
 
 /** Pill / change colour: good, bad or neutral for this metric. */
 @Composable
@@ -1170,7 +1366,7 @@ internal fun metricValue(metric: String, v: Double): String = when (metric) {
     "bed_start", "wind_down" -> bedClock(v)
     "total_min" -> duration(v.roundToInt())
     "strain" -> "%.1f".format(v)
-    "sleep_score" -> v.roundToInt().toString()
+    "sleep_score", "felt" -> v.roundToInt().toString()
     "hrv" -> "${v.roundToInt()} ms"
     "rhr", "day_hr" -> "${v.roundToInt()} bpm"
     else -> "${v.roundToInt()} min"
@@ -1182,7 +1378,7 @@ internal fun metricDelta(metric: String, d: Double, pct: Double?): String {
     val body = when {
         metric == "hrv" && pct != null -> "${kotlin.math.abs(pct).roundToInt()} %"
         metric == "strain" -> "%.1f".format(a)
-        metric == "sleep_score" -> "${a.roundToInt()} pts"
+        metric == "sleep_score" || metric == "felt" -> "${a.roundToInt()} pts"
         metric == "bed_start" || metric == "wind_down" || metric == "total_min" -> "${a.roundToInt()} min"
         else -> metricValue(metric, a)
     }
@@ -1197,6 +1393,7 @@ private fun sentence(kind: String, e: JsonObject): String? {
     val on = "On nights ${AFTER[kind]}"
     return if (m == "bed_start") "$on you tended to fall asleep at ${bedClock(w)} vs ${bedClock(wo)}."
     else if (m == "wind_down") "$on your body started to settle at ${bedClock(w)} vs ${bedClock(wo)}."
+    else if (m == "felt") "The morning ${AFTER[kind]} you felt ${metricValue(m, w)} vs ${metricValue(m, wo)} out of 100."
     else "$on your ${METRIC[m]?.second ?: m} averaged ${metricValue(m, w)} vs ${metricValue(m, wo)}."
 }
 
@@ -1286,10 +1483,10 @@ private val TEST_ON = mapOf(
 )
 private val TEST_METRICS = listOf("sleep_score", "deep_min", "rem_min", "hrv", "rhr", "total_min", "awake_min", "bed_start")
 
-/** Pick a habit and what to watch; [onStart] gets (kind, metric). */
+/** Pick a habit and what to watch; [onStart] gets (kind, metric). [felt]: Guess first is on. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun TestDialog(onDismiss: () -> Unit, onStart: (String, String) -> Unit) {
+private fun TestDialog(felt: Boolean, onDismiss: () -> Unit, onStart: (String, String) -> Unit) {
     val c = AppTheme.colors
     val haptic = LocalHapticFeedback.current
     var kind by remember { mutableStateOf<String?>(null) }
@@ -1318,7 +1515,8 @@ private fun TestDialog(onDismiss: () -> Unit, onStart: (String, String) -> Unit)
                 Text("Habit", style = AppType.footnote, color = c.secondaryLabel)
                 chips(TEST_ON.toList(), kind) { kind = it }
                 Text("What to watch", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s))
-                chips(TEST_METRICS.map { m -> m to METRIC.getValue(m).second.replaceFirstChar { it.uppercase() } }, metric) { metric = it }
+                // "felt" needs morning guesses: offered only while Guess first is on.
+                chips((if (felt) TEST_METRICS + "felt" else TEST_METRICS).map { m -> m to METRIC.getValue(m).second.replaceFirstChar { it.uppercase() } }, metric) { metric = it }
                 Text(
                     "14 days: 7 with it and 7 without, in a random order. A day counts when your journal matches the plan.",
                     style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s),

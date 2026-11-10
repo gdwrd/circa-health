@@ -85,6 +85,8 @@ private fun Content(d: JsonObject?, ms: Long) {
         "Updated " + DateFormat.getTimeFormat(ctx).format(Date(ms)) else "Open to sync"
     // Calm mode (/today.calm): the open mark and a word per score, no numbers.
     val calm = d?.get("calm")?.jsonPrimitive?.content == "true"
+    // Guess first (/today.guess.pending): the open mark, no number, no word and no Body signals until the guess is made.
+    val pending = (d?.get("guess") as? JsonObject)?.get("pending")?.jsonPrimitive?.content == "true"
     val medium = TextStyle(color = text, fontSize = 12.sp, fontWeight = FontWeight.Medium)
     val room = size.height - 24.dp - 40.dp // padding + two text lines
     Column(
@@ -94,13 +96,13 @@ private fun Content(d: JsonObject?, ms: Long) {
         horizontalAlignment = Alignment.CenterHorizontally, verticalAlignment = Alignment.CenterVertically,
     ) {
         if (size.width >= 200.dp) {
-            val ring = minOf((size.width - 24.dp) / 3 - 12.dp, room - if (calm) 16.dp else 0.dp).coerceIn(40.dp, 96.dp) // calm: one more text line
+            val ring = minOf((size.width - 24.dp) / 3 - 12.dp, room - if (calm && !pending) 16.dp else 0.dp).coerceIn(40.dp, 96.dp) // calm: one more text line
             Row(GlanceModifier.fillMaxWidth()) {
                 listOf(Triple("Sleep", "sleep", c.sleep), Triple("Readiness", "readiness", c.readiness), Triple("Activity", "activity", c.activity))
                     .forEach { (label, key, col) ->
                         Column(GlanceModifier.defaultWeight(), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Ring(d?.score(key), col, c.light(col), ring, text, calm)
-                            if (calm) Text(calmWord(key, d?.score(key)), style = medium)
+                            Ring(d?.score(key), col, c.light(col), ring, text, calm || pending)
+                            if (calm && !pending) Text(calmWord(key, d?.score(key)), style = medium)
                             Text(label, style = small)
                         }
                     }
@@ -108,17 +110,18 @@ private fun Content(d: JsonObject?, ms: Long) {
             Spacer(GlanceModifier.height(4.dp))
             val level = listOf("calm", "elevated", "high").indexOf((d?.get("signals") as? JsonObject)?.get("level")?.jsonPrimitive?.content)
             Row {
-                if (level >= 0) Text(
+                if (pending) Text("Guess first · ", style = medium)
+                else if (level >= 0) Text(
                     "Body signals " + listOf("Calm", "Elevated", "High")[level] + " · ", style = medium,
                 )
                 Text(footer, style = small)
             }
         } else {
             val ring = minOf(size.width - 24.dp, room).coerceIn(40.dp, 110.dp)
-            Ring(d?.score("readiness"), c.readiness, c.light(c.readiness), ring, text, calm)
+            Ring(d?.score("readiness"), c.readiness, c.light(c.readiness), ring, text, calm || pending)
             Spacer(GlanceModifier.height(4.dp))
             Text(
-                if (calm) calmWord("readiness", d?.score("readiness")) else "Sleep ${d?.score("sleep") ?: "–"} · Activity ${d?.score("activity") ?: "–"}",
+                if (pending) "Guess first" else if (calm) calmWord("readiness", d?.score("readiness")) else "Sleep ${d?.score("sleep") ?: "–"} · Activity ${d?.score("activity") ?: "–"}",
                 style = medium,
             )
             Text(footer, style = small)

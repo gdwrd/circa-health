@@ -317,7 +317,8 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         item {
             Section("You", "Your birth year sets your maximum heart rate for cardio zones. Goals shape the Activity and Sleep scores." +
                 if (med != null) " Wake times set tonight's bedtime plan; weekends mean the nights before Saturday and Sunday." +
-                    " Calm mode: words instead of numbers. Numbers stay one tap away." else "") {
+                    " Calm mode: words instead of numbers. Numbers stay one tap away." +
+                    " Guess first: say how recovered you feel before the scores show." else "") {
                 // Birth year is stored by the backend; without one there are no cardio zones.
                 if (med != null) {
                     FieldRow("Birth year", birth, "Not set", KeyboardType.Number) {
@@ -350,6 +351,13 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                         SwitchRow("Calm mode", (s["calm"] as? JsonPrimitive)?.contentOrNull == "1") { on ->
                             haptic.tick()
                             patchMed("calm", JsonPrimitive(if (on) "1" else ""))
+                        }
+                    }
+                    Hairline(Modifier.padding(start = AppSpace.l))
+                    key(patchFailed) {
+                        SwitchRow("Guess first", (s["guess"] as? JsonPrimitive)?.contentOrNull == "1") { on ->
+                            haptic.tick()
+                            patchMed("guess", JsonPrimitive(if (on) "1" else ""))
                         }
                     }
                 }

@@ -350,7 +350,7 @@ fun InsetCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.()
     )
 }
 
-/** Activity-style ring: faint track, sweep-gradient arc (light end at the head) that springs to [progress] (0..1), or starts there when ![animate]; blurred glow when >= 120 dp. [alpha] fades the whole ring (0.6 = low confidence). */
+/** Activity-style ring: faint track, sweep-gradient arc (light end at the head) that springs to [progress] (0..1), or starts there when ![animate]; blurred glow when >= 120 dp. [alpha] fades the whole ring (0.6 = low confidence). [mark] (0..1) puts a hollow dot on the track. */
 @Composable
 fun ScoreRing(
     progress: Float,
@@ -359,6 +359,7 @@ fun ScoreRing(
     stroke: Dp = 12.dp,
     animate: Boolean = true,
     alpha: Float = 1f,
+    mark: Float? = null,
     content: @Composable BoxScope.() -> Unit = {},
 ) {
     val p = remember { Animatable(if (animate) 0f else progress.coerceIn(0f, 1f)) }
@@ -391,6 +392,12 @@ fun ScoreRing(
                 // a full ring peaks halfway and ends on the base colour so 12 o'clock has no seam.
                 val stops = if (v < 0.999f) arrayOf(0f to color, v to light, 1f to color) else arrayOf(0f to color, 0.5f to light, 1f to color)
                 drawArc(Brush.sweepGradient(*stops, center = center), 0f, sweep, false, topLeft, arc, alpha = alpha, style = Stroke(w, cap = StrokeCap.Round))
+            }
+            // Hollow dot on the track at [mark] (Guess first): a card-coloured hole, so it reads on the arc and on the bare track.
+            if (mark != null) rotate(360f * mark.coerceIn(0f, 1f)) {
+                val o = Offset(center.x, w / 2)
+                drawCircle(colors.card, w * 0.36f, o)
+                drawCircle(color, w * 0.29f, o, style = Stroke(w * 0.14f))
             }
         }
         content()
