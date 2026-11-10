@@ -76,3 +76,14 @@ def test_ring_awake_stage_4_not_double_counted() -> None:
           "biometric_screen_on": {w: 1.0, w + 600: 0.0}})
     n = main._sessions(d)[0]
     assert (n["awake_min"], n["phone_min"]) == (20.0, 10.0)
+
+
+def test_screen_on_without_off_is_capped_at_30_min() -> None:
+    d = date.today()
+    m = samples.midnight(d).timestamp()
+    ss = m - 4500  # in bed 22:45; phone ON at 23:00, then shut down: no OFF
+    load({"biometric_sleep_end_ts": {ss: ss + 27000}, "biometric_sleep_total_min": {ss: 450.0},
+          "biometric_sleep_stage": {ss: 2.0}, "biometric_screen_on": {m - 3600: 1.0}})
+    assert main._sessions(d)[0]["phone_min"] == 30.0  # last event of the window
+    load({"biometric_screen_on": {m + 3 * 3600: 1.0, m + 3 * 3600 + 300: 0.0}})
+    assert main._sessions(d)[0]["phone_min"] == 35.0  # the next ON ends it too, still capped

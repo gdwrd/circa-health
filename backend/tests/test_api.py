@@ -649,3 +649,23 @@ def test_vitals_drop_nonpositive() -> None:
     now = time.time()
     load({"biometric_hr_bpm": {now - 120: 61.0, now - 60: 0.0}})
     assert main._vitals()["hr"] == 61.0
+
+
+def test_phone_in_bed_row_keeps_its_id_across_rescores() -> None:
+    d = date.today()
+    ss = samples.midnight(d).timestamp() - 1800
+    load({"biometric_sleep_end_ts": {ss: ss + 27000}, "biometric_sleep_total_min": {ss: 450.0},
+          "biometric_sleep_stage": {ss: 2.0}, "biometric_screen_on": {ss - 600: 1.0, ss + 1200: 0.0}})
+    ids = []
+    for _ in range(2):
+        main._score_day(d)
+        ids.append([e["id"] for e in db.journal((d - timedelta(1)).isoformat()) if e["kind"] == "phone_in_bed"])
+    assert len(ids[0]) == 1 and ids[0] == ids[1]
+
+
+def test_hourly_sums_the_repeated_hour_on_dst_fall_back(monkeypatch) -> None:
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+    d = date(2026, 10, 25)  # 02:00 happens twice (CEST, then CET)
+    m = samples.midnight(d).timestamp()
+    load({"biometric_steps": {m + 2 * 3600: 100.0, m + 3 * 3600: 200.0, m + 4 * 3600: 50.0}})
+    assert main._hourly("biometric_steps", d) == {2: 300.0, 3: 50.0}

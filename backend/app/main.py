@@ -32,7 +32,11 @@ def auth(cred: HTTPAuthorizationCredentials | None = Depends(bearer)) -> None:
 def _hourly(metric: str, d: date) -> dict[int, float]:
     end = samples.midnight(d + timedelta(1)) - timedelta(seconds=1)  # exclude next midnight's lookback
     # 59m lookback: an hour with no sample stays empty instead of repeating the previous hour's value.
-    return {datetime.fromtimestamp(t, samples.tz()).hour: v for t, v in samples.grid(metric, samples.midnight(d), end, 3600, 3540).items()}
+    out: dict[int, float] = {}
+    for t, v in samples.grid(metric, samples.midnight(d), end, 3600, 3540).items():
+        h = datetime.fromtimestamp(t, samples.tz()).hour
+        out[h] = out.get(h, 0.0) + v  # DST fall-back: two hours share a local hour
+    return out
 
 
 def _after_noon(ts: float) -> int:
@@ -77,17 +81,20 @@ def _sessions(d: date) -> list[dict]:
 
 
 def _screen_on(lo: datetime, hi: datetime) -> list[tuple[float, float]]:
-    """biometric_screen_on (1 on, 0 off) -> (on, off) intervals; an ON without an OFF ends at hi."""
+    """biometric_screen_on (1 on, 0 off) -> (on, off) intervals; an ON without an OFF (phone shut down)
+    ends at the next screen event or hi, at most 30 min later."""
     out: list[tuple[float, float]] = []
     on: float | None = None
     for t, v in sorted(samples.raw("biometric_screen_on", lo, hi).items()):
-        if v >= 0.5 and on is None:
+        if v >= 0.5:
+            if on is not None:
+                out.append((on, min(t, on + 1800)))
             on = t
-        elif v < 0.5 and on is not None:
+        elif on is not None:
             out.append((on, t))
             on = None
     if on is not None:
-        out.append((on, hi.timestamp()))
+        out.append((on, min(on + 1800, hi.timestamp())))
     return out
 
 
@@ -116,10 +123,11 @@ def _score_day(d: date) -> None:
         return ts <= now.timestamp() and not any(x["start"] <= ts < x["end"] for x in asleep)
 
     pm = round(n["phone_min"]) if n else 0
-    if pm >= 1:  # auto journal row on the evening date, so insights pair it with this night
-        db.add_journal((d - timedelta(1)).isoformat(), "phone_in_bed", str(pm), None, int(time.time()))
-    else:
-        db.delete_phone_in_bed((d - timedelta(1)).isoformat())
+    ev = (d - timedelta(1)).isoformat()  # auto journal row on the evening date, so insights pair it with this night
+    if pm < 1:
+        db.delete_phone_in_bed(ev)
+    elif not db.query("SELECT 1 FROM journal WHERE date=? AND kind='phone_in_bed' AND value=?", (ev, str(pm))):
+        db.add_journal(ev, "phone_in_bed", str(pm), None, int(time.time()))  # unchanged minutes keep their row id
 
     inputs: dict = {"sleep_min": n and n["total_min"], "nap_min": sum(x["total_min"] for x in naps)}
     extra: dict = {"naps": naps, "regularity": None, "spo2": None, "hr_low_t": None}

@@ -2,6 +2,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 from contextlib import closing
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -42,6 +43,7 @@ def connect() -> sqlite3.Connection:
 
 
 BACKUP = re.compile(r"ring-(\d{4}-\d{2}-\d{2})\.db")
+BACKUP_LOCK = threading.Lock()  # concurrent rescores share the .tmp file
 
 
 def backup() -> None:
@@ -49,12 +51,13 @@ def backup() -> None:
     folder = Path(os.environ.get("DB_PATH", "/data/ring.db")).parent / "backups"
     today = datetime.now(samples.tz()).date()
     target = folder / f"ring-{today.isoformat()}.db"
-    if not target.exists():
-        folder.mkdir(exist_ok=True)
-        tmp = target.with_suffix(".tmp")
-        with closing(connect()) as src, closing(sqlite3.connect(tmp)) as dst:
-            src.backup(dst)
-        tmp.replace(target)
+    with BACKUP_LOCK:
+        if not target.exists():
+            folder.mkdir(exist_ok=True)
+            tmp = target.with_suffix(".tmp")
+            with closing(connect()) as src, closing(sqlite3.connect(tmp)) as dst:
+                src.backup(dst)
+            tmp.replace(target)
     for f in folder.iterdir():
         m = BACKUP.fullmatch(f.name)
         if m and date.fromisoformat(m[1]) < today - timedelta(14):
