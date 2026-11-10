@@ -67,11 +67,15 @@ private const val SLOT_S = 300.0
 private class Hour(val h: Int, val steps: Double, val worn: Boolean)
 
 @Composable
-fun ActivityScreen(backend: Boolean?) {
+fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: () -> Unit = {}) {
     if (backend != true) return NoBackendTab("Activity", backend)
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var date by remember { mutableStateOf(LocalDate.now()) }
+    // "Was this a workout?" notification: show the day it asks about.
+    LaunchedEffect(linkDate) {
+        if (linkDate != null) { runCatching { LocalDate.parse(linkDate) }.getOrNull()?.let { date = it }; onLinkHandled() }
+    }
     var hours by remember { mutableStateOf<List<JsonObject>?>(null) }
     var day by remember { mutableStateOf<JsonObject?>(null) }
     var hr by remember { mutableStateOf<List<Pair<Double, Double>>>(emptyList()) }
@@ -191,7 +195,7 @@ fun ActivityScreen(backend: Boolean?) {
             title = { Text("What was this?") },
             text = {
                 Column {
-                    KINDS.forEach { (k, name) ->
+                    (KINDS + ("none" to "Not a workout")).forEach { (k, name) ->
                         Text(
                             name + if (k == cur) "  ✓" else "",
                             style = AppType.body, color = if (k == cur) c.tint else c.label,

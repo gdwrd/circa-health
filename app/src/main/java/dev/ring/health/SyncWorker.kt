@@ -524,17 +524,29 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             val id = o["id"]!!.jsonPrimitive.int
             if (!Api.ack(ctx, id)) continue // ack first: a failed ack would re-alert on every sync
             val intent = Intent(ctx, MainActivity::class.java)
-            (o["extra"] as? JsonObject)?.forEach { (k, v) -> intent.putExtra(k, v.jsonPrimitive.content) }
+            val extra = o["extra"] as? JsonObject
+            extra?.forEach { (k, v) -> intent.putExtra(k, v.jsonPrimitive.content) }
             // request code = id: each notification keeps its own extras
-            val open = PendingIntent.getActivity(ctx, id, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+            val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            val open = PendingIntent.getActivity(ctx, id, intent, flags)
+            val body = o["body"]!!.jsonPrimitive.content
             val notif = NotificationCompat.Builder(ctx, "health")
                 .setSmallIcon(R.drawable.ic_stat_circa)
                 .setContentTitle(o["title"]!!.jsonPrimitive.content)
-                .setContentText(o["body"]!!.jsonPrimitive.content)
+                .setContentText(body)
                 .setContentIntent(open)
                 .setAutoCancel(true)
-                .build()
-            nm.notify(1000 + id, notif) // offset keeps clear of the sync notification id
+            // "Was this a workout?": confirm the server's guess or dismiss it without opening the app; a tap opens the day.
+            val guess = extra?.get("kind")?.jsonPrimitive?.content
+            if (extra?.get("open")?.jsonPrimitive?.content == "workout" && guess != null) {
+                notif.setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                listOf("Yes, a $guess" to guess, "Not a workout" to "none").forEachIndexed { n, (label, kind) ->
+                    val reply = Intent(ctx, WorkoutActionReceiver::class.java).putExtra("kind", kind).putExtra("notif", 1000 + id)
+                    for (k in listOf("date", "start")) reply.putExtra(k, extra[k]?.jsonPrimitive?.content)
+                    notif.addAction(0, label, PendingIntent.getBroadcast(ctx, id * 2 + n, reply, flags))
+                }
+            }
+            nm.notify(1000 + id, notif.build()) // offset keeps clear of the sync notification id
             shown++
         }
         return shown

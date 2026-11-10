@@ -85,6 +85,7 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
                 "sleep" -> { go(TabItem.Sleep); onLinkHandled() }
                 "month" -> go(TabItem.Trends) // Trends consumes it once the month card is open
                 "journal" -> { go(TabItem.Today); if (link.second == null) onLinkHandled() }
+                "workout" -> go(TabItem.Activity) // Activity consumes it once it shows that day
                 null -> {}
                 else -> onLinkHandled()
             }
@@ -104,7 +105,7 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
             NavHost(nav, startDestination = TabItem.Today.route, modifier = Modifier.haze(haze)) {
                 composable(TabItem.Today.route) { TodayScreen(backend, { nav.navigate("settings") }, { nav.navigate("breathe") }, journalDate, onLinkHandled) }
                 composable(TabItem.Sleep.route) { SleepScreen(backend) }
-                composable(TabItem.Activity.route) { ActivityScreen(backend) }
+                composable(TabItem.Activity.route) { ActivityScreen(backend, link?.takeIf { it.first == "workout" }?.second, onLinkHandled) }
                 composable(TabItem.Body.route) { BodyScreen(backend) }
                 composable(TabItem.Trends.route) { TrendsScreen(backend, link?.first == "month", onLinkHandled) }
                 composable("breathe") { BreatheScreen { nav.popBackStack() } }

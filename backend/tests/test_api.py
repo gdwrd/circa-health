@@ -337,6 +337,10 @@ def test_cardio_settings_today_and_workout_relabel(tmp_path, monkeypatch) -> Non
                     {"date": "bogus", "start": int(w0), "kind": "walk"},
                     {"start": int(w0), "kind": "walk"}, {"date": d.isoformat(), "start": "x", "kind": "walk"}):
             assert c.patch("/workouts", json=bad, headers=H).status_code == 422, bad
+        r = c.patch("/workouts", json={"date": d.isoformat(), "start": int(w0), "kind": "none"}, headers=H)
+        assert r.json()["workouts"] == []  # "not a workout" drops it, and it stays dropped across a rescore
+        main._score_day(d)
+        assert db.days(d, d)[0]["c"]["workouts"] == []
         assert c.patch("/settings", json={"birth_year": ""}, headers=H).json()["birth_year"] == ""
 
 

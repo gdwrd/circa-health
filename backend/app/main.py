@@ -210,6 +210,7 @@ def _score_day(d: date) -> None:
             if w["start"] - 600 <= start <= w["end"]:
                 w["kind"], w["confirmed"] = kind, True
                 break
+    workouts = [w for w in workouts if w["kind"] != "none"]  # "not a workout": the user dismissed it
     if any(w["minutes"] >= 20 or w["confirmed"] for w in workouts):  # auto journal row; a manual entry is never touched
         db.add_auto(d.isoformat(), "workout")
     else:
@@ -788,7 +789,7 @@ def patch_settings(tasks: BackgroundTasks, body: dict = Body(...)) -> dict:
 @api.patch("/workouts")
 def patch_workouts(body: dict = Body(...)) -> dict:
     d, start, kind = _day(str(body.get("date"))), body.get("start"), body.get("kind")
-    if not isinstance(start, int) or isinstance(start, bool) or kind not in ("walk", "ride", "workout"):
+    if not isinstance(start, int) or isinstance(start, bool) or kind not in ("walk", "ride", "workout", "none"):
         raise HTTPException(422, "bad start or kind")
     db.set_workout_kind(d, start, kind)
     _score_day(d)

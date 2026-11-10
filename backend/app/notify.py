@@ -320,8 +320,27 @@ def _experiment(now: datetime, dates: set[date]) -> None:
              f"Today: {EXPERIMENT[e['kind']][e['plan'][i] == '0']}.", now)
 
 
+GUESS = {"walk": "a walk", "ride": "a ride", "workout": "a workout"}
+
+
+def _workout(now: datetime, dates: set[date]) -> None:
+    """One question per unlabelled workout of today or yesterday that ended 10+ min ago (a later sync may still extend
+    it). The app's buttons confirm the guess or dismiss it through PATCH /workouts; a tap opens the day to change it."""
+    d = now.date()
+    asked = [int(json.loads(r["extra"])["start"]) for r in db.query(
+        "SELECT extra FROM notifications WHERE kind='workout' AND created_at>=?", ((now - timedelta(days=2)).isoformat(),))]
+    for row in db.days(d - timedelta(1), d):
+        for w in row["c"].get("workouts") or []:
+            if w["confirmed"] or w["end"] > now.timestamp() - 600 or any(w["start"] - 600 <= s <= w["end"] for s in asked):
+                continue
+            a, b = (f"{datetime.fromtimestamp(t, samples.tz()):%H:%M}" for t in (w["start"], w["end"]))
+            _add("workout", "Was this a workout?", f"{'' if row['date'] == d else 'Yesterday '}{a}–{b}, {w['minutes']} min. "
+                 f"Looks like {GUESS[w['kind']]}. Tap to change it.", now,
+                 {"open": "workout", "date": row["date"].isoformat(), "start": str(w["start"]), "kind": w["kind"]})
+
+
 KINDS = ("readiness", "bedtime", "bedtime_soon", "inactivity", "strain", "checkin", "weekly", "morning", "monthly", "stillup",
-         "experiment")
+         "experiment", "workout")
 
 
 def evaluate(dates: set[date]) -> None:
@@ -329,7 +348,8 @@ def evaluate(dates: set[date]) -> None:
     muted = set(db.settings()["muted"].split(","))
     for rule, kind in ((_readiness, "readiness"), (_bedtime, "bedtime"), (_inactivity, "inactivity"),
                        (_weekly, "weekly"), (_strain, "strain"), (_checkin, "checkin"), (_morning, "morning"),
-                       (_monthly, "monthly"), (_stillup, "stillup"), (_experiment, "experiment")):
+                       (_monthly, "monthly"), (_stillup, "stillup"), (_experiment, "experiment"),
+                       (_workout, "workout")):
         if kind in muted:
             continue
         try:

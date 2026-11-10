@@ -51,16 +51,18 @@ def _hour(t: float) -> int:
 
 def workouts(hr: dict[float, float], steps_h: dict[int, float], bounds: list[float],
              awake: Callable[[float], bool], low_step_kind: str = "workout") -> list[dict]:
-    """Runs of zone >= 2 samples (one non-active sample inside a run is kept), >= 4 active samples, merged across
-    gaps <= 10 min. kind = walk at >= 1000 steps/h over the covered hours, else low_step_kind."""
+    """Runs of 5-min slots at >= 40 % of heart-rate reserve (moderate effort; one calmer slot inside a run is kept),
+    >= 3 active slots, merged across gaps <= 10 min. kind = walk at >= 1000 steps/h over the covered hours, else
+    low_step_kind. Loose on purpose: the app asks the user to confirm each one."""
+    floor = 2 * bounds[0] - bounds[1]  # 40 % of reserve: one zone width under zone 1
     runs: list[list[float]] = []
-    for t in sorted(t for t, v in hr.items() if v > 0 and awake(t) and zone_of(v, bounds) >= 2):
+    for t in sorted(t for t, v in _slots({t: v for t, v in hr.items() if awake(t)}).items() if v >= floor):
         if runs and t - runs[-1][-1] <= 2 * STEP:
             runs[-1].append(t)
         else:
             runs.append([t])
     segs: list[list[float]] = []
-    for r in (r for r in runs if len(r) >= 4):
+    for r in (r for r in runs if len(r) >= 3):
         if segs and r[0] - (segs[-1][-1] + STEP) <= 600:
             segs[-1] += r
         else:

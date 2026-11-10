@@ -622,3 +622,22 @@ def test_calm_morning_band_word_no_score(monkeypatch) -> None:
         assert n["extra"] == {"open": "sleep"}
         with closing(db.connect()) as con, con:
             con.execute("DELETE FROM notifications")  # test db: lets the once-a-day rule fire for the next score
+
+
+def test_workout_asks_once_per_unlabelled_session(monkeypatch) -> None:
+    now = at(monkeypatch, 12)
+    t = now.timestamp()
+    w = {"start": int(t) - 3600, "end": int(t) - 2400, "minutes": 20, "kind": "ride", "confirmed": False}
+    running = w | {"start": int(t) - 900, "end": int(t) - 300}  # ended 5 min ago: may still grow
+    labelled = w | {"start": int(t) - 9000, "end": int(t) - 7800, "confirmed": True}
+    db.save_day(D, (None, None, None), {"workouts": [labelled, w, running]}, {})
+    notify.evaluate(set())
+    notify.evaluate(set())
+    (n,) = notify.pending()
+    assert n["kind"] == "workout" and n["title"] == "Was this a workout?"
+    assert n["body"] == "11:00–11:20, 20 min. Looks like a ride. Tap to change it."
+    assert n["extra"] == {"open": "workout", "date": D.isoformat(), "start": str(w["start"]), "kind": "ride"}
+    # a later sync moves the start by one sample: still the same session, no second question
+    db.save_day(D, (None, None, None), {"workouts": [w | {"start": w["start"] + 300}]}, {})
+    notify.evaluate(set())
+    assert kinds() == ["workout"]

@@ -55,6 +55,15 @@ def test_workouts_dip_bursts_merge_and_kind() -> None:
     assert cardio.workouts(long, {}, B, lambda t: False) == []  # sleep samples excluded
 
 
+def test_workouts_moderate_floor_and_three_slots() -> None:
+    """Floor = 40 % of reserve (106 here), 3 slots = 15 min; live readings inside one slot do not count as slots."""
+    (w,) = cardio.workouts(hr((0, [110.0] * 3)), {}, B, awake)
+    assert w["minutes"] == 15 and w["load"] == 0.0  # under zone 1: counted as a workout, adds no load
+    assert cardio.workouts(hr((0, [105.0] * 6)), {}, B, awake) == []
+    assert cardio.workouts(hr((0, [110.0] * 2)), {}, B, awake) == []
+    assert cardio.workouts(hr((0, [110.0] * 2)) | {T0 + 100.0: 110.0, T0 + 200.0: 110.0}, {}, B, awake) == []
+
+
 def test_restorative() -> None:
     calm = hr((0, [55.0] * 4), (10, [55.0] * 2))  # 20 min counts, 10 min does not
     assert cardio.restorative(calm, 52, {}, awake) == 20
