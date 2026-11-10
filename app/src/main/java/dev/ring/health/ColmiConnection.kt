@@ -86,8 +86,12 @@ class ColmiConnection(private val context: Context, private val address: String)
     // ── Public API ─────────────────────────────────────────────────────────
 
     suspend fun connect(timeoutMs: Long = 20_000): Boolean {
-        val adapter = BluetoothAdapter.getDefaultAdapter()
-        val device  = adapter.getRemoteDevice(address)
+        val adapter = BluetoothAdapter.getDefaultAdapter() ?: return false
+        if (!BluetoothAdapter.checkBluetoothAddress(address.uppercase())) {
+            SyncLog.add(context, "Ring: address is not a MAC")
+            return false
+        }
+        val device  = adapter.getRemoteDevice(address.uppercase())
         gatt = device.connectGatt(context, false, callback, android.bluetooth.BluetoothDevice.TRANSPORT_LE)
 
         val connected = withTimeoutOrNull(timeoutMs) { connectedDeferred.await() } ?: false

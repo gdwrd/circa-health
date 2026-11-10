@@ -54,6 +54,7 @@ import dev.ring.health.Prefs.vmUrl
 import dev.ring.health.ui.Api
 import dev.ring.health.widget.RingWidget
 import androidx.glance.appwidget.updateAll
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -71,7 +72,6 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
     @SuppressLint("MissingPermission")
     override suspend fun doWork(): Result {
-        setForeground(buildForegroundInfo("Syncing ring…"))
         val log = { msg: String -> SyncLog.add(applicationContext, msg) }
         log("Sync started")
 
@@ -109,6 +109,9 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
         val conn = ColmiConnection(applicationContext, address)
         return try {
+            // Android 12+ refuses a foreground start from a delayed background run unless battery-exempt; sync anyway.
+            runCatching { setForeground(buildForegroundInfo("Syncing ring…")) }
+                .onFailure { if (it is CancellationException) throw it; log("Sync: no foreground") }
             val connected = conn.connect()
             if (!connected) {
                 Log.w(TAG, "Could not connect to ring")
@@ -256,8 +259,10 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             Result.success()
 
         } catch (e: Exception) {
+            if (e is CancellationException) throw e // a REPLACE enqueue cancelled this run; rescheduling would replace the new request
             log("Sync error: ${e.javaClass.simpleName}: ${e.message}")
-            throw e
+            scheduleNext(applicationContext)
+            Result.success()
         } finally {
             conn.disconnect()
             runCatching { warnIfStale() } // every attempt incl. "could not connect", which is the case it exists for

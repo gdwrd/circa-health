@@ -225,9 +225,9 @@ object ColmiProtocol {
 
         if (value.size < 13) return null
 
-        val year  = 2000 + bcdByte(value[1])
-        val month = bcdByte(value[2]) - 1  // Calendar is 0-based
-        val day   = bcdByte(value[3])
+        val year  = 2000 + (bcdByte(value[1]) ?: return null)
+        val month = (bcdByte(value[2]) ?: return null) - 1  // Calendar is 0-based
+        val day   = bcdByte(value[3]) ?: return null
         val hour  = (value[4].toInt() and 0xff) / 4
 
         val cal = Calendar.getInstance().apply {
@@ -358,9 +358,12 @@ object ColmiProtocol {
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
-    // BCD byte: 0x26 → 26 (not 38). Same trick as Gadgetbridge.
-    private fun bcdByte(b: Byte): Int =
-        String.format("%02x", b.toInt() and 0xff).toInt()
+    // BCD byte: 0x26 → 26 (not 38). Null when a nibble is not a decimal digit.
+    private fun bcdByte(b: Byte): Int? {
+        val hi = (b.toInt() and 0xf0) shr 4
+        val lo = b.toInt() and 0x0f
+        return if (hi > 9 || lo > 9) null else hi * 10 + lo
+    }
 
     private fun midnightMs(cal: Calendar): Long {
         return Calendar.getInstance().apply {

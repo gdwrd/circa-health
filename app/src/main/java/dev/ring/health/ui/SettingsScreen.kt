@@ -358,11 +358,11 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                     else "Stored on this phone: ${"%,d".format(stored.first)} samples since " +
                         SimpleDateFormat("d MMM yyyy", Locale.getDefault()).format(Date(stored.second)) + " · ${"%,d".format(stored.third)} waiting to send",
             ) {
-                FieldRow("Address", ring, "Not configured") { ring = it.trim(); ctx.ringAddress = ring.takeIf { a -> a.isNotEmpty() } }
+                FieldRow("Address", ring, "Not configured") { ring = it.trim(); ctx.ringAddress = ring.takeIf { a -> a.isNotEmpty() }; if (ring.isNotEmpty() && url.isNotEmpty()) SyncWorker.schedule(ctx) }
                 Hairline(Modifier.padding(start = AppSpace.l))
                 ButtonRow(if (scanning) "Scanning…" else "Scan for ring", enabled = !scanning, onClick = ::startScan)
                 Hairline(Modifier.padding(start = AppSpace.l))
-                FieldRow("URL", url, "http://host:8429", KeyboardType.Uri) { url = it.trim(); ctx.vmUrl = url }
+                FieldRow("URL", url, "http://host:8429", KeyboardType.Uri) { url = it.trim(); ctx.vmUrl = url; if (ring.isNotEmpty() && url.isNotEmpty()) SyncWorker.schedule(ctx) }
                 Hairline(Modifier.padding(start = AppSpace.l))
                 FieldRow("Token", token, "Optional", KeyboardType.Password, password = true) { token = it.trim(); ctx.apiToken = token }
                 Hairline(Modifier.padding(start = AppSpace.l))
@@ -509,6 +509,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                             Modifier.fillMaxWidth().clickable {
                                 ring = r.device.address
                                 ctx.ringAddress = ring
+                                if (url.isNotEmpty()) SyncWorker.schedule(ctx)
                                 scanResults = null
                                 Toast.makeText(ctx, "Ring address saved", Toast.LENGTH_SHORT).show()
                             }.padding(vertical = AppSpace.m),
