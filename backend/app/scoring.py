@@ -281,6 +281,18 @@ def derived(moments: list[tuple[int, str]]) -> set[str]:
     return out
 
 
+def moves(segs: list[tuple[int, int, str]]) -> list[tuple[int, int, str]]:
+    """segs: (start s, end s, kind). Same-kind segments at most 5 min apart become one (traffic lights); a ride or
+    run under 5 min and a walk under 10 min are dropped. Ascending by start."""
+    out: list[list] = []
+    for s, e, k in sorted(segs, key=lambda x: (x[2], x[0])):
+        if out and out[-1][2] == k and s - out[-1][1] <= 300:
+            out[-1][1] = max(out[-1][1], e)
+        else:
+            out.append([s, e, k])
+    return sorted((s, e, k) for s, e, k in out if e - s >= (600 if k == "walk" else 300))
+
+
 def still_hours(steps_h: dict[int, float], hour: int) -> int | None:
     """Full hours since the last hour of today with 500 or more steps; None when today has none."""
     last = max((h for h, v in steps_h.items() if h <= hour and v >= 500), default=None)

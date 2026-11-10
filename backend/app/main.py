@@ -243,6 +243,22 @@ def _score_day(d: date) -> None:
             "avg_bpm": round(mean(seg.values())) if seg else None, "max_bpm": max(seg.values(), default=None),
             "load": cardio.load(seg, bounds)["load"] if bounds else None, "kind": m["kind"], "confirmed": True,
             "manual": True}]
+    segs = [(int(t), int(t) + round(v * 60), k) for k in ("walk", "ride", "run")
+            for t, v in samples.raw(f"phone_{k}", samples.midnight(d), end).items()]
+    for s, e, k in scoring.moves(segs):  # noticed by the phone: replaces a detected session, yields to a manual one
+        k = "workout" if k == "run" else k
+        for st, lab in db.workout_kinds(d).items():
+            if s - 600 <= st <= e:
+                k = lab
+                break
+        if k == "none" or any(w.get("manual") and w["start"] < e and s < w["end"] for w in workouts):
+            continue
+        seg = {t: v for t, v in day_hr.items() if s <= t < e}
+        ok = bounds and seg and mean(seg.values()) >= 2 * bounds[0] - bounds[1]  # the cardio.workouts floor
+        workouts = [w for w in workouts if w["end"] <= s or w["start"] >= e] + [{
+            "start": s, "end": e, "minutes": (e - s) // 60,
+            "avg_bpm": round(mean(seg.values())) if ok else None, "max_bpm": max(seg.values()) if ok else None,
+            "load": cardio.load(seg, bounds)["load"] if ok else 0, "kind": k, "confirmed": True, "phone": True}]
     workouts.sort(key=lambda w: w["start"])
     if any(w["minutes"] >= 20 or w["confirmed"] for w in workouts):  # auto journal row; a manual entry is never touched
         db.add_auto(d.isoformat(), "workout")

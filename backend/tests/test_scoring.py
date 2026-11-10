@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.scoring import (FEELINGS, MOMENTS, activity_score, band, baseline, bedtime_window, confidence, derived, drive, guess_stats, low_index,
+from app.scoring import (FEELINGS, MOMENTS, activity_score, band, baseline, bedtime_window, confidence, derived, drive, guess_stats, low_index, moves,
                          readiness_score, regularity, resilience, robust, sleep_debt, sleep_score, social_jetlag, still_hours, strain, stress_zones,
                          suggest, tonight, what_if, wind_down)
 
@@ -222,6 +222,16 @@ def test_derived_caffeine_and_meal_boundaries() -> None:
     assert derived([(600, "coffee"), (1259, "meal"), (840, "wired"), (840, "good")]) == set()  # wired/good derive nothing
     assert derived([]) == set()
     assert (MOMENTS[:4], FEELINGS) == (FEELINGS, ("tired", "flat", "wired", "good"))
+
+
+def test_moves_merge_and_minimums() -> None:
+    assert moves([(0, 600, "ride"), (900, 1500, "ride")]) == [(0, 1500, "ride")]  # 5 min apart: one ride
+    assert moves([(0, 600, "ride"), (901, 1500, "ride")]) == [(0, 600, "ride"), (901, 1500, "ride")]
+    assert moves([(0, 600, "ride"), (700, 1300, "walk")]) == [(0, 600, "ride"), (700, 1300, "walk")]  # kinds never merge
+    assert moves([(0, 299, "ride"), (1000, 1299, "run"), (2000, 2300, "run")]) == [(2000, 2300, "run")]
+    assert moves([(0, 599, "walk"), (1000, 1600, "walk")]) == [(1000, 1600, "walk")]  # walk needs 10 min
+    assert moves([(0, 400, "walk"), (500, 800, "walk")]) == [(0, 800, "walk")]  # short parts merge, then count
+    assert moves([]) == []
 
 
 def test_still_hours() -> None:

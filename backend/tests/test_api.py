@@ -364,6 +364,42 @@ def test_cardio_settings_today_and_workout_relabel(tmp_path, monkeypatch) -> Non
         assert c.patch("/settings", json={"birth_year": ""}, headers=H).json()["birth_year"] == ""
 
 
+def test_phone_moves_as_workouts(tmp_path, monkeypatch) -> None:
+    """Yesterday, 54 bpm all day, 10:00-10:30 at 150 bpm (detected). Phone moves: ride 10:05 x 20 min (replaces it,
+    believable HR), ride 14:00 x 30 (54 bpm: no bpm / load), walk 16:00 x 5 (dropped), run 18:00 x 20, ride 20:10 x 10
+    inside a manual 20:00-20:30 entry (yields). The 14:00 ride is then dismissed with `none`."""
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "ph.db"))
+    monkeypatch.delenv("TZ", raising=False)
+    db.init()
+    d = date.today() - timedelta(1)
+    m = samples.midnight(d).timestamp()
+    at = lambda h, mi=0: int(m + h * 3600 + mi * 60)
+    load({"biometric_hr_bpm": {m + i * 300: 150.0 if at(10) <= m + i * 300 < at(10, 30) else 54.0 for i in range(288)},
+          "phone_ride": {at(10, 5): 20.0, at(14): 30.0, at(20, 10): 10.0}, "phone_walk": {at(16): 5.0},
+          "phone_run": {at(18): 20.0}})
+    monkeypatch.setattr(main, "_vitals", lambda: {})
+    monkeypatch.setattr(main, "rescore", lambda dates: None)
+    for i in range(1, 15):
+        db.save_day(d - timedelta(i), (None, None, None), {"inputs": {"rhr": 50.0}}, {})
+    db.add_manual_workout(d, at(20), at(20, 30), "walk")
+    with TestClient(app) as c:
+        c.patch("/settings", json={"birth_year": 1990}, headers=H)
+        main._score_day(d)
+        ws = {w["start"]: w for w in db.days(d, d)[0]["c"]["workouts"]}
+        assert sorted(ws) == [at(10, 5), at(14), at(18), at(20)]  # detected 10:00 replaced; 16:00 walk dropped
+        a, b, r, man = (ws[at(10, 5)], ws[at(14)], ws[at(18)], ws[at(20)])
+        assert (a["phone"], a["confirmed"], a["kind"], a["minutes"], a["avg_bpm"], a["load"]) == (True, True, "ride", 20, 150, 6.0)
+        assert (b["phone"], b["kind"], b["avg_bpm"], b["max_bpm"], b["load"]) == (True, "ride", None, None, 0)
+        assert (r["kind"], r["minutes"], r["phone"]) == ("workout", 20, True)
+        assert man.get("manual") and "phone" not in man
+        r = c.patch("/workouts", json={"date": d.isoformat(), "start": at(14), "kind": "none"}, headers=H)
+        main._score_day(d)  # the dismissal survives a rescore
+        assert [w["start"] for w in db.days(d, d)[0]["c"]["workouts"]] == [at(10, 5), at(18), at(20)]
+        c.patch("/workouts", json={"date": d.isoformat(), "start": at(18), "kind": "ride"}, headers=H)
+        main._score_day(d)
+        assert [(w["start"], w["kind"]) for w in db.days(d, d)[0]["c"]["workouts"]][1] == (at(18), "ride")  # relabel
+
+
 def test_sleep_debt_and_bedtime_fields(tmp_path, monkeypatch) -> None:
     """14 nights to today: even days 22:00 (quality 90), odd days 23:30 (60); last 3 nights 400 / 420+30 nap / 470."""
     monkeypatch.setenv("DB_PATH", str(tmp_path / "f2.db"))
