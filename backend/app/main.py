@@ -364,6 +364,18 @@ def _guess(d: date, on: bool, ready: int | None) -> dict:
             "stats": scoring.guess_stats(rows), "days": [[a, b] for a, b, _ in rows[-14:]]}
 
 
+def _drive() -> dict | None:
+    """Drive check facts as of now, from the stored sessions and naps of yesterday and today (what the app shows)."""
+    now = time.time()
+    ss = [(x["start"], x["end"], x["total_min"]) for r in db.days(_today() - timedelta(1), _today())
+          for x in [r["c"].get("session"), *(r["c"].get("sleep_extra") or {}).get("naps", [])]
+          if x and "total_min" in x and x["end"] <= now]  # a row without minutes (test fixtures) is no session
+    if not ss:
+        return None
+    hr = samples.raw("biometric_hr_bpm", _dt(max(e for _, e, _ in ss)), _dt(now))
+    return scoring.drive(now, ss, {int(t // 3600) for t, v in hr.items() if v > 0})
+
+
 @api.get("/today")
 def today(day: str | None = Query(None, alias="date")) -> dict:
     d = _day(day)
@@ -380,6 +392,7 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
     return {
         "status": "ok" if n >= 5 else "learning", "date": d.isoformat(), "baseline_days": f"{n}/14",
         "calm": cfg["calm"] == "1", "guess": _guess(d, cfg["guess"] == "1", row.get("readiness_score")),
+        "drive": _drive() if d == _today() else None,
         "confidence": row["c"].get("confidence"), "suggest": row["c"].get("suggest"),
         **{k: {"score": row.get(f"{k}_score"), "contributors": row["c"].get(k)} for k in ("sleep", "readiness", "activity")},
         "stress": row["c"].get("stress"),

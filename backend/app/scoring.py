@@ -245,6 +245,19 @@ def guess_stats(rows: list[tuple[int, int, int | None]]) -> dict:
             "split": len(split), "you": sum(v == g for g, _, v in split), "ring": sum(v == r for _, r, v in split)}
 
 
+def drive(now: float, sessions: list[tuple[float, float, float]], worn: set[int]) -> dict | None:
+    """Drive check facts. sessions: (start, end, minutes asleep) that ended at or before now; worn: epoch hours
+    (ts // 3600) holding an HR sample above 0. None without a session: no data is not no sleep. sleep_min = each
+    session's minutes times the share of it inside the last 24 h; worn = every full hour strictly between the
+    wake hour and the current hour is in the set (a night without the ring looks like no sleep)."""
+    if not sessions:
+        return None
+    wake = max(e for _, e, _ in sessions)
+    return {"as_of": now, "wake": wake,
+            "sleep_min": sum(m * max(e - max(s, now - 86400), 0.0) / (e - s) for s, e, m in sessions if e > s),
+            "worn": all(h in worn for h in range(int(wake // 3600) + 1, int(now // 3600)))}
+
+
 # Strain inputs: +1 = higher is worse, -1 = lower is worse. temp is reserved (R09), always null for now.
 DIRS = {"rhr": 1, "hrv": -1, "awake": 1, "recovery": 1, "spo2": -1, "temp": 1}
 FLOORS = {"rhr": 1.5, "hrv": 5.0, "awake": 10.0, "recovery": 0.10, "spo2": 1.0}

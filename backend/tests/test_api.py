@@ -798,3 +798,20 @@ def test_guess_setting_round_trip() -> None:
         assert c.get("/settings", headers=H).json()["guess"] == "1" and c.get("/today", headers=H).json()["guess"]["on"] is True
         assert c.patch("/settings", json={"guess": ""}, headers=H).json()["guess"] == ""
         assert c.get("/today", headers=H).json()["guess"]["on"] is False
+
+
+def test_today_drive_today_only() -> None:
+    with TestClient(app) as c:
+        d, now = main._today(), time.time()
+        drive = lambda day="": c.get(f"/today{day}", headers=H).json()["drive"]
+        assert drive() is None  # no stored session: no data is not no sleep
+        night = {"start": now - 11 * 3600, "end": now - 3 * 3600, "total_min": 450.0}
+        nap = {"start": now - 20 * 3600, "end": now - 19.5 * 3600, "total_min": 30.0}
+        db.save_day(d, (None, None, None), {"session": night}, {})
+        db.save_day(d - timedelta(1), (None, None, None), {"sleep_extra": {"naps": [nap]}}, {})
+        load({"biometric_hr_bpm": {now - 7200: 60.0, now - 3600: 0.0}})  # 0 = off the finger
+        j = drive()
+        assert (j["wake"], j["sleep_min"], j["worn"]) == (night["end"], 480, False) and now <= j["as_of"]
+        load({"biometric_hr_bpm": {now - 3600: 61.0}})
+        assert drive()["worn"] is True
+        assert drive(f"?date={d - timedelta(1)}") is None

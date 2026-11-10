@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.scoring import (activity_score, band, baseline, bedtime_window, confidence, guess_stats, low_index, readiness_score, regularity,
+from app.scoring import (activity_score, band, baseline, bedtime_window, confidence, drive, guess_stats, low_index, readiness_score, regularity,
                          resilience, robust, sleep_debt, sleep_score, social_jetlag, strain, stress_zones, suggest,
                          tonight, what_if, wind_down)
 
@@ -210,3 +210,27 @@ def test_guess_stats_off_bias_split_you_ring() -> None:
                      (75, 80, 0),      # same band: a verdict there is not a split
                      (50, 60, None)])  # same band
     assert s == {"status": "ok", "n": 6, "off": 14.7, "bias": -1.3, "same": 2, "split": 3, "you": 1, "ring": 1}
+
+
+NOW = 500 * 3600 + 600.0  # ten minutes into epoch hour 500
+
+
+def test_drive_no_session_is_none() -> None:
+    assert drive(NOW, [], {499}) is None
+
+
+def test_drive_session_half_outside_the_window_counts_half() -> None:
+    s = (NOW - 28 * 3600, NOW - 20 * 3600, 400.0)  # 8 h, the last 4 inside the 24 h
+    assert drive(NOW, [s], set(range(480, 500)))["sleep_min"] == 200
+
+
+def test_drive_nap_is_added_and_wake_is_the_latest_end() -> None:
+    night, nap = (NOW - 12 * 3600, NOW - 5 * 3600, 400.0), (NOW - 3 * 3600, NOW - 2.5 * 3600, 30.0)
+    assert drive(NOW, [nap, night], {498, 499}) == {"as_of": NOW, "wake": NOW - 2.5 * 3600, "sleep_min": 430, "worn": True}
+
+
+def test_drive_one_missing_hour_is_not_worn() -> None:
+    s = (NOW - 12 * 3600, NOW - 4 * 3600, 450.0)  # wake in hour 496: hours 497, 498 and 499 must be worn
+    assert drive(NOW, [s], {497, 498, 499})["worn"] is True
+    assert drive(NOW, [s], {496, 497, 499, 500})["worn"] is False
+    assert drive(NOW, [(NOW - 8 * 3600, NOW - 600, 440.0)], set())["worn"] is True  # woke this hour: no full hour yet
