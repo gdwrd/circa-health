@@ -88,6 +88,7 @@ import dev.ring.health.SampleStore
 import dev.ring.health.Prefs.apiToken
 import dev.ring.health.Prefs.batteryAlerts
 import dev.ring.health.Prefs.goalsPushed
+import dev.ring.health.Prefs.hasStoredGoals
 import dev.ring.health.Prefs.lastBatteryPct
 import dev.ring.health.Prefs.lastCharging
 import dev.ring.health.Prefs.lastSyncMs
@@ -195,11 +196,12 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var birth by remember { mutableStateOf("") }
     LaunchedEffect(url, token) {
         // Goals typed on this phone and not yet on the server go up first; until that works the server's are not copied down.
-        if (!ctx.goalsPushed) ctx.goalsPushed = Api.patchSettings(ctx, mapOf(
+        if (!ctx.goalsPushed && ctx.hasStoredGoals) ctx.goalsPushed = Api.patchSettings(ctx, mapOf(
             "step_goal" to JsonPrimitive(ctx.stepGoal.coerceIn(1000, 100000)),
             "sleep_need_min" to JsonPrimitive((ctx.sleepNeedHours * 60).roundToInt().coerceIn(240, 720)),
         )) != null
         med = Api.settings(ctx)
+        if (med != null && !ctx.hasStoredGoals) ctx.goalsPushed = true // fresh install: nothing to push, the server's goals win
         birth = (med?.get("birth_year") as? JsonPrimitive)?.contentOrNull.orEmpty()
         if (ctx.goalsPushed) med?.let { s ->
             (s["step_goal"] as? JsonPrimitive)?.doubleOrNull?.let { ctx.stepGoal = it.roundToInt(); steps = ctx.stepGoal.toString() }

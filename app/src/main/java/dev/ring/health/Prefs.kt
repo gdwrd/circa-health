@@ -60,6 +60,10 @@ object Prefs {
         get() = prefs(this).getBoolean(KEY_GOALS_PUSHED, false)
         set(v) = prefs(this).edit().putBoolean(KEY_GOALS_PUSHED, v).apply()
 
+    /** A step goal or sleep need was stored on this phone; false on a fresh install, whose defaults must not reach the server. */
+    val Context.hasStoredGoals: Boolean
+        get() = prefs(this).run { contains(KEY_STEP_GOAL) || contains(KEY_SLEEP_NEED_H) }
+
     /** Last sync whose push succeeded (or had nothing to push); 0 = never. Drives deep sync and the stale warning. */
     var Context.lastSyncMs: Long
         get() = prefs(this).getLong(KEY_LAST_SYNC_MS, 0L)
