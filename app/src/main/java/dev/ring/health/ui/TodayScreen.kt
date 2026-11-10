@@ -15,6 +15,9 @@ import dev.ring.health.Prefs.notificationAccess
 import dev.ring.health.bookmark
 import dev.ring.health.mark
 import dev.ring.health.Prefs.markNames
+import dev.ring.health.Prefs.showNumbers
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.ui.draw.rotate
 import dev.ring.health.widget.MarkWidget
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
@@ -240,6 +243,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
     var journal by remember { mutableStateOf<List<Entry>>(emptyList()) }
     var medTime by remember { mutableStateOf("08:00") }
     var medStarted by remember { mutableStateOf<String?>(null) }
+    var numbers by remember { mutableStateOf(ctx.showNumbers) }
     var sheet by remember { mutableStateOf(false) }
     var sheetDay by remember { mutableStateOf<Int?>(null) } // 0 Yesterday, 1 Today; null = by time of day
     var insights by remember { mutableStateOf<JsonObject?>(null) }
@@ -325,7 +329,8 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
             return@LargeTitleScaffold
         }
         val said = guess?.get("value").num()?.roundToInt()
-        item {
+        item { NumbersRow(numbers) { numbers = !numbers; ctx.showNumbers = numbers } }
+        if (numbers) item {
             val r = d["readiness"].obj()
             val score = r?.get("score").num()?.roundToInt()
             val mood = when { score == null -> c.moodFair.copy(alpha = 0f); score >= 80 -> c.moodGood; score >= 60 -> c.moodFair; else -> c.moodLow }
@@ -377,10 +382,10 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
                 }
             }
         }
-        item {
+        if (numbers) item {
             InsetCard { SmallRings(d, open?.takeIf { it == "sleep" || it == "activity" }, { open = it }, medStarted) }
         }
-        d["cardio"].obj()?.let { item { CardioLoad(it) } }
+        if (numbers) d["cardio"].obj()?.let { item { CardioLoad(it) } }
         val tonight = d["tonight"].obj()
         val plan = tonight?.get("plan").obj()
         if (LocalTime.now().hour >= 18 && tonight != null && plan != null) item { TonightCard(plan, tonight["bedtime"].obj(), tonight["wind_down_usual"].num(), tonight["what_if"].obj()) }
@@ -403,7 +408,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
         d["last_time"].obj()?.takeIf { (it["nights"].num() ?: 0.0) > 0 || it["before"].obj() != null || it["price"].obj()?.get("status").str() == "ok" || it["note"].str() != null }?.let { lt ->
             item { LastTimeCard(lt) { text -> scope.launch { answered(Api.putNote(ctx, lt["key"].str().orEmpty(), text), false) } } }
         }
-        item {
+        if (numbers) item {
             val v = d["vitals"].obj()
             val tiles = listOf("Heart rate" to ("hr" to "bpm"), "HRV" to ("hrv" to "ms"), "SpO₂ · latest" to ("spo2" to "%"), "Ring battery" to ("battery" to "%"))
             var expanded by remember { mutableStateOf<String?>(null) }
@@ -435,29 +440,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
                 if (off >= 2) Text("Ring off for $off h today", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.xs))
             }
         }
-        item {
-            val today = LocalDate.now()
-            Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                Text("Journal", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-                InsetCard {
-                    if (journal.isEmpty()) Text(
-                        "Log what you did and we'll show how it affects your sleep and recovery.",
-                        style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.l, end = AppSpace.l),
-                    )
-                    listOf(today.minusDays(1) to "Yesterday", today to "Today").forEach { (day, label) ->
-                        val es = journal.filter { it.date == day.toString() }.sortedWith(compareBy({ KIND_LABEL.keys.indexOf(it.kind) }, { it.value }))
-                        if (es.isNotEmpty()) {
-                            Text(label, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.l))
-                            FlowRow(
-                                Modifier.padding(start = AppSpace.l, top = AppSpace.s, end = AppSpace.l),
-                                horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s),
-                            ) { es.forEach { JournalChip(it.label(), it.kind == "workout" && it.note == "auto") } }
-                        }
-                    }
-                    TintButton(if (LocalTime.now().hour < 12) "Log yesterday" else "Log today", Modifier.padding(AppSpace.l)) { sheet = true }
-                }
-            }
-        }
+        item { DaySoFar(d, journal.filter { it.date == day }) { sheet = true } }
         marks.forEach { t -> item { MarkCard(t, scope, ::loadMarks) } }
         exp?.let { x ->
             item {
@@ -478,6 +461,57 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
         scope.launch { Api.startExperiment(ctx, kind, metric)?.let { exp = it["active"].obj() } }
     }
     if (sheet) CheckInSheet(journal, medTime, scope, sheetDay, data, ::loadJournal) { sheet = false; sheetDay = null }
+}
+
+/** The one row that folds the hero, rings, cardio and vitals; folded by default, kept in `Prefs.showNumbers`. */
+@Composable
+private fun NumbersRow(open: Boolean, onToggle: () -> Unit) {
+    val haptic = LocalHapticFeedback.current
+    val turn by animateFloatAsState(if (open) 90f else 0f, label = "chevron")
+    InsetCard {
+        Row(Modifier.fillMaxWidth().clickable(role = Role.Button) { haptic.tick(); onToggle() }.padding(AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
+            Text("Scores and vitals", style = AppType.headline, modifier = Modifier.weight(1f))
+            Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, if (open) "Collapse" else "Expand", tint = AppTheme.colors.secondaryLabel, modifier = Modifier.rotate(turn))
+        }
+    }
+}
+
+/** Today's moments, doses and workouts in time order, the day facts as chips, and the way into the check-in sheet. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DaySoFar(d: JsonObject, today: List<Entry>, onFix: () -> Unit) {
+    val c = AppTheme.colors
+    val zone = ZoneId.systemDefault()
+    val now = d["now"].obj()
+    val lines = (
+        today.filter { it.kind == "medication" }.mapNotNull { e ->
+            val t = runCatching { LocalTime.parse(e.value.orEmpty()) }.getOrNull() ?: return@mapNotNull null
+            t to "Dose" + (now?.get("dose_end").str()?.takeIf { e.value == now?.get("dose").str() }?.let { " · active until about ${clock(it)}" } ?: "")
+        } +
+        (d["moments"] as? JsonArray).orEmpty().mapNotNull { it.obj() }.mapNotNull { m ->
+            val s = m["ts"].num() ?: return@mapNotNull null
+            Instant.ofEpochSecond(s.toLong()).atZone(zone).toLocalTime() to m["kind"].str().orEmpty().replaceFirstChar { it.uppercase() }
+        } +
+        (d["workouts"] as? JsonArray).orEmpty().mapNotNull { it.obj() }.mapNotNull { w ->
+            val s = w["start"].num() ?: return@mapNotNull null
+            Instant.ofEpochSecond(s.toLong()).atZone(zone).toLocalTime() to
+                (w["kind"].str().orEmpty().replaceFirstChar { it.uppercase() } + (w["minutes"].num()?.roundToInt()?.let { " · $it min" } ?: ""))
+        }
+    ).sortedBy { it.first }
+    val facts = today.filter { it.kind != "medication" && it.kind != "breathe" && it.note != "auto" }
+    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+        Text("Day so far", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
+        InsetCard {
+            Column(Modifier.fillMaxWidth().padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                if (lines.isEmpty() && facts.isEmpty()) Text("Nothing yet today.", style = AppType.subhead, color = c.secondaryLabel)
+                lines.forEach { (t, text) -> Text("${clock(t)} $text", style = AppType.subhead) }
+                if (facts.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                    facts.forEach { JournalChip(it.label()) }
+                }
+                TintButton("Add or fix the day", Modifier.padding(top = AppSpace.xs)) { onFix() }
+            }
+        }
+    }
 }
 
 /** Sleep + Activity rings; tapping one grows it into the card with its details (shared element), a plain switch under reduce-motion. */

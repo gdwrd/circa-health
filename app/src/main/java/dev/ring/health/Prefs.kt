@@ -36,6 +36,7 @@ object Prefs {
     private const val KEY_CAR_NAME        = "car_name"
     private const val KEY_DRIVE_WARNED    = "drive_warned_wake"
     private const val KEY_MARK_NAMES      = "mark_names"
+    private const val KEY_SHOW_NUMBERS    = "show_numbers"
 
     private fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -176,6 +177,11 @@ object Prefs {
     var Context.breathRounds: Int
         get() = prefs(this).getInt(KEY_BREATH_ROUNDS, 5).coerceIn(3, 12)
         set(v) = prefs(this).edit().putInt(KEY_BREATH_ROUNDS, v.coerceIn(3, 12)).apply()
+
+    /** Today's "Scores and vitals" row is unfolded; folded by default. */
+    var Context.showNumbers: Boolean
+        get() = prefs(this).getBoolean(KEY_SHOW_NUMBERS, false)
+        set(v) = prefs(this).edit().putBoolean(KEY_SHOW_NUMBERS, v).apply()
 
     /** Journal date whose suggested entries got "Neither"; one date is enough, only last evening is ever suggested. */
     var Context.suggestDismissed: String
