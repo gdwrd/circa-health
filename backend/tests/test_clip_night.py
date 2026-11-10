@@ -65,3 +65,14 @@ def test_phone_in_bed_counts_from_20_min() -> None:
         ents = [entry(TODAY - timedelta(i), "phone_in_bed", v) for i in (3, 6, 9)]
         return insights.kinds(rows, ents, TODAY, {}, "", [])["phone_in_bed"]
     assert kinds("19")["n_with"] == 0 and kinds("20")["n_with"] == 3
+
+
+def test_ring_awake_stage_4_not_double_counted() -> None:
+    d = date.today()
+    ss = samples.midnight(d).timestamp() - 1800
+    w = ss + 3 * 3600  # ring reports 10 min awake (wire stage 4) while the phone is on for the same 10 min
+    load({"biometric_sleep_end_ts": {ss: ss + 27000}, "biometric_sleep_total_min": {ss: 400.0},
+          "biometric_sleep_awake_min": {ss: 20.0}, "biometric_sleep_stage": {ss: 1.0, w: 4.0, w + 600: 1.0},
+          "biometric_screen_on": {w: 1.0, w + 600: 0.0}})
+    n = main._sessions(d)[0]
+    assert (n["awake_min"], n["phone_min"]) == (20.0, 10.0)

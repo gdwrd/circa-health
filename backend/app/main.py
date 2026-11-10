@@ -61,7 +61,7 @@ def _sessions(d: date) -> list[dict]:
     if kept:  # screen-on time inside the night is awake; sleep starts when the phone is put down
         m = kept[0]
         g = samples.grid("biometric_sleep_stage", *(datetime.fromtimestamp(m[k], samples.tz()) for k in ("start", "end")), 300, 10800)
-        ring_awake = [(t, t + 300) for t, v in g.items() if int(v) == 5 and m["start"] <= t < m["end"]]  # stage 5 = awake, as /sleep
+        ring_awake = [(t, t + 300) for t, v in g.items() if int(v) == 4 and m["start"] <= t < m["end"]]  # wire stage 4 = awake (5 is the raw ring byte, never on the wire)
         s, e, a, m["phone_min"] = scoring.clip_night(m["start"], m["end"], m["awake_min"], _screen_on(lo, hi), ring_awake)
         if (s, e, a) != (m["start"], m["end"], m["awake_min"]):
             total = max((e - s) / 60 - a, 0.0)
