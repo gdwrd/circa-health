@@ -331,9 +331,12 @@ def _vitals() -> dict:
 
 def _day(day: str | None) -> date:
     try:
-        return date.fromisoformat(day) if day else _today()
+        d = date.fromisoformat(day) if day else _today()
     except ValueError:
         raise HTTPException(422, "bad date")
+    if not 1970 <= d.year <= 2100:  # year 1 / 9999 overflow date math
+        raise HTTPException(422, "bad date")
+    return d
 
 
 def _what_if() -> dict | None:
@@ -438,7 +441,7 @@ def trends(metric: str, days: int = 30) -> dict:
     if metric not in SCORES and metric not in INPUTS and metric != "strain":
         raise HTTPException(422, "unknown metric")
     end = _today()
-    start = end - timedelta(max(days, 1) - 1)
+    start = end - timedelta(min(max(days, 1), 365) - 1)
     base = db.baselines(metric, start, end) if metric in INPUTS else {}
     pts = [{"date": r["date"].isoformat(),
             "value": r[SCORES[metric]] if metric in SCORES else
@@ -473,10 +476,7 @@ def _week(end: date) -> dict:
 
 @api.get("/week")
 def week(end: str | None = None) -> dict:
-    try:
-        e = date.fromisoformat(end) if end else _today()
-    except ValueError:
-        raise HTTPException(422, "bad date")
+    e = _day(end)
     return {**_week(e), "previous": _week(e - timedelta(7))}
 
 

@@ -691,6 +691,15 @@ def test_out_of_range_sleep_edit_and_month_422() -> None:
             assert c.get(f"/month?month={bad}", headers=H).status_code == 422, bad
 
 
+def test_huge_days_is_clamped_and_out_of_range_dates_422() -> None:
+    with TestClient(app, raise_server_exceptions=False) as c:
+        t = c.get("/trends?metric=sleep&days=99999999999", headers=H)
+        assert t.status_code == 200 and len(t.json()["points"]) <= 365
+        for url in ("/today?date=", "/sleep?date=", "/week?end="):
+            for bad in ("0001-01-01", "9999-12-31"):
+                assert c.get(url + bad, headers=H).status_code == 422, url + bad
+
+
 def test_medication_started_needs_dashed_date() -> None:
     with TestClient(app) as c:
         assert c.patch("/settings", json={"medication_started": "20261101"}, headers=H).status_code == 422
