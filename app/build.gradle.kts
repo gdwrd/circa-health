@@ -14,8 +14,8 @@ android {
         applicationId = "dev.ring.health"
         minSdk = 31          // BLUETOOTH_CONNECT requires API 31
         targetSdk = 35
-        versionCode = 34
-        versionName = "3.16.1"
+        versionCode = 35
+        versionName = "3.16.2"
     }
 
     // Release signing: reads keystore.properties (gitignored) if present, else unsigned.
