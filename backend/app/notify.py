@@ -172,7 +172,10 @@ def _inactivity(now: datetime, dates: set[date]) -> None:
         s = r["c"].get("session")
         if s and s["start"] < end.timestamp() and s["end"] > start.timestamp():
             return
-    if sum(samples.grid("biometric_steps", start, end - timedelta(seconds=1), 3600, 3540).values()) == 0:
+    steps = samples.grid("biometric_steps", start, end - timedelta(seconds=1), 3600, 3540)
+    if not steps or sum(steps.values()):  # empty: ring off or not synced
+        return
+    if any(v > 0 for v in samples.raw("biometric_hr_bpm", start, end).values()):  # hr 0 = not worn
         _add("inactivity", "Time to move", "No steps in the last 2 hours.", now)
 
 
@@ -224,9 +227,10 @@ def _monthly(now: datetime, dates: set[date]) -> None:
 
 
 def _checkin(now: datetime, dates: set[date]) -> None:
-    """08-11 local, once per day, only while yesterday has no journal row; opens the check-in sheet on yesterday."""
+    """08-11 local, once per day, only while yesterday has no manual journal row; opens the check-in sheet on yesterday."""
     y = (now.date() - timedelta(1)).isoformat()
-    if not 8 <= now.hour < 11 or _fired("checkin", now) or db.query("SELECT 1 FROM journal WHERE date=?", (y,)):
+    if not 8 <= now.hour < 11 or _fired("checkin", now) or db.query(
+            "SELECT 1 FROM journal WHERE date=? AND kind != 'phone_in_bed' AND note IS NOT 'auto'", (y,)):  # _score_day's rows
         return
     _add("checkin", "How was yesterday?", "Takes ten seconds: alcohol, caffeine, workout, medication.", now,
          {"open": "journal", "date": y})

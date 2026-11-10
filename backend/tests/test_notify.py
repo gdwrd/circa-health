@@ -95,9 +95,32 @@ def test_inactivity(monkeypatch) -> None:
     assert kinds() == []
     with closing(db.connect()) as con, con:
         con.execute("DELETE FROM samples")  # temp db
+    still(60.0)
     notify.evaluate(set())
     notify.evaluate(set())
     assert kinds() == ["inactivity"]
+
+
+def still(hr: float) -> None:
+    """Zero steps every hour around D and one HR sample per hour (0 = ring off the finger)."""
+    m = samples.midnight(D - timedelta(1)).timestamp()
+    load({"biometric_steps": {m + 3600 * h: 0.0 for h in range(96)},
+          "biometric_hr_bpm": {m + 3600 * h + 300: hr for h in range(96)}})
+
+
+def test_inactivity_quiet_without_samples(monkeypatch) -> None:
+    seed(D)
+    at(monkeypatch, 12, 30)  # ring off or not synced: empty steps grid
+    notify.evaluate(set())
+    assert kinds() == []
+
+
+def test_inactivity_quiet_when_unworn(monkeypatch) -> None:
+    seed(D)
+    still(0.0)
+    at(monkeypatch, 12, 30)
+    notify.evaluate(set())
+    assert kinds() == []
 
 
 def test_inactivity_skips_night_and_late_hours(monkeypatch) -> None:
@@ -219,10 +242,21 @@ def test_checkin_window_once_and_extra(monkeypatch) -> None:
     assert n["extra"] == {"open": "journal", "date": "2026-11-08"}
 
 
+def test_checkin_fires_with_only_auto_rows(monkeypatch) -> None:
+    monkeypatch.setattr(notify, "_checkin", CHECKIN)
+    y = (D - timedelta(1)).isoformat()
+    db.add_journal(y, "phone_in_bed", "30", None, 1)  # both written by _score_day, not by the user
+    db.add_journal(y, "workout", None, "auto", 2)
+    at(monkeypatch, 9)
+    notify.evaluate(set())
+    assert kinds() == ["checkin"]
+
+
 def test_checkin_skipped_when_yesterday_logged(monkeypatch) -> None:
     monkeypatch.setattr(notify, "_checkin", CHECKIN)
     walk()
     db.add_journal(D.isoformat(), "workout", None, None, 1)  # today's entry does not count
+    db.add_journal((D - timedelta(1)).isoformat(), "phone_in_bed", "30", None, 3)
     db.add_journal((D - timedelta(1)).isoformat(), "note", None, "fine", 2)
     at(monkeypatch, 9)
     notify.evaluate(set())
