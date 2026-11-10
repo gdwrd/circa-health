@@ -50,7 +50,7 @@ class MetricsPusher(private val baseUrl: String, private val token: String = "")
         Log.d(TAG, "Pushing ${metrics.size} metrics:\n$body")
 
         val request = Request.Builder()
-            .url("$baseUrl/api/v1/import/prometheus")
+            .url("${baseUrl.trim().trimEnd('/')}/api/v1/import/prometheus")
             .apply { if (token.isNotBlank()) header("Authorization", "Bearer $token") }
             .post(body.toRequestBody("text/plain; charset=utf-8".toMediaType()))
             .build()
