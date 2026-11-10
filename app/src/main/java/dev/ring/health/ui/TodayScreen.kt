@@ -120,6 +120,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
@@ -388,7 +389,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
         if (numbers) d["cardio"].obj()?.let { item { CardioLoad(it) } }
         val tonight = d["tonight"].obj()
         val plan = tonight?.get("plan").obj()
-        if (LocalTime.now().hour >= 18 && tonight != null && plan != null) item { TonightCard(plan, tonight["bedtime"].obj(), tonight["wind_down_usual"].num(), tonight["what_if"].obj()) }
+        if (LocalTime.now().hour >= 18 && tonight != null && plan != null) item { TonightCard(plan, tonight["bedtime"].obj(), tonight["wind_down_usual"].num(), tonight["what_if"].obj(), becauseEntries(d, "today").mapNotNull(::tonightLine)) }
         else if (LocalTime.now().hour >= 18 && tonight != null) {
             val b = tonight["bedtime"].obj()?.takeIf { it["status"].str() == "ok" }
             val start = b?.get("start_min").num()
@@ -499,10 +500,16 @@ private fun DaySoFar(d: JsonObject, today: List<Entry>, onFix: () -> Unit) {
         }
     ).sortedBy { it.first }
     val facts = today.filter { it.kind != "medication" && it.kind != "breathe" && it.note != "auto" }
+    val yesterday = if (LocalTime.now().hour < 12) becauseEntries(d, "yesterday").mapNotNull { b ->
+        val e = b["effect"].obj() ?: return@mapNotNull null
+        val what = BECAUSE_WORDS[b["kind"].str()] ?: return@mapNotNull null
+        "Yesterday: $what. After it ${effectTail(e)}."
+    } else emptyList()
     Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
         Text("Day so far", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
         InsetCard {
             Column(Modifier.fillMaxWidth().padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                yesterday.forEach { Text(it, style = AppType.subhead) }
                 if (lines.isEmpty() && facts.isEmpty()) Text("Nothing yet today.", style = AppType.subhead, color = c.secondaryLabel)
                 lines.forEach { (t, text) -> Text("${clock(t)} $text", style = AppType.subhead) }
                 if (facts.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
@@ -1214,9 +1221,39 @@ internal fun iosSwitchColors(): SwitchColors {
     )
 }
 
+// Same words as backend notify.LOGGED, so the card and the notification read alike.
+private val BECAUSE_WORDS = mapOf(
+    "alcohol" to "alcohol", "workout" to "a workout", "sick" to "feeling unwell", "travel" to "travel",
+    "stress" to "stress", "late_meal" to "a late meal", "caffeine_late" to "late coffee",
+)
+
+/** `because.<day>` entries of /today (backend `notify.because`). */
+private fun becauseEntries(d: JsonObject, day: String): List<JsonObject> = (d["because"].obj()?.get(day) as? JsonArray).orEmpty().mapNotNull { it.obj() }
+
+/** Backend `_because_line` tail for a strong effect `{metric, delta}`. */
+private fun effectTail(e: JsonObject): String {
+    val delta = e["delta"].num() ?: 0.0
+    val n = abs(delta).roundToInt()
+    return if (e["metric"].str() == "bed_start") "you fall asleep about $n min ${if (delta > 0) "later" else "earlier"}"
+    else "your sleep score is about $n points ${if (delta > 0) "higher" else "lower"}"
+}
+
+/** One Tonight line for a `because.today` entry; null for a kind with no wording. */
+private fun tonightLine(b: JsonObject): String? {
+    val what = BECAUSE_WORDS[b["kind"].str()] ?: return null
+    val e = b["effect"].obj()
+    val n = b["n_with"].num()?.roundToInt() ?: 0
+    // `need` is the nights still missing, so the total is n_with + need.
+    return when {
+        e != null -> "After $what ${effectTail(e)}. (${e["n_with"].num()?.roundToInt() ?: n} nights)"
+        b["status"].str() == "learning" -> "${what.replaceFirstChar { it.uppercase() }} today. Still learning what it does to your nights ($n of ${n + (b["need"].num()?.roundToInt() ?: 0)})."
+        else -> "${what.replaceFirstChar { it.uppercase() }} today. No clear effect on your nights so far."
+    }
+}
+
 /** Tonight's bedtime plan (backend `tonight.plan`; times are minutes after noon). Tap opens the Sleep tab. */
 @Composable
-private fun TonightCard(p: JsonObject, bedtime: JsonObject?, settle: Double?, whatIf: JsonObject?) {
+private fun TonightCard(p: JsonObject, bedtime: JsonObject?, settle: Double?, whatIf: JsonObject?, because: List<String>) {
     val c = AppTheme.colors
     val ctx = LocalContext.current
     fun noon(m: Double?) = clock(LocalTime.NOON.plusMinutes((m ?: 0.0).roundToInt().toLong()))
@@ -1242,6 +1279,7 @@ private fun TonightCard(p: JsonObject, bedtime: JsonObject?, settle: Double?, wh
                 style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.xs),
             )
             if (settle != null) Text("Your body usually starts to settle around ${noon(settle)}.", style = AppType.subhead, modifier = Modifier.padding(top = AppSpace.s))
+            because.forEach { Text(it, style = AppType.subhead, modifier = Modifier.padding(top = AppSpace.s)) }
             // What-if (backend `tonight.what_if`): next-day readiness after rest / hard days in the user's own history.
             val rest = whatIf?.get("rest").obj()
             val train = whatIf?.get("train").obj()
