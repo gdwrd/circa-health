@@ -1,6 +1,7 @@
 package dev.ring.health
 
 import android.content.ComponentName
+import android.content.Context
 import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
@@ -74,4 +75,31 @@ class PlaybackListener : NotificationListenerService() {
         /** The active media sessions while the listener is connected. */
         @Volatile var controllers: List<MediaController> = emptyList()
     }
+}
+
+/** One `playback.log` line. */
+class Play(val ts: Long, val pkg: String, val title: String, val duration: Long, val playing: Boolean, val position: Long, val speed: Float)
+
+/** Where to pick up: [at] ms into [title]; it played on to [until] ms of that item, for [ranOn] ms after the onset. */
+class Hold(val pkg: String, val title: String, val duration: Long, val at: Long, val until: Long, val ranOn: Long)
+
+/** The log's lines of the last 36 h, oldest first; unreadable lines are skipped. */
+fun Context.plays(): List<Play> {
+    val from = System.currentTimeMillis() - 36 * 3_600_000L
+    return runCatching { File(filesDir, "playback.log").readLines() }.getOrDefault(emptyList()).mapNotNull { l ->
+        val f = l.split('\t')
+        runCatching { Play(f[0].toLong(), f[1], f[2], f[3].toLong(), f[4] == "1", f[5].toLong(), f[6].toFloat()) }.getOrNull()
+    }.filter { it.ts > from }
+}
+
+/** What was playing when sleep began ([onsetMs]), or null when nothing was: it had stopped, or run out, before you slept. */
+fun bookmark(lines: List<Play>, onsetMs: Long, wakeMs: Long): Hold? {
+    val i = lines.indexOfLast { it.ts <= onsetMs }
+    val p = lines.getOrNull(i) ?: return null
+    val position = p.position + ((onsetMs - p.ts) * p.speed).toLong()
+    if (!p.playing || position > p.duration) return null
+    val stop = minOf(lines.drop(i + 1).firstOrNull { !it.playing }?.ts ?: wakeMs, wakeMs)
+    val ranOn = maxOf(stop - onsetMs, 0L)
+    // shortcut: 5 min back because you stop following before the ring calls it sleep; tune after real nights
+    return Hold(p.pkg, p.title, p.duration, maxOf(position - 300_000L, 0L), minOf(position + (ranOn * p.speed).toLong(), p.duration), ranOn)
 }

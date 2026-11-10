@@ -1,6 +1,19 @@
 package dev.ring.health.ui
 
+import android.media.MediaMetadata
 import android.widget.Toast
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.text.style.TextOverflow
+import dev.ring.health.Hold
+import dev.ring.health.PlaybackListener
+import dev.ring.health.Prefs.holdDismissed
+import dev.ring.health.Prefs.holdPlace
+import dev.ring.health.Prefs.notificationAccess
+import dev.ring.health.bookmark
+import dev.ring.health.plays
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -227,6 +240,8 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
     var testing by remember { mutableStateOf(false) }
     var hr by remember { mutableStateOf<List<Double>>(emptyList()) }
     var hrv by remember { mutableStateOf<List<Double>>(emptyList()) }
+    var hold by remember { mutableStateOf<Hold?>(null) }
+    var holdGone by remember { mutableStateOf(ctx.holdDismissed) }
     LaunchedEffect(journalDate) {
         if (journalDate == null) return@LaunchedEffect
         sheetDay = if (journalDate == LocalDate.now().toString()) 1 else 0
@@ -238,6 +253,12 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
     var refreshing by remember { mutableStateOf(false) }
     suspend fun load() {
         Api.today(ctx).obj()?.let { data = it }
+        // Hold my place: last night's sleep onset against the playback log. Read here, on the phone; nothing about it is sent.
+        hold = if (!ctx.holdPlace || !ctx.notificationAccess) null else Api.sleep(ctx, data?.get("date").str().orEmpty()).obj()?.get("session").obj()?.let { s ->
+            val start = s["start"].num() ?: return@let null
+            val end = s["end"].num() ?: return@let null
+            bookmark(ctx.plays(), (start * 1000).toLong(), (end * 1000).toLong())
+        }
         loadJournal()
         Api.settings(ctx)?.let { s -> s["medication_time"].str()?.let { medTime = it }; medStarted = s["medication_started"].str() }
         Api.insights(ctx).obj()?.let { insights = it["kinds"].obj() }
@@ -320,6 +341,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
                 ScoreDetails("readiness", "Readiness", c.readiness, d, open == "readiness", medStarted)
             }
         }
+        hold?.takeIf { holdGone != day }?.let { h -> item { HoldCard(h) { ctx.holdDismissed = day; holdGone = day } } }
         // Evening verdict: which band the day turned out to be (0 / 1 / 2), asked once.
         if (said != null && guess?.get("verdict").num() == null && LocalTime.now().hour >= 18) item {
             InsetCard {
@@ -1407,6 +1429,62 @@ private fun LastTimeCard(lt: JsonObject, onNote: (String) -> Unit) {
                 }
             },
         )
+    }
+}
+
+/** Hold my place: where in last night's podcast or audiobook sleep began. "Jump there" only while the player still holds that item. */
+@Composable
+private fun HoldCard(h: Hold, onDismiss: () -> Unit) {
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    val ctx = LocalContext.current
+    val pm = ctx.packageManager
+    val app = remember(h.pkg) { runCatching { pm.getApplicationLabel(pm.getApplicationInfo(h.pkg, 0)).toString() }.getOrNull() }
+    val launch = remember(h.pkg) { pm.getLaunchIntentForPackage(h.pkg) }
+    val live = PlaybackListener.controllers.firstOrNull { it.packageName == h.pkg && it.metadata?.getString(MediaMetadata.METADATA_KEY_TITLE) == h.title }
+    val where = if (h.at < 60_000) "right at the start" else "about ${duration((h.at / 60_000).toInt())} in"
+    val ranOn = (h.ranOn / 60_000).toInt()
+    InsetCard {
+        Column(Modifier.fillMaxWidth().padding(start = AppSpace.l, bottom = AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Tape(h, "A ${duration((h.duration / 60_000).toInt())} item: you fell asleep $where." + if (ranOn > 0) " It played on for ${duration(ranOn)}." else "", Modifier.weight(1f))
+                Box(Modifier.size(44.dp).clip(CircleShape).clickable(role = Role.Button) { haptic.tick(); onDismiss() }, contentAlignment = Alignment.Center) {
+                    Icon(Icons.Rounded.Close, "Dismiss", tint = c.secondaryLabel, modifier = Modifier.size(20.dp))
+                }
+            }
+            Column(Modifier.padding(end = AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                if (h.title.isNotEmpty()) Text(h.title, style = AppType.headline, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text("You fell asleep $where.", style = AppType.subhead)
+                if (ranOn > 0) Text("It played on for ${duration(ranOn)}.", style = AppType.footnote, color = c.secondaryLabel)
+                if (live != null) TintButton("Jump there", Modifier.padding(top = AppSpace.xs)) { haptic.tick(); live.transportControls.seekTo(h.at) }
+                if (launch != null) TintButton("Open ${app ?: "player"}", Modifier.padding(top = AppSpace.xs)) { haptic.tick(); runCatching { ctx.startActivity(launch) } }
+            }
+        }
+    }
+}
+
+/** The tape: the item as a bar, filled to the bookmark notch; the stretch that played after sleep began is hatched. */
+@Composable
+private fun Tape(h: Hold, describe: String, modifier: Modifier) {
+    val c = AppTheme.colors
+    val reduce = LocalReduceMotion.current
+    val run = remember { Animatable(if (reduce) 1f else 0f) }
+    LaunchedEffect(run) { run.animateTo(1f, tween(600)) }
+    Canvas(modifier.height(28.dp).semantics { contentDescription = describe }) {
+        val bar = 10.dp.toPx()
+        val top = (size.height - bar) / 2
+        val notch = size.width * h.at / h.duration * run.value
+        val until = size.width * h.until / h.duration
+        clipPath(Path().apply { addRoundRect(RoundRect(0f, top, size.width, top + bar, CornerRadius(bar / 2))) }) {
+            drawRect(c.emptySegment)
+            drawRect(c.tint, size = Size(notch, size.height))
+            clipRect(left = notch, right = maxOf(until, notch)) {
+                val step = 5.dp.toPx()
+                var x = notch - bar
+                while (x < until) { drawLine(c.secondaryLabel, Offset(x, top + bar), Offset(x + bar, top), 1.5.dp.toPx()); x += step }
+            }
+        }
+        drawLine(c.tint, Offset(notch, 2.dp.toPx()), Offset(notch, size.height - 2.dp.toPx()), 3.dp.toPx(), StrokeCap.Round)
     }
 }
 

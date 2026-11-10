@@ -31,6 +31,7 @@ object Prefs {
     private const val KEY_BREATH_ROUNDS   = "breath_rounds"
     private const val KEY_SUGGEST_DISMISSED = "suggest_dismissed"
     private const val KEY_HOLD_PLACE      = "hold_place"
+    private const val KEY_HOLD_DISMISSED  = "hold_dismissed"
     private const val KEY_CAR_ADDRESS     = "car_address"
     private const val KEY_CAR_NAME        = "car_name"
     private const val KEY_DRIVE_WARNED    = "drive_warned_wake"
@@ -91,6 +92,11 @@ object Prefs {
     var Context.holdPlace: Boolean
         get() = prefs(this).getBoolean(KEY_HOLD_PLACE, false)
         set(v) = prefs(this).edit().putBoolean(KEY_HOLD_PLACE, v).apply()
+
+    /** The day (the server's date) whose Hold my place card got its ✕. */
+    var Context.holdDismissed: String
+        get() = prefs(this).getString(KEY_HOLD_DISMISSED, "") ?: ""
+        set(v) = prefs(this).edit().putString(KEY_HOLD_DISMISSED, v).apply()
 
     /** Notification access, granted by the user in system Settings; needed to see what is playing. */
     val Context.notificationAccess: Boolean
