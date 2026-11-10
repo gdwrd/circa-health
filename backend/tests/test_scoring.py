@@ -3,9 +3,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.scoring import (activity_score, band, baseline, bedtime_window, confidence, drive, guess_stats, low_index, readiness_score, regularity,
-                         resilience, robust, sleep_debt, sleep_score, social_jetlag, strain, stress_zones, suggest,
-                         tonight, what_if, wind_down)
+from app.scoring import (FEELINGS, MOMENTS, activity_score, band, baseline, bedtime_window, confidence, derived, drive, guess_stats, low_index,
+                         readiness_score, regularity, resilience, robust, sleep_debt, sleep_score, social_jetlag, still_hours, strain, stress_zones,
+                         suggest, tonight, what_if, wind_down)
 
 GOOD = {"total_min": 480, "awake_min": 8, "rem_min": 100, "deep_min": 100, "midpoint_h": 2.0, "regularity_sd": 20}
 SHORT = {"total_min": 240, "awake_min": 20, "rem_min": 40, "deep_min": 30, "midpoint_h": 1.0}
@@ -213,6 +213,23 @@ def test_guess_stats_off_bias_split_you_ring() -> None:
 
 
 NOW = 500 * 3600 + 600.0  # ten minutes into epoch hour 500
+
+
+def test_derived_caffeine_and_meal_boundaries() -> None:
+    assert derived([(839, "coffee"), (1259, "meal")]) == set()
+    assert derived([(840, "coffee"), (1260, "meal")]) == {"caffeine_late", "late_meal"}  # 14:00 / 21:00
+    assert derived([(10, "alcohol")]) == {"alcohol"}
+    assert derived([(600, "coffee"), (1259, "meal"), (840, "wired"), (840, "good")]) == set()  # wired/good derive nothing
+    assert derived([]) == set()
+    assert (MOMENTS[:4], FEELINGS) == (FEELINGS, ("tired", "flat", "wired", "good"))
+
+
+def test_still_hours() -> None:
+    steps = {8: 900.0, 9: 499.0, 10: 600.0}
+    assert still_hours(steps, 10) == 0
+    assert still_hours(steps, 13) == 3
+    assert still_hours({8: 400.0, 9: 300.0}, 15) is None  # no hour of 500+
+    assert still_hours({}, 9) is None
 
 
 def test_drive_no_session_is_none() -> None:

@@ -275,6 +275,16 @@ def test_checkin_skipped_when_yesterday_logged(monkeypatch) -> None:
     assert kinds() == []
 
 
+def test_checkin_silent_when_yesterday_was_tapped(monkeypatch) -> None:
+    monkeypatch.setattr(notify, "_checkin", CHECKIN)
+    walk()
+    y = D - timedelta(1)
+    load({"moment_coffee": {(samples.midnight(y) + timedelta(hours=15)).timestamp(): 1.0}})  # the day was tapped in
+    at(monkeypatch, 9)
+    notify.evaluate(set())
+    assert kinds() == []
+
+
 def seed_morning(score: int | None = 78, ready: int | None = 71) -> None:
     """Night 23:00 (D-1) to 07:00 (D), 7 h 15 min asleep."""
     seed(D, ready)

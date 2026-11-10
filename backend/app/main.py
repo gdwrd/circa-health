@@ -102,6 +102,27 @@ def _dt(ts: float) -> datetime:
     return datetime.fromtimestamp(ts, samples.tz())
 
 
+def _moments(d: date) -> list[dict]:
+    """Made, not cancelled moments of d, ascending; a moment is moment_<kind> = 1, a 2 at the same second
+    cancels it (as marks)."""
+    out = [{"ts": t, "kind": k} for k in scoring.MOMENTS
+           for t, v in samples.raw(f"moment_{k}", samples.midnight(d), samples.midnight(d + timedelta(1))).items() if v == 1]
+    return sorted(out, key=lambda x: x["ts"])
+
+
+def _now(d: date) -> dict:
+    """The reply card: today's latest dose and window, still hours, and the feeling notes."""
+    meds = [e["value"] for e in db.journal(d.isoformat()) if e["kind"] == "medication" and e["date"] == d.isoformat() and e["value"]]
+    dose, dose_end = max(meds, default=None), None  # HH:MM sorts as text: latest dose by clock time
+    if dose:
+        h, m = (int(x) for x in dose.split(":"))
+        total = (h * 60 + m + int(float(db.setting("medication_window_h")) * 60)) % 1440
+        dose_end = f"{total // 60:02d}:{total % 60:02d}"
+    return {"dose": dose, "dose_end": dose_end,
+            "still_h": scoring.still_hours(_hourly("biometric_steps", d), datetime.now(samples.tz()).hour),
+            "notes": {f: n for f in scoring.FEELINGS if (n := db.note(f"now_{f}"))}}
+
+
 def _score_day(d: date) -> None:
     goal, need = db.setting("step_goal"), db.setting("sleep_need_min")
     prior = db.days(d - timedelta(14), d - timedelta(1))
@@ -223,6 +244,12 @@ def _score_day(d: date) -> None:
         db.add_auto(d.isoformat(), "workout")
     else:
         db.delete_auto(d.isoformat(), "workout")
+    dv = scoring.derived([(_dt(x["ts"]).hour * 60 + _dt(x["ts"]).minute, x["kind"]) for x in _moments(d)])
+    for k in ("caffeine_late", "alcohol", "late_meal"):  # auto journal rows from moments; a manual entry is never touched
+        if k in dv:
+            db.add_auto(d.isoformat(), k)
+        else:
+            db.delete_auto(d.isoformat(), k)
     inputs |= {"cardio_load": load and load["load"], "fitness": cardio.fitness(mh, base["rhr"]),
                "restorative_min": cardio.restorative(day_hr, inputs.get("rhr") or base["rhr"], steps_h, awake)}
 
@@ -390,7 +417,8 @@ def _last_time() -> dict | None:
 def put_note(key: str, body: dict = Body(...)) -> dict:
     """A note to yourself for the next time `key` happens; empty text removes it. Returns /today."""
     text, kinds = body.get("text"), key.split("+")
-    if not (key == "signals" or kinds == sorted(set(kinds)) and all(k in scoring.EXPLAIN for k in kinds)) \
+    if not (key == "signals" or kinds == sorted(set(kinds)) and all(k in scoring.EXPLAIN for k in kinds)
+            or key.startswith("now_") and key[4:] in scoring.FEELINGS) \
             or not isinstance(text, str) or len(text) > 280:
         raise HTTPException(422, "bad key or text")
     db.set_note(key, text.strip(), int(time.time()))
@@ -421,6 +449,7 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
                                          [r["readiness_score"] for r in rows]),
         "vitals": _vitals(),
         "wear": row["c"].get("wear"),
+        "moments": _moments(d), "now": _now(d) if d == _today() else None,
         "signals": {**sig, "status": "learning" if sig["reason"] else "ok", "explain": notify.explain(_today())},
         "inputs": row["inputs"],
         "cardio": {"status": status, "load": row["inputs"].get("cardio_load"),

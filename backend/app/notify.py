@@ -232,8 +232,11 @@ def _monthly(now: datetime, dates: set[date]) -> None:
 def _checkin(now: datetime, dates: set[date]) -> None:
     """08-11 local, once per day, only while yesterday has no manual journal row; opens the check-in sheet on yesterday."""
     y = (now.date() - timedelta(1)).isoformat()
+    y0 = samples.midnight(now.date() - timedelta(1))
     if not 8 <= now.hour < 11 or _fired("checkin", now) or db.query(
-            "SELECT 1 FROM journal WHERE date=? AND kind != 'phone_in_bed' AND note IS NOT 'auto'", (y,)):  # _score_day's rows
+            "SELECT 1 FROM journal WHERE date=? AND kind != 'phone_in_bed' AND note IS NOT 'auto'", (y,)) \
+            or any(v for k in scoring.MOMENTS  # the day was tapped in: no nag
+                   for v in samples.raw(f"moment_{k}", y0, y0 + timedelta(1)).values()):
         return
     _add("checkin", "How was yesterday?", "Takes ten seconds: alcohol, caffeine, workout, medication.", now,
          {"open": "journal", "date": y})

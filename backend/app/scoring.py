@@ -263,6 +263,29 @@ DIRS = {"rhr": 1, "hrv": -1, "awake": 1, "recovery": 1, "spo2": -1, "temp": 1}
 FLOORS = {"rhr": 1.5, "hrv": 5.0, "awake": 10.0, "recovery": 0.10, "spo2": 1.0}
 EXPLAIN = ("alcohol", "workout", "sick", "travel", "stress", "late_meal")
 
+MOMENTS = ("tired", "flat", "wired", "good", "coffee", "alcohol", "meal")
+FEELINGS = MOMENTS[:4]
+
+
+def derived(moments: list[tuple[int, str]]) -> set[str]:
+    """moments: (minute of the local day, kind). caffeine_late = a coffee at or after 14:00, alcohol = any
+    alcohol, late_meal = a meal at or after 21:00."""
+    out: set[str] = set()
+    for m, k in moments:
+        if k == "coffee" and m >= 840:
+            out.add("caffeine_late")
+        elif k == "alcohol":
+            out.add("alcohol")
+        elif k == "meal" and m >= 1260:
+            out.add("late_meal")
+    return out
+
+
+def still_hours(steps_h: dict[int, float], hour: int) -> int | None:
+    """Full hours since the last hour of today with 500 or more steps; None when today has none."""
+    last = max((h for h, v in steps_h.items() if h <= hour and v >= 500), default=None)
+    return hour - last if last is not None else None
+
 
 def robust(values_14d: list[float | None], floor: float = 0.0) -> tuple[float, float] | None:
     """Trailing 14-day (median, max(1.4826 x MAD, floor)); None until at least 7 values exist."""

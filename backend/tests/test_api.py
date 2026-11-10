@@ -887,3 +887,41 @@ def test_mark_naming_sets_since_and_renaming_keeps_it(monkeypatch) -> None:
         assert (j["mark_2"], j["mark_2_since"]) == ("Headache", d.isoformat())  # a rename keeps it
         assert patch(mark_2="").json()["mark_2_since"] == d.isoformat()
         assert patch(mark_2="Run").json()["mark_2_since"] == (d + timedelta(3)).isoformat()  # a reused slot starts clean
+
+
+def test_moments_derived_auto_rows_now_and_feeling_notes(tmp_path, monkeypatch) -> None:
+    """Coffee 14:05 + meal 21:30 moments, a manual caffeine_late row, then the meal moment is cancelled."""
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "mom.db"))
+    db.init()
+    monkeypatch.setattr(main, "_vitals", lambda: {})
+    d = date.today()
+    m = samples.midnight(d).timestamp()
+    coffee = int((samples.midnight(d) + timedelta(hours=14, minutes=5)).timestamp())
+    meal = int((samples.midnight(d) + timedelta(hours=21, minutes=30)).timestamp())
+    db.add_journal(d.isoformat(), "caffeine_late", None, "manual", 0)  # a manual entry is never touched
+    load({"moment_coffee": {coffee: 1.0}, "moment_meal": {meal: 1.0},
+          "moment_tired": {m + 3600: 1.0},
+          "biometric_steps": {m + 3600 * h: 700.0 for h in range(8, 11)}})
+    rows = lambda: {e["kind"]: e["note"] for e in db.journal(d.isoformat()) if e["date"] == d.isoformat()}
+    main._score_day(d)
+    assert rows() == {"caffeine_late": "manual", "late_meal": "auto"}  # late_meal auto appears; caffeine manual stands
+    with TestClient(app) as c:
+        j = c.get("/today", headers=H).json()
+        assert [x["kind"] for x in j["moments"]] == ["tired", "coffee", "meal"]  # ascending ts
+        assert set(j["now"]) == {"dose", "dose_end", "still_h", "notes"} and j["now"]["dose"] is None
+        assert j["now"]["notes"] == {} and j["now"]["dose_end"] is None
+        p = c.get(f"/today?date={d - timedelta(1)}", headers=H).json()
+        assert p["now"] is None and p["moments"] == []  # now is today only
+        load({"moment_meal": {meal: 2.0}})  # the meal tap is cancelled
+        main._score_day(d)
+        assert rows() == {"caffeine_late": "manual"}  # the auto row goes away, the manual one stays
+        assert [x["kind"] for x in c.get("/today", headers=H).json()["moments"]] == ["tired", "coffee"]
+        db.add_journal(d.isoformat(), "medication", "09:50", None, 1)
+        db.add_journal(d.isoformat(), "medication", "07:10", None, 2)  # logged later, earlier clock time: 09:50 still wins
+        for k, text in (("now_tired", "Coffee too early."), ("now_flat", "x"), ("now_wired", "x"), ("now_good", "x")):
+            assert c.put(f"/notes/{k}", json={"text": text}, headers=H).status_code == 200, k
+        assert c.put("/notes/now_bogus", json={"text": "x"}, headers=H).status_code == 422
+        j = c.get("/today", headers=H).json()["now"]
+        assert (j["dose"], j["dose_end"], j["notes"]) == ("09:50", "17:50",
+            {"tired": "Coffee too early.", "flat": "x", "wired": "x", "good": "x"})
