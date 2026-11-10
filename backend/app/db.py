@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS breath_session(start INTEGER PRIMARY KEY, "end" INTEG
 CREATE TABLE IF NOT EXISTS experiment(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, metric TEXT, start TEXT,
   days INTEGER, plan TEXT, ended TEXT);
 CREATE TABLE IF NOT EXISTS guess(date TEXT PRIMARY KEY, value INTEGER, verdict INTEGER, ts INTEGER);
+CREATE TABLE IF NOT EXISTS note(key TEXT PRIMARY KEY, text TEXT, ts INTEGER);
 """
 
 
@@ -137,6 +138,21 @@ def set_verdict(d: date, verdict: int) -> bool:
     with closing(connect()) as con, con:
         return con.execute("UPDATE guess SET verdict=? WHERE date=? AND value IS NOT NULL",
                            (verdict, d.isoformat())).rowcount > 0
+
+
+def note(key: str) -> str | None:
+    """The user's note to themselves for a Last time key ("signals" or kinds joined with "+")."""
+    r = query("SELECT text FROM note WHERE key=?", (key,))
+    return r[0][0] if r else None
+
+
+def set_note(key: str, text: str, ts: int) -> None:
+    """Empty text removes the note."""
+    with closing(connect()) as con, con:
+        if text:
+            con.execute("INSERT OR REPLACE INTO note VALUES(?,?,?)", (key, text, ts))
+        else:
+            con.execute("DELETE FROM note WHERE key=?", (key,))
 
 
 def baselines(metric: str, start: date, end: date) -> dict[str, float]:

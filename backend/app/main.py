@@ -376,6 +376,27 @@ def _drive() -> dict | None:
     return scoring.drive(now, ss, {int(t // 3600) for t, v in hr.items() if v > 0})
 
 
+def _last_time() -> dict | None:
+    """Last time, as of today: insights.last_time plus the user's note for its key."""
+    lt = insights.last_time(*notify.episodes(_today()), _today())
+    if lt:
+        lt["note"] = db.note(lt["key"])
+        if lt["why"] == "signals" and not lt["before"] and not lt["note"]:  # nothing to look back at
+            return None
+    return lt
+
+
+@api.put("/notes/{key}")
+def put_note(key: str, body: dict = Body(...)) -> dict:
+    """A note to yourself for the next time `key` happens; empty text removes it. Returns /today."""
+    text, kinds = body.get("text"), key.split("+")
+    if not (key == "signals" or kinds == sorted(set(kinds)) and all(k in scoring.EXPLAIN for k in kinds)) \
+            or not isinstance(text, str) or len(text) > 280:
+        raise HTTPException(422, "bad key or text")
+    db.set_note(key, text.strip(), int(time.time()))
+    return today(_today().isoformat())
+
+
 @api.get("/today")
 def today(day: str | None = Query(None, alias="date")) -> dict:
     d = _day(day)
@@ -392,7 +413,7 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
     return {
         "status": "ok" if n >= 5 else "learning", "date": d.isoformat(), "baseline_days": f"{n}/14",
         "calm": cfg["calm"] == "1", "guess": _guess(d, cfg["guess"] == "1", row.get("readiness_score")),
-        "drive": _drive() if d == _today() else None,
+        "drive": _drive() if d == _today() else None, "last_time": _last_time() if d == _today() else None,
         "confidence": row["c"].get("confidence"), "suggest": row["c"].get("suggest"),
         **{k: {"score": row.get(f"{k}_score"), "contributors": row["c"].get(k)} for k in ("sleep", "readiness", "activity")},
         "stress": row["c"].get("stress"),
@@ -741,7 +762,10 @@ def journal_insights() -> dict:
     start = d - timedelta(insights.DAYS)
     rows, entries = db.days(start, d), db.journal(start.isoformat())
     hr = _day_hr(rows, start, d) if any(e["kind"] == "medication" for e in entries) else {}
-    return {"kinds": insights.kinds(rows, entries, d, hr, db.settings()["medication_started"], db.breaths(start, d))}
+    kinds = insights.kinds(rows, entries, d, hr, db.settings()["medication_started"], db.breaths(start, d))
+    for k, cost in insights.prices(notify.episodes(d)[0]).items():  # only kinds with a finished episode of their own
+        kinds[k]["cost"] = cost
+    return {"kinds": kinds}
 
 
 @api.get("/journal/bp")

@@ -667,3 +667,64 @@ def test_guess_readiness_and_morning_carry_no_score_or_band_word(monkeypatch) ->
     for n in (r, m):
         text = n["title"] + n["body"]
         assert not set("8693") & set(text) and not any(w in text for w in ("Ready", "Steady", "Take it easy"))
+
+
+def seed_receipt(kind: str = "alcohol", days: tuple[int, ...] = (3,), index: tuple[int, ...] = (40, 40, 10)) -> None:
+    """`kind` logged `days` days before D; `index` = the strain index of the nights ending at D."""
+    for i in days:
+        db.add_journal((D - timedelta(i)).isoformat(), kind, None, None, 1)
+    for i, v in enumerate(reversed(index)):
+        db.save_day(D - timedelta(i), (None, None, None),
+                    {"signals": {"index": v, "level": "calm" if v < 25 else "elevated", "streak": 0, "flags": {}}}, {})
+
+
+def test_receipt_fires_once_on_the_first_calm_morning(monkeypatch) -> None:
+    seed_receipt()
+    at(monkeypatch, 13, day=D - timedelta(1))
+    notify.evaluate(set())
+    assert kinds() == []  # still elevated yesterday
+    at(monkeypatch, 13)
+    notify.evaluate(set())
+    notify.evaluate(set())
+    (n,) = notify.pending()
+    assert (n["kind"], n["title"], n["body"], n["extra"]) == (
+        "receipt", "Back in your usual range", "After alcohol on Friday: 2 nights.", {"open": "today"})
+
+
+def test_receipt_run_of_days_and_your_usual(monkeypatch) -> None:
+    for i in (30, 25, 20):  # three earlier sick days, one night each
+        db.add_journal((D - timedelta(i)).isoformat(), "sick", None, None, 1)
+        for k, v in ((1, 40), (2, 10)):
+            db.save_day(D - timedelta(i - k), (None, None, None), {"signals": {"index": v}}, {})
+    seed_receipt("sick", (5, 4, 3))
+    at(monkeypatch, 13)
+    notify.evaluate(set())
+    assert [n["body"] for n in notify.pending()] == ["After feeling unwell, 4 to 6 Nov: 2 nights. Your usual: 1 night."]
+
+
+def test_receipt_not_for_zero_nights(monkeypatch) -> None:
+    seed_receipt(days=(1,), index=(40, 10))  # the high night came before the drink; the night after it is calm
+    at(monkeypatch, 13)
+    notify.evaluate(set())
+    assert kinds() == []
+
+
+def test_receipt_respects_mute(monkeypatch) -> None:
+    seed_receipt()
+    db.set_settings({"muted": "receipt"})
+    at(monkeypatch, 13)
+    notify.evaluate(set())
+    assert kinds() == []
+    with TestClient(app) as c:
+        assert c.patch("/settings", json={"muted": "receipt"}, headers=H).status_code == 200
+
+
+def test_receipt_waits_for_the_guess(monkeypatch) -> None:
+    seed_receipt()
+    db.set_settings({"guess": "1"})
+    at(monkeypatch, 13)
+    notify.evaluate(set())
+    assert kinds() == []
+    db.add_guess(D, None, 1)  # "Just show me" is an answer too
+    notify.evaluate(set())
+    assert kinds() == ["receipt"]

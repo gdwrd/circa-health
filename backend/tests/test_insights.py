@@ -219,3 +219,100 @@ def test_felt_is_a_night_metric_with_three_mornings_a_side() -> None:
     assert (e["unit"], e["delta"], e["n_with"], e["n_without"], e["strong"]) == ("pts", -30, 3, 3, True)
     rows[0]["felt"] = None  # two guessed mornings without: no effect yet
     assert "felt" not in {x["metric"] for x in insights.kinds(rows, journal, TODAY, {}, "", [])["alcohol"]["all"]}
+
+
+E0 = date(2026, 10, 1)  # the logged evening; its first night is E0 + 1
+
+
+def sigs(first: date, *index: int | None) -> dict[date, dict]:
+    """signals per wake date from `first` on (None = no index that night); rhr is flagged, hrv is not."""
+    return {first + timedelta(i): {"index": v, "flags": {"rhr": 3.0}, "deltas": {"rhr": 6.0, "hrv": -1.0},
+                                   "usual": {"rhr": 55.0, "hrv": 50.0}} for i, v in enumerate(index)}
+
+
+def eps(logged: dict[date, set[str]], *index: int | None, today: date = E0 + timedelta(20)) -> list[dict]:
+    return insights.episodes(logged, sigs(E0 + timedelta(1), *index), today)
+
+
+def test_episode_closed_after_two_nights() -> None:
+    assert eps({E0: {"alcohol"}}, 40, 30, 10, 60) == [
+        {"key": "alcohol", "kinds": ["alcohol"], "first": E0, "last": E0, "nights": 2, "state": "closed",
+         "deltas": {"rhr": 6.0}, "usual": {"rhr": 55.0}}]
+
+
+def test_episode_zero_nights_when_first_night_is_calm() -> None:
+    (e,) = eps({E0: {"alcohol"}}, 24, 60)
+    assert (e["nights"], e["state"]) == (0, "closed")
+
+
+def test_episode_unknown_first_night_is_left_out() -> None:
+    assert eps({E0: {"alcohol"}}, None, 40, 10) == [] and eps({E0: {"alcohol"}}) == []
+
+
+def test_episode_capped_at_seven_nights() -> None:
+    (e,) = eps({E0: {"alcohol"}}, *[40] * 9)
+    assert (e["nights"], e["state"]) == (7, "capped")
+
+
+def test_episode_open_until_a_calm_night() -> None:
+    (e,) = eps({E0: {"alcohol"}}, 40, 40, today=E0 + timedelta(2))
+    assert (e["nights"], e["state"]) == (2, "open")
+    (e,) = eps({E0: {"alcohol"}}, today=E0)  # logged this evening: no night yet
+    assert (e["nights"], e["state"], e["deltas"]) == (0, "open", {})
+
+
+def test_episode_run_of_days_is_one_episode() -> None:
+    (e,) = eps({E0 - timedelta(1): {"sick"}, E0: {"sick"}}, 40, 10)
+    assert (e["key"], e["first"], e["last"], e["nights"], e["state"]) == ("sick", E0 - timedelta(1), E0, 1, "closed")
+
+
+def test_episode_two_kinds_give_a_plus_key_and_no_price() -> None:
+    es = eps({E0 - timedelta(1): {"late_meal"}, E0: {"alcohol", "late_meal"}}, 40, 10)
+    assert [(e["key"], e["kinds"], e["state"]) for e in es] == [("alcohol+late_meal", ["alcohol", "late_meal"], "closed")]
+    assert insights.prices(es) == {}
+
+
+def test_episode_event_during_recovery_cuts() -> None:
+    a, b = eps({E0: {"alcohol"}, E0 + timedelta(2): {"stress"}}, 40, 40, 40, 10)
+    assert (a["key"], a["nights"], a["state"]) == ("alcohol", 2, "cut")  # night 3 belongs to the stress evening
+    assert (b["key"], b["nights"], b["state"]) == ("stress", 1, "closed")
+    (e,) = eps({E0: {"alcohol"}}, 40, None, 10)  # a later night without an index
+    assert (e["nights"], e["state"]) == (1, "cut")
+
+
+def ep(kind: str, nights: int, state: str = "closed") -> dict:
+    return {"key": kind, "kinds": kind.split("+"), "nights": nights, "state": state}
+
+
+def test_prices_need_three_single_kind_finished_episodes() -> None:
+    es = [ep("alcohol", 1), ep("alcohol", 2), ep("alcohol", 6, "cut"), ep("alcohol", 5, "open"), ep("alcohol+stress", 3)]
+    assert insights.prices(es) == {"alcohol": {"status": "learning", "n": 2}}
+    assert insights.prices(es + [ep("alcohol", 7, "capped")]) == {"alcohol": {"status": "ok", "nights": 2, "n": 3}}
+
+
+def test_last_time_event_has_the_time_before_and_the_price() -> None:
+    t = E0 + timedelta(10)
+    es = eps({E0: {"alcohol"}, t: {"alcohol"}}, 40, 30, 10, today=t)
+    assert insights.last_time(es, {}, t) == {
+        "why": "event", "key": "alcohol", "kinds": ["alcohol"], "nights": 0, "last": t,
+        "before": {"first": E0, "nights": 2}, "price": {"status": "learning", "n": 1}}
+
+
+def test_last_time_closed_only_on_the_first_calm_morning() -> None:
+    es = eps({E0: {"alcohol"}}, 40, 30, 10)
+    lt = insights.last_time(es, {}, E0 + timedelta(3))
+    assert (lt["why"], lt["nights"], lt["last"], lt["before"]) == ("closed", 2, E0, None)
+    assert insights.last_time(es, {}, E0 + timedelta(4)) is None  # the day after: no card
+    assert insights.last_time(eps({E0: {"alcohol"}}, 10), {}, E0 + timedelta(1)) is None  # 0 nights: price only
+
+
+def test_last_time_signals_finds_the_run_before_and_none_when_calm() -> None:
+    t = E0 + timedelta(9)
+    sig = sigs(E0, 40, 40, 40, 10, 40, 10, 10, 10, 40, 40)  # run of 3, a single night, then today's run of 2
+    sig[t] |= {"level": "elevated", "streak": 2}
+    assert insights.last_time([], sig, t) == {"why": "signals", "key": "signals", "nights": 2,
+                                              "before": {"first": E0, "nights": 3}}
+    assert insights.last_time([], {t: sig[t]}, t)["before"] is None
+    assert insights.last_time([], {t: sig[t] | {"streak": 1}}, t) is None
+    assert insights.last_time([], {t: sig[t] | {"level": "calm"}}, t) is None
+    assert insights.last_time([], {}, t) is None

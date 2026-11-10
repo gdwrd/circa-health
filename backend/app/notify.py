@@ -345,8 +345,44 @@ def _workout(now: datetime, dates: set[date]) -> None:
                  {"open": "workout", "date": row["date"].isoformat(), "start": str(w["start"]), "kind": w["kind"]})
 
 
+def episodes(d: date) -> tuple[list[dict], dict[date, dict]]:
+    """insights.episodes over the 90 days ending at d, plus the signals per wake date they were built from."""
+    start = d - timedelta(insights.DAYS)
+    logged: dict[date, set[str]] = {}
+    for e in db.journal(start.isoformat()):
+        if e["kind"] in scoring.EXPLAIN:
+            logged.setdefault(date.fromisoformat(e["date"]), set()).add(e["kind"])
+    sig = {r["date"]: r["c"]["signals"] for r in db.days(start, d) if r["c"].get("signals")}
+    return insights.episodes(logged, sig, d), sig
+
+
+def _nights(n: float) -> str:
+    return f"{n:g} night{'' if n == 1 else 's'}"
+
+
+def _receipt(now: datetime, dates: set[date]) -> None:
+    """Once on the day an episode closes with 1 night or more; with guess on, only after today's guess."""
+    d = now.date()
+    index = {r["date"]: (r["c"].get("signals") or {}).get("index") for r in db.days(d - timedelta(1), d)}
+    if index.get(d) is None or index[d] >= 25 or (index.get(d - timedelta(1)) or 0) < 25 or _fired("receipt", now):
+        return
+    if db.settings()["guess"] and d.isoformat() not in db.guesses(d, d):
+        return
+    eps = episodes(d)[0]
+    e = insights.closed_today(eps, d)
+    if not e:
+        return
+    a, b = e["first"], e["last"]
+    when = f" on {b:%A}" if a == b else f", {a.day}{'' if a.month == b.month else f' {a:%b}'} to {b.day} {b:%b}"
+    body = f"After {_join([LOGGED[k] for k in e['kinds']])}{when}: {_nights(e['nights'])}."
+    price = insights.prices(eps).get(e["key"])
+    if price and price["status"] == "ok":
+        body += f" Your usual: {_nights(price['nights'])}."
+    _add("receipt", "Back in your usual range", body, now, {"open": "today"})
+
+
 KINDS = ("readiness", "bedtime", "bedtime_soon", "inactivity", "strain", "checkin", "weekly", "morning", "monthly", "stillup",
-         "experiment", "workout")
+         "experiment", "workout", "receipt")
 
 
 def evaluate(dates: set[date]) -> None:
@@ -355,7 +391,7 @@ def evaluate(dates: set[date]) -> None:
     for rule, kind in ((_readiness, "readiness"), (_bedtime, "bedtime"), (_inactivity, "inactivity"),
                        (_weekly, "weekly"), (_strain, "strain"), (_checkin, "checkin"), (_morning, "morning"),
                        (_monthly, "monthly"), (_stillup, "stillup"), (_experiment, "experiment"),
-                       (_workout, "workout")):
+                       (_workout, "workout"), (_receipt, "receipt")):
         if kind in muted:
             continue
         try:

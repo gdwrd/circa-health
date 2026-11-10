@@ -99,6 +99,79 @@ def lead_time(sick: set[date], strain: dict[date, float | None]) -> dict | None:
     return {"days": median(leads), "n": len(leads)} if len(leads) >= 2 else None
 
 
+def episodes(logged: dict[date, set[str]], sig: dict[date, dict], today: date) -> list[dict]:
+    """Per run of consecutive logged days: the nights after its last day with strain index >= 25, up to 7.
+    logged: scoring.EXPLAIN kinds per journal date; sig: contributors.signals per wake date. Oldest first.
+    state: closed (a calm night ended it), capped (7 nights), open (still running), cut (a new event or a night
+    without an index got in the way). An episode with no index on its first night is left out (unknown, not zero)."""
+    out = []
+    for first in sorted(d for d in logged if d - timedelta(1) not in logged):
+        last = first
+        while last + timedelta(1) in logged:
+            last += timedelta(1)
+        kinds = sorted(set().union(*(logged[first + timedelta(i)] for i in range((last - first).days + 1))))
+        one = sig.get(last + timedelta(1)) or {}
+        n, state = 0, None
+        while state is None:
+            d = last + timedelta(n + 1)
+            i = (sig.get(d) or {}).get("index")
+            if d > today:
+                state = "open"
+            elif i is None:
+                state = "cut"
+            elif i < 25:
+                state = "closed"
+            elif n and d - timedelta(1) in logged:  # that evening's event owns this night
+                state = "cut"
+            else:
+                n += 1
+                state = "capped" if n == 7 else None
+        if state == "cut" and not n:  # no index on the first night
+            continue
+        flagged = lambda k: {m: v for m, v in (one.get(k) or {}).items() if m in (one.get("flags") or ())}
+        out.append({"key": "+".join(kinds), "kinds": kinds, "first": first, "last": last, "nights": n, "state": state,
+                    "deltas": flagged("deltas"), "usual": flagged("usual")})
+    return out
+
+
+def prices(eps: list[dict]) -> dict[str, dict]:
+    """Per kind: the median nights of its single-kind closed or capped episodes; learning under MIN_N."""
+    by: dict[str, list[int]] = {}
+    for e in eps:
+        if len(e["kinds"]) == 1 and e["state"] in ("closed", "capped"):
+            by.setdefault(e["kinds"][0], []).append(e["nights"])
+    return {k: {"status": "ok", "nights": median(v), "n": len(v)} if len(v) >= MIN_N else {"status": "learning", "n": len(v)}
+            for k, v in by.items()}
+
+
+def closed_today(eps: list[dict], today: date) -> dict | None:
+    """The episode whose first calm night is today, with 1 night or more."""
+    return next((e for e in reversed(eps) if e["state"] == "closed" and e["nights"]
+                 and e["last"] + timedelta(e["nights"] + 1) == today), None)
+
+
+def last_time(eps: list[dict], sig: dict[date, dict], today: date) -> dict | None:
+    """What to show today, first match wins: an open episode ("event"), one that closed today ("closed"), or
+    today's 2+ night streak with no event ("signals"; `before` is None when no earlier run exists)."""
+    opened = next((e for e in reversed(eps) if e["state"] == "open"), None)
+    e = opened or closed_today(eps, today)
+    if e:
+        before = next(({"first": b["first"], "nights": b["nights"]} for b in reversed(eps)
+                       if b["first"] < e["first"] and b["key"] == e["key"] and b["state"] in ("closed", "capped")), None)
+        return {"why": "event" if opened else "closed", "key": e["key"], "kinds": e["kinds"], "nights": e["nights"],
+                "last": e["last"], "before": before, "price": prices(eps).get(e["key"])}  # a mixed key has no price
+    s = sig.get(today) or {}
+    if s.get("level") not in ("elevated", "high") or (s.get("streak") or 0) < 2:
+        return None
+    run, before = [], None
+    for d in sorted(x for x in sig if x <= today - timedelta(s["streak"])):
+        hot = (sig[d].get("index") or 0) >= 25
+        run = run + [d] if hot and run and d - run[-1] == timedelta(1) else [d] if hot else []
+        if len(run) >= 2:
+            before = {"first": run[0], "nights": len(run)}
+    return {"why": "signals", "key": "signals", "nights": s["streak"], "before": before}
+
+
 def _hhmm(m: float) -> str:
     return f"{int(m) // 60:02d}:{int(m) % 60:02d}"
 

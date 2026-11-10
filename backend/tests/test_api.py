@@ -815,3 +815,32 @@ def test_today_drive_today_only() -> None:
         load({"biometric_hr_bpm": {now - 3600: 61.0}})
         assert drive()["worn"] is True
         assert drive(f"?date={d - timedelta(1)}") is None
+
+
+def test_last_time_cost_and_note_validation() -> None:
+    with TestClient(app) as c:
+        d = main._today()
+        put = lambda key, **body: c.put(f"/notes/{key}", json=body, headers=H)
+        last = lambda day="": c.get(f"/today{day}", headers=H).json()["last_time"]
+        assert last() is None
+        for i in (20, 15, 10):  # three alcohol evenings, two nights each
+            db.add_journal((d - timedelta(i)).isoformat(), "alcohol", None, None, i)
+            for k, v in ((1, 40), (2, 40), (3, 10)):
+                db.save_day(d - timedelta(i - k), (None, None, None), {"signals": {"index": v}}, {})
+        assert last() is None  # nothing open, nothing closed today
+        cost = {"status": "ok", "nights": 2, "n": 3}
+        kinds = c.get("/journal/insights", headers=H).json()["kinds"]
+        assert kinds["alcohol"]["cost"] == cost and "cost" not in kinds["stress"]
+        db.add_journal(d.isoformat(), "alcohol", None, None, 0)
+        event = {"why": "event", "key": "alcohol", "kinds": ["alcohol"], "nights": 0, "last": d.isoformat(),
+                 "before": {"first": (d - timedelta(10)).isoformat(), "nights": 2}, "price": cost, "note": None}
+        assert last() == event and last(f"?date={d - timedelta(1)}") is None
+
+        assert c.put("/notes/alcohol", json={"text": "x"}).status_code == 401
+        for key, body in (("nope", {"text": "x"}), ("stress+alcohol", {"text": "x"}), ("alcohol+alcohol", {"text": "x"}),
+                          ("alcohol", {"text": "x" * 281}), ("alcohol", {"text": 5}), ("alcohol", {})):
+            assert put(key, **body).status_code == 422, (key, body)
+        assert put("alcohol", text=" Two nights. Worth it? ").json()["last_time"] == event | {"note": "Two nights. Worth it?"}
+        assert put("alcohol+stress", text="x" * 280).status_code == 200 and put("signals", text="x").status_code == 200
+        assert put("alcohol", text=" ").json()["last_time"] == event  # empty text removes the note
+        assert sorted(r["key"] for r in db.query("SELECT key FROM note")) == ["alcohol+stress", "signals"]
