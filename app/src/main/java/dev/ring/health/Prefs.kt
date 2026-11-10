@@ -3,6 +3,7 @@ package dev.ring.health
 import android.app.AppOpsManager
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.core.app.NotificationManagerCompat
 
 object Prefs {
     private const val NAME = "ring_health"
@@ -29,6 +30,7 @@ object Prefs {
     private const val KEY_STALE_WARNED    = "stale_warned"
     private const val KEY_BREATH_ROUNDS   = "breath_rounds"
     private const val KEY_SUGGEST_DISMISSED = "suggest_dismissed"
+    private const val KEY_HOLD_PLACE      = "hold_place"
 
     private fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -81,6 +83,15 @@ object Prefs {
     val Context.usageAccess: Boolean
         get() = (getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager)
             .unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
+
+    /** Settings › Phone switch; off (default) = PlaybackListener writes nothing, whatever Notification access says. */
+    var Context.holdPlace: Boolean
+        get() = prefs(this).getBoolean(KEY_HOLD_PLACE, false)
+        set(v) = prefs(this).edit().putBoolean(KEY_HOLD_PLACE, v).apply()
+
+    /** Notification access, granted by the user in system Settings; needed to see what is playing. */
+    val Context.notificationAccess: Boolean
+        get() = packageName in NotificationManagerCompat.getEnabledListenerPackages(this)
 
     /** Minutes between background syncs (ring read + push); 0 = background sync off. */
     var Context.syncIntervalMin: Int

@@ -95,6 +95,8 @@ import dev.ring.health.Prefs.lastSyncMs
 import dev.ring.health.Prefs.ringAddress
 import dev.ring.health.Prefs.sleepNeedHours
 import dev.ring.health.Prefs.usageAccess
+import dev.ring.health.Prefs.holdPlace
+import dev.ring.health.Prefs.notificationAccess
 import dev.ring.health.Prefs.phoneSensor
 import dev.ring.health.Prefs.lastScreenMs
 import dev.ring.health.Prefs.stepGoal
@@ -136,6 +138,8 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     fun notifyOk() = ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
     var usageOk by remember { mutableStateOf(ctx.usageAccess) }
     var phoneOn by remember { mutableStateOf(ctx.phoneSensor) }
+    var listenOk by remember { mutableStateOf(ctx.notificationAccess) }
+    var holdOn by remember { mutableStateOf(ctx.holdPlace) }
     var notifyGranted by remember { mutableStateOf(notifyOk()) }
     var pickInterval by remember { mutableStateOf(false) }
     var showLog by remember { mutableStateOf(false) }
@@ -147,6 +151,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 batteryOk = MainActivity.isIgnoringBatteryOptimizations(ctx)
                 notifyGranted = notifyOk()
                 usageOk = ctx.usageAccess
+                listenOk = ctx.notificationAccess
             }
         }
         activity.lifecycle.addObserver(obs)
@@ -283,7 +288,10 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
         item {
             Section("Phone", "Screen on/off times fix nights where you scrolled in bed. Only the times are sent." +
-                if (phoneOn && !usageOk) " Allow Usage access for Circa to start. Greyed out? In App info, tap ⋮ › Allow restricted settings first." else "") {
+                (if (phoneOn && !usageOk) " Allow Usage access for Circa to start. Greyed out? In App info, tap ⋮ › Allow restricted settings first." else "") +
+                "\n\nHold my place shows where in a podcast or audiobook you fell asleep. Android calls the permission notification access; " +
+                "Circa only uses it to see what is playing and never reads your notifications." +
+                if (holdOn && !listenOk) " Allow Notification access for Circa to start. Greyed out? In App info, tap ⋮ › Allow restricted settings first." else "") {
                 SwitchRow("Phone as sleep sensor", phoneOn) { on ->
                     if (on && ctx.lastScreenMs != 0L) ctx.lastScreenMs = System.currentTimeMillis()  // never send the time it was off
                     ctx.phoneSensor = on; phoneOn = on
@@ -292,6 +300,17 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 if (phoneOn && !usageOk) {
                     Hairline(Modifier.padding(start = AppSpace.l))
                     ChevronRow("Usage access", "Off") { ctx.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                SwitchRow("Hold my place", holdOn) { on ->
+                    haptic.tick()
+                    ctx.holdPlace = on; holdOn = on
+                    if (!on) File(ctx.filesDir, "playback.log").delete()
+                    if (on && !ctx.notificationAccess) ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                }
+                if (holdOn && !listenOk) {
+                    Hairline(Modifier.padding(start = AppSpace.l))
+                    ChevronRow("Notification access", "Off") { haptic.tick(); ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
                 }
             }
         }
