@@ -293,6 +293,7 @@ def test_cardio_settings_today_and_workout_relabel(tmp_path, monkeypatch) -> Non
             "biometric_steps": {w0: 200.0}}
     load(data)
     monkeypatch.setattr(main, "_vitals", lambda: {})
+    monkeypatch.setattr(main, "rescore", lambda dates: None)  # PATCH /settings would rescore the faked prior days
 
     def prior(load: float | None) -> None:
         for i in range(1, 15):
@@ -600,3 +601,51 @@ def test_export_csv_rows_bounds_auth() -> None:
         for bad in (0, 366, "x"):
             assert c.get(f"/export.csv?days={bad}", headers=H).status_code == 422, bad
         assert c.get("/export.csv").status_code == 401
+
+
+def test_dates_in_body_skips_short_and_out_of_range_lines() -> None:
+    ms = int(time.time() * 1000)
+    assert samples.dates_in_body(f"\na 5\nb 1 {10**30}\nc 1 {ms}\n".encode()) == {date.today()}
+
+
+def test_settings_goal_change_rescores_last_14_days(monkeypatch) -> None:
+    seen: list[set[date]] = []
+    monkeypatch.setattr(main, "rescore", seen.append)
+    with TestClient(app) as c:
+        c.patch("/settings", json={"step_goal": 9000, "calm": "1"}, headers=H)
+        c.patch("/settings", json={"step_goal": 9000.0}, headers=H)  # same value: no rescore
+        c.patch("/settings", json={"calm": ""}, headers=H)  # not a scoring key
+    assert seen == [{date.today() - timedelta(i) for i in range(14)}]
+
+
+def test_month_unknown_workout_and_journal_kind() -> None:
+    db.save_day(date(2026, 10, 2), (None, None, None), {"workouts": [{"minutes": 30, "load": 2.0, "kind": "run"}]}, {})
+    db.add_journal("2026-10-02", "bogus", None, None, 0)
+    with TestClient(app) as c:
+        r = c.get("/month?month=2026-10", headers=H)
+        assert r.status_code == 200 and r.json()["workouts"]["count"] == 1
+
+
+def test_non_ascii_token_is_401() -> None:
+    with TestClient(app) as c:
+        assert c.get("/settings", headers={"Authorization": "Bearer s\xe9cret".encode("latin-1")}).status_code == 401
+
+
+def test_out_of_range_sleep_edit_and_month_422() -> None:
+    with TestClient(app) as c:
+        for s, e in ((10**30 - 3600, 10**30), (-10**12 - 3600, -10**12)):
+            assert c.patch("/sleep", json={"date": "2026-11-03", "start": s, "end": e}, headers=H).status_code == 422, e
+        for bad in ("0001-01", "9999-12"):
+            assert c.get(f"/month?month={bad}", headers=H).status_code == 422, bad
+
+
+def test_medication_started_needs_dashed_date() -> None:
+    with TestClient(app) as c:
+        assert c.patch("/settings", json={"medication_started": "20261101"}, headers=H).status_code == 422
+        assert c.patch("/settings", json={"medication_started": "2026-11-01"}, headers=H).status_code == 200
+
+
+def test_vitals_drop_nonpositive() -> None:
+    now = time.time()
+    load({"biometric_hr_bpm": {now - 120: 61.0, now - 60: 0.0}})
+    assert main._vitals()["hr"] == 61.0

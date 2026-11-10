@@ -6,6 +6,8 @@ Contribs = dict[str, float | None]
 
 def _lin(x: float, at0: float, at100: float) -> float:
     """Linear map: at0 -> 0, at100 -> 100, clamped (works in either direction)."""
+    if at0 == at100:  # a step, not a division by zero (sleep need 240)
+        return 100.0 if x >= at0 else 0.0
     return max(0.0, min(100.0, 100.0 * (x - at0) / (at100 - at0)))
 
 

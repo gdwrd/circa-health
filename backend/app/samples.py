@@ -23,11 +23,13 @@ def dates_in_body(body: bytes) -> set[date]:
     tz_ = tz()
     out: set[date] = set()
     for line in body.decode(errors="replace").splitlines():
-        try:
-            ms = int(line.rsplit(None, 1)[-1])
-        except ValueError:
+        f = line.split()
+        if len(f) < 3:  # no timestamp field: "a 5" is not 1970
             continue
-        out.add(datetime.fromtimestamp(ms / 1000, tz_).date())
+        try:
+            out.add(datetime.fromtimestamp(int(f[-1]) / 1000, tz_).date())
+        except (ValueError, IndexError, OverflowError, OSError):
+            continue
     return out
 
 

@@ -184,3 +184,9 @@ def test_what_if_buckets_quartiles_and_five_day_floor() -> None:
                  "train": {"full": None, "short": {"median": 58, "lo": 54, "hi": 62, "n": 5}}}
     assert what_if(train_full + [(30.0, 480.0, 90)], 14, 450)["train"]["full"] == {"median": 60, "lo": 60, "hi": 60, "n": 5}
     assert what_if([], 14, 450) == {"rest": {"full": None, "short": None}, "train": {"full": None, "short": None}}
+
+
+def test_lin_equal_bounds_is_a_step():
+    from app.scoring import _lin
+    assert _lin(240, 240, 240) == 100 and _lin(239, 240, 240) == 0
+    assert readiness_score({**NIGHT, "total_min": 300}, BASE, 8000, 8000)["score"] is not None

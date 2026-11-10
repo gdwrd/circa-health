@@ -25,7 +25,7 @@ bearer = HTTPBearer(auto_error=False)
 
 def auth(cred: HTTPAuthorizationCredentials | None = Depends(bearer)) -> None:
     token = os.environ.get("API_TOKEN", "")
-    if not token or cred is None or not secrets.compare_digest(cred.credentials, token):
+    if not token or cred is None or not secrets.compare_digest(cred.credentials.encode(), token.encode()):
         raise HTTPException(401, "unauthorized")
 
 
@@ -297,11 +297,11 @@ def _vitals() -> dict:
     for k, expr in (("hr", "biometric_hr_bpm"), ("hrv", "biometric_hrv_rmssd"),
                     ("spo2", "biometric_spo2_pct"), ("battery", "ring_battery_pct")):
         try:
-            s = samples.raw(expr, now - timedelta(hours=24), now)
+            s = [v for v in samples.raw(expr, now - timedelta(hours=24), now).values() if v > 0]  # as /hr
         except Exception:
             log.exception("vitals %s failed", k)
-            s = {}
-        out[k] = list(s.values())[-1] if s else None
+            s = []
+        out[k] = s[-1] if s else None
     return out
 
 
@@ -387,7 +387,7 @@ def sleep(day: str | None = Query(None, alias="date")) -> dict:
 @api.patch("/sleep")
 def patch_sleep(body: dict = Body(...)) -> dict:
     d, start, end = _day(str(body.get("date"))), body.get("start"), body.get("end")
-    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (start, end)) or not 0 < end - start <= 16 * 3600:
+    if not all(_int(v, 0, 2**32) for v in (start, end)) or not 0 < end - start <= 16 * 3600:
         raise HTTPException(422, "bad start or end")
     if datetime.fromtimestamp(end, samples.tz()).date() != d:  # the night belongs to the day it ends on, as _sessions
         raise HTTPException(422, "end not on date")
@@ -501,7 +501,7 @@ def _month(first: date) -> dict:
             wk["count"] += 1
             wk["minutes"] += w["minutes"]
             wk["load"] += w["load"] or 0
-            wk["by_kind"][w["kind"]] += 1
+            wk["by_kind"][w["kind"]] = wk["by_kind"].get(w["kind"], 0) + 1
         days.append({"date": d.isoformat(), **{k: r.get(v) for k, v in SCORES.items()},
                      "steps": r["inputs"].get("steps"), "sleep_min": r["inputs"].get("sleep_min"),
                      "cardio_load": r["inputs"].get("cardio_load"), "workouts": len(ws)})
@@ -546,7 +546,7 @@ def month(m: str | None = Query(None, alias="month")) -> dict:
         first = date.fromisoformat(f"{m}-01") if m else _today().replace(day=1)
     except ValueError:
         raise HTTPException(422, "bad month")
-    if m and not re.fullmatch(r"\d{4}-\d{2}", m):
+    if m and not (re.fullmatch(r"\d{4}-\d{2}", m) and 1970 <= first.year <= 2100):  # year 1 / 9999 overflow date math
         raise HTTPException(422, "bad month")
     prev = _month((first - timedelta(1)).replace(day=1))
     return {**_month(first), "previous": {"means": prev["means"], "scored_days": prev["scored_days"]}}
@@ -743,9 +743,11 @@ def _year_ok(v: object) -> bool:
 def _started_ok(v: object) -> bool:
     if v == "":
         return True
+    if not isinstance(v, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):  # fromisoformat also takes 20261101
+        return False
     try:
         return date.fromisoformat(v) <= _today()
-    except (TypeError, ValueError):
+    except ValueError:
         return False
 
 
@@ -764,11 +766,15 @@ def get_settings() -> dict:
 
 
 @api.patch("/settings")
-def patch_settings(body: dict = Body(...)) -> dict:
+def patch_settings(tasks: BackgroundTasks, body: dict = Body(...)) -> dict:
     if not body or any(k not in SETTINGS or not SETTINGS[k](v) for k, v in body.items()):
         raise HTTPException(422, "bad settings")
+    old = _settings_out()
     db.set_settings({k: str(v) for k, v in body.items()})
-    return _settings_out()
+    new = _settings_out()
+    if any(old[k] != new[k] for k in ("step_goal", "sleep_need_min", "birth_year", "low_step_kind")):
+        tasks.add_task(rescore, {_today() - timedelta(i) for i in range(14)})  # the startup backfill's window
+    return new
 
 
 @api.patch("/workouts")
