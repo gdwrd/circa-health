@@ -13,6 +13,12 @@ import dev.ring.health.Prefs.holdDismissed
 import dev.ring.health.Prefs.holdPlace
 import dev.ring.health.Prefs.notificationAccess
 import dev.ring.health.bookmark
+import dev.ring.health.mark
+import dev.ring.health.Prefs.markNames
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import java.time.Instant
+import java.time.ZoneId
 import dev.ring.health.plays
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -242,6 +248,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
     var hrv by remember { mutableStateOf<List<Double>>(emptyList()) }
     var hold by remember { mutableStateOf<Hold?>(null) }
     var holdGone by remember { mutableStateOf(ctx.holdDismissed) }
+    var marks by remember { mutableStateOf<List<JsonObject>>(emptyList()) } // `/marks.things`: one per named thing
     LaunchedEffect(journalDate) {
         if (journalDate == null) return@LaunchedEffect
         sheetDay = if (journalDate == LocalDate.now().toString()) 1 else 0
@@ -250,6 +257,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
     }
     val scope = rememberCoroutineScope()
     suspend fun loadJournal() { Api.journal(ctx, 2)?.let { journal = parseJournal(it) } }
+    suspend fun loadMarks() { (Api.marks(ctx).obj()?.get("things") as? JsonArray)?.let { a -> marks = a.mapNotNull { it.obj() } } }
     var refreshing by remember { mutableStateOf(false) }
     suspend fun load() {
         Api.today(ctx).obj()?.let { data = it }
@@ -260,7 +268,11 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
             bookmark(ctx.plays(), (start * 1000).toLong(), (end * 1000).toLong())
         }
         loadJournal()
-        Api.settings(ctx)?.let { s -> s["medication_time"].str()?.let { medTime = it }; medStarted = s["medication_started"].str() }
+        loadMarks()
+        Api.settings(ctx)?.let { s ->
+            s["medication_time"].str()?.let { medTime = it }; medStarted = s["medication_started"].str()
+            ctx.markNames = (1..3).map { s["mark_$it"].str().orEmpty() }
+        }
         Api.insights(ctx).obj()?.let { insights = it["kinds"].obj() }
         Api.experiments(ctx).obj()?.let { exp = it["active"].obj() }
         (Api.hr(ctx, 24).obj()?.get("points") as? JsonArray)?.let { a -> hr = a.mapNotNull { it.obj()?.get("bpm").num() } }
@@ -441,6 +453,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
                 }
             }
         }
+        marks.forEach { t -> item { MarkCard(t, scope, ::loadMarks) } }
         exp?.let { x ->
             item {
                 ExperimentCard(
@@ -917,15 +930,16 @@ private fun JournalChip(text: String, auto: Boolean = false) {
 }
 
 /** Suggested entry: a dashed outline that fills solid once logged (one 600 ms ease, a plain switch under reduce-motion). */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SuggestChip(label: String, logged: Boolean, onLog: () -> Unit) {
+private fun SuggestChip(label: String, logged: Boolean, hint: String = "Suggested, tap to log", onLong: (() -> Unit)? = null, onLog: () -> Unit) {
     val c = AppTheme.colors
     // Local state flips at once; the server state re-keys it after the reload.
     var on by remember(logged) { mutableStateOf(logged) }
     val fill by animateFloatAsState(if (on) 1f else 0f, if (LocalReduceMotion.current) snap() else tween(600), label = "suggest")
     val onTint = if (c.background.luminance() < 0.5f) c.label else c.card // white in both themes
-    Box(Modifier.clip(RoundedCornerShape(50)).clickable(enabled = !on, role = Role.Button) { on = true; onLog() }) {
-        Canvas(Modifier.matchParentSize().semantics { contentDescription = if (on) "Logged" else "Suggested, tap to log" }) {
+    Box(Modifier.clip(RoundedCornerShape(50)).combinedClickable(enabled = !on, role = Role.Button, onLongClick = onLong) { on = true; onLog() }) {
+        Canvas(Modifier.matchParentSize().semantics { contentDescription = if (on) "Logged" else hint }) {
             val w = 1.5.dp.toPx()
             val round = CornerRadius(size.height / 2)
             drawRoundRect(c.tint.copy(alpha = fill), cornerRadius = round)
@@ -1554,17 +1568,17 @@ internal val METRIC = mapOf(
     "hrv" to ("HRV" to "HRV"), "rhr" to ("Resting HR" to "resting heart rate"), "total_min" to ("Time asleep" to "time asleep"),
     "awake_min" to ("Awake" to "time awake"), "bed_start" to ("Bedtime" to "bedtime"), "strain" to ("Strain" to "strain index"),
     "day_hr" to ("Daytime HR" to "daytime heart rate"), "wind_down" to ("Settling" to "settling time"),
-    "felt" to ("Felt" to "how recovered you felt"),
+    "felt" to ("Felt" to "how recovered you felt"), "stress_load" to ("Stress" to "stress load"), "steps" to ("Steps" to "steps"),
 )
 
 // 1 = higher is better, -1 = lower is better (wind_down: later is worse); bedtime is neither.
-private val BETTER = mapOf("sleep_score" to 1, "deep_min" to 1, "rem_min" to 1, "hrv" to 1, "total_min" to 1, "rhr" to -1, "awake_min" to -1, "strain" to -1, "day_hr" to -1, "stress" to -1, "wind_down" to -1, "felt" to 1)
+private val BETTER = mapOf("sleep_score" to 1, "deep_min" to 1, "rem_min" to 1, "hrv" to 1, "total_min" to 1, "rhr" to -1, "awake_min" to -1, "strain" to -1, "day_hr" to -1, "stress" to -1, "wind_down" to -1, "felt" to 1, "stress_load" to -1, "steps" to 1)
 
 /** Pill / change colour: good, bad or neutral for this metric. */
 @Composable
 internal fun effectColor(metric: String, delta: Double): Color {
     val c = AppTheme.colors
-    val dir = if (kotlin.math.abs(delta) < (if (metric == "strain") 0.05 else 0.5)) 0.0 else (BETTER[metric] ?: 0) * delta
+    val dir = if (kotlin.math.abs(delta) < (if (metric == "strain" || metric == "stress_load") 0.05 else 0.5)) 0.0 else (BETTER[metric] ?: 0) * delta
     return if (dir > 0) c.goodText else if (dir < 0) c.badText else c.secondaryLabel
 }
 
@@ -1576,6 +1590,8 @@ internal fun metricValue(metric: String, v: Double): String = when (metric) {
     "bed_start", "wind_down" -> bedClock(v)
     "total_min" -> duration(v.roundToInt())
     "strain" -> "%.1f".format(v)
+    "stress_load" -> "%.1f h".format(v)
+    "steps" -> "%,d".format(v.roundToInt())
     "sleep_score", "felt" -> v.roundToInt().toString()
     "hrv" -> "${v.roundToInt()} ms"
     "rhr", "day_hr" -> "${v.roundToInt()} bpm"
@@ -1592,7 +1608,7 @@ internal fun metricDelta(metric: String, d: Double, pct: Double?): String {
         metric == "bed_start" || metric == "wind_down" || metric == "total_min" -> "${a.roundToInt()} min"
         else -> metricValue(metric, a)
     }
-    return if (body.startsWith("0 ") || body == "0.0") body else (if (d < 0) "−" else "+") + body // no "−0 ms"
+    return if (body.startsWith("0 ") || body.startsWith("0.0") || body == "0") body else (if (d < 0) "−" else "+") + body // no "−0 ms"
 }
 
 private fun sentence(kind: String, e: JsonObject): String? {
@@ -1691,6 +1707,126 @@ private fun WhatAffectsYou(kinds: List<Pair<String, JsonObject>>, onTest: (() ->
                     Text("Try one habit for 14 days and see what changes.", style = AppType.footnote, color = c.secondaryLabel)
                 }
             }
+        }
+    }
+}
+
+/** One top effect of a marked thing against the user's other days: "The night before, you slept 52 min less than usual." */
+private fun markSentence(e: JsonObject): String? {
+    val m = e["metric"].str() ?: return null
+    val d = e["delta"].num() ?: return null
+    val a = kotlin.math.abs(d)
+    val min = duration(a.roundToInt())
+    val more = if (d > 0) "more" else "less"
+    return when (m) {
+        "total_min" -> "The night before, you slept $min $more than usual."
+        "awake_min" -> "The night before, you were awake $min $more than usual."
+        "deep_min" -> "The night before, you got $min $more deep sleep than usual."
+        "bed_start" -> "The night before, you fell asleep $min ${if (d > 0) "later" else "earlier"} than usual."
+        "steps" -> "The day before, you took ${metricValue(m, a)} ${if (d > 0) "more" else "fewer"} steps than usual."
+        "felt" -> "That morning, you felt ${a.roundToInt()} pts $more recovered than usual."
+        else -> "The ${if (m == "stress_load") "day" else "night"} before, your ${METRIC[m]?.second ?: m} was ${metricDelta(m, a, e["pct"].num()).removePrefix("+")} ${if (d > 0) "higher" else "lower"} than usual."
+    }
+}
+
+/** Mark the moment: one thing the user named (`/marks.things[]`). "Mark now" stores a mark, a long press picks an earlier time today, Undo takes it back for 10 s. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun MarkCard(t: JsonObject, scope: CoroutineScope, reload: suspend () -> Unit) {
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    val ctx = LocalContext.current
+    val slot = t["slot"].num()?.roundToInt() ?: return
+    var just by remember { mutableStateOf<Long?>(null) } // epoch ms of the mark Undo still takes back
+    // Marked or undone on this card: shown at once, also while the server (or its cached answer) does not know yet.
+    var added by remember { mutableStateOf(emptyList<Long>()) }
+    var gone by remember { mutableStateOf(emptyList<Long>()) }
+    var pick by remember { mutableStateOf(false) }
+    fun put(ts: Long, cancel: Boolean) {
+        if (cancel) { gone = gone + ts; just = null } else { added = added + ts; just = ts }
+        scope.launch { mark(ctx, slot, ts, cancel); reload() }
+    }
+    LaunchedEffect(just) { if (just != null) { delay(10_000); just = null } }
+    val times = ((t["marks"] as? JsonArray)?.mapNotNull { it.num()?.toLong()?.times(1000) }.orEmpty() + added).distinct().filter { it !in gone }
+    InsetCard {
+        Column(Modifier.fillMaxWidth().padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+            // The chip (and Undo) drop under the name when the two do not fit on one line.
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                Text(t["name"].str().orEmpty(), style = AppType.headline, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.align(Alignment.CenterVertically).padding(end = AppSpace.s))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SuggestChip(just?.let { "Marked ${clock(it / 1000.0)}" } ?: "Mark now", just != null, "Tap to mark now, hold for an earlier time", { haptic.tick(); pick = true }) {
+                        haptic.tick(); put(System.currentTimeMillis() / 1000 * 1000, false)
+                    }
+                    just?.let { ts ->
+                        Text(
+                            "Undo", style = AppType.footnote.copy(fontWeight = FontWeight.Medium), color = c.tint,
+                            modifier = Modifier.padding(start = AppSpace.xs).clip(RoundedCornerShape(50)).clickable(role = Role.Button) { haptic.tick(); put(ts, true) }.padding(horizontal = AppSpace.m, vertical = 9.dp),
+                        )
+                    }
+                }
+            }
+            if (times.isNotEmpty()) ClockLine(times)
+            if (t["status"].str() != "ok") Text(
+                "Mark it on 3 days to see what comes before. ${t["n_with"].num()?.roundToInt() ?: 0} so far.", style = AppType.subhead, color = c.secondaryLabel,
+            ) else {
+                val top = (t["top"] as? JsonArray)?.mapNotNull { it.obj() }.orEmpty()
+                if (top.isEmpty()) Text("Nothing stands out before your marks so far.", style = AppType.subhead, color = c.secondaryLabel)
+                else FlowRow(horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                    top.forEach { e ->
+                        val m = e["metric"].str().orEmpty()
+                        val d = e["delta"].num() ?: 0.0
+                        val col = effectColor(m, d)
+                        Text(
+                            "${METRIC[m]?.first ?: m} ${metricDelta(m, d, e["pct"].num())}",
+                            style = AppType.footnote.copy(fontWeight = FontWeight.SemiBold), color = col,
+                            modifier = Modifier.clip(RoundedCornerShape(50)).background(col.copy(alpha = 0.14f)).padding(horizontal = 10.dp, vertical = 4.dp),
+                        )
+                    }
+                }
+                top.mapNotNull(::markSentence).forEach { Text(it, style = AppType.subhead) }
+                t["pattern"].obj()?.let { p ->
+                    val hits = p["hits"].num()?.roundToInt() ?: return@let
+                    val others = (p["alike"].num()?.roundToInt() ?: return@let) - hits // `alike` counts the hits too
+                    Text(
+                        "${if (p["metric"].str() in setOf("steps", "stress_load")) "Days" else "Nights"} like that came before $hits of your ${p["marked"].num()?.roundToInt() ?: return@let} marks. " +
+                            if (others == 1) "1 other passed without one." else "${if (others == 0) "No" else others} others passed without one.",
+                        style = AppType.subhead,
+                    )
+                }
+                Text("From your own days. Other things may play a part.", style = AppType.footnote, color = c.secondaryLabel)
+            }
+        }
+    }
+    if (pick) TimePickDialog(LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm")), { pick = false }) { hhmm ->
+        pick = false
+        var ts = LocalDate.now().atTime(LocalTime.parse(hhmm)).atZone(ZoneId.systemDefault()).toEpochSecond() * 1000
+        if (ts > System.currentTimeMillis()) return@TimePickDialog Toast.makeText(ctx, "Pick a time earlier today.", Toast.LENGTH_SHORT).show()
+        while (ts in gone) ts += 1000 // an undone second stays undone (the larger value wins): the new mark moves one on
+        put(ts, false)
+    }
+}
+
+/** The clock line: 24 hours left to right, one dot per mark at its time of day; marks close in time stack. */
+@Composable
+private fun ClockLine(times: List<Long>) {
+    val c = AppTheme.colors
+    // 32 slots of 45 minutes: marks in one slot stack. Five dots of room at most; a taller stack stays at the top.
+    val stacks = times.groupingBy { Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault()).toLocalTime().toSecondOfDay() / 2700 }.eachCount()
+    val describe = "A 24-hour line with one dot per mark: ${times.size} ${if (times.size == 1) "mark" else "marks"}, the latest at ${clock(times.max() / 1000.0)}."
+    Column {
+        Canvas(Modifier.fillMaxWidth().height((12 + 9 * stacks.values.max().coerceAtMost(5)).dp).semantics { contentDescription = describe }) {
+            val w = 1.dp.toPx()
+            val r = minOf(4.dp.toPx(), size.width / 64 - w / 2)
+            val base = size.height - 6.dp.toPx()
+            drawLine(c.secondaryLabel, Offset(0f, base), Offset(size.width, base), w)
+            for (h in 0..24 step 6) (w / 2 + (size.width - w) * h / 24).let { x -> drawLine(c.secondaryLabel, Offset(x, base), Offset(x, size.height), w) }
+            stacks.forEach { (slot, n) ->
+                repeat(n) { i -> drawCircle(c.tint, r, Offset(size.width * (slot + 0.5f) / 32, maxOf(base - 2 * w - r - i * (2 * r + w), r))) }
+            }
+        }
+        Row(Modifier.fillMaxWidth().clearAndSetSemantics {}, horizontalArrangement = Arrangement.SpaceBetween) {
+            (if (android.text.format.DateFormat.is24HourFormat(LocalContext.current)) listOf("00", "06", "12", "18", "24") else listOf("12 AM", "6 AM", "12 PM", "6 PM", "12 AM"))
+                .forEach { Text(it, style = AppType.tab, color = c.secondaryLabel) }
         }
     }
 }

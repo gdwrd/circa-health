@@ -100,6 +100,7 @@ import dev.ring.health.Prefs.hasStoredGoals
 import dev.ring.health.Prefs.lastBatteryPct
 import dev.ring.health.Prefs.lastCharging
 import dev.ring.health.Prefs.lastSyncMs
+import dev.ring.health.Prefs.markNames
 import dev.ring.health.Prefs.ringAddress
 import dev.ring.health.Prefs.sleepNeedHours
 import dev.ring.health.Prefs.usageAccess
@@ -211,6 +212,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var pickLowStep by remember { mutableStateOf(false) }
     var pickWake by remember { mutableStateOf<String?>(null) } // "wake_weekday" | "wake_weekend"
     var birth by remember { mutableStateOf("") }
+    var things by remember { mutableStateOf(List(3) { "" }) } // Things to mark: slots 1..3
     LaunchedEffect(url, token) {
         // Goals typed on this phone and not yet on the server go up first; until that works the server's are not copied down.
         if (!ctx.goalsPushed && ctx.hasStoredGoals) ctx.goalsPushed = Api.patchSettings(ctx, mapOf(
@@ -220,6 +222,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         med = Api.settings(ctx)
         if (med != null && !ctx.hasStoredGoals) ctx.goalsPushed = true // fresh install: nothing to push, the server's goals win
         birth = (med?.get("birth_year") as? JsonPrimitive)?.contentOrNull.orEmpty()
+        things = (1..3).map { (med?.get("mark_$it") as? JsonPrimitive)?.contentOrNull.orEmpty() }
         if (ctx.goalsPushed) med?.let { s ->
             (s["step_goal"] as? JsonPrimitive)?.doubleOrNull?.let { ctx.stepGoal = it.roundToInt(); steps = ctx.stepGoal.toString() }
             (s["sleep_need_min"] as? JsonPrimitive)?.doubleOrNull?.let { ctx.sleepNeedHours = it.toFloat() / 60; sleepNeed = ctx.sleepNeedHours.toString().removeSuffix(".0") }
@@ -240,6 +243,13 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             Api.patchSettings(ctx, mapOf(key to JsonPrimitive(v)))?.let { med = it } ?: run { patchFailed++; ctx.goalsPushed = false } // not sent: the next load pushes it
         }
     }
+    // A thing's name is sent 800 ms after the last keystroke, as the goals are; the server takes no outer spaces.
+    fun saveMark(slot: Int, name: String) {
+        goalJobs["mark_$slot"]?.cancel()
+        goalJobs["mark_$slot"] = activity.lifecycleScope.launch { delay(800); patchMed("mark_$slot", JsonPrimitive(name.trim())) }
+    }
+    // The names as the server holds them, kept for the mark widget.
+    LaunchedEffect(med) { med?.let { s -> ctx.markNames = (1..3).map { (s["mark_$it"] as? JsonPrimitive)?.contentOrNull.orEmpty() } } }
 
     // (stored, oldest ts, waiting) of the phone's sample history; re-read on open and after "Send all history".
     var stored by remember { mutableStateOf(Triple(0, 0L, 0)) }
@@ -414,6 +424,18 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             item {
                 Section("Workouts", "The ring can't tell cycling from a gym session — both show few steps. Pick what you do most; you can change any session on the Heart screen.") {
                     ChevronRow("Low-step sessions are", lowStepLabel((s["low_step_kind"] as? JsonPrimitive)?.contentOrNull)) { pickLowStep = true }
+                }
+            }
+            item {
+                Section("Things to mark", "Name something that comes and goes: a migraine, an afternoon crash, heartburn. Tap it when it happens and " +
+                    "Circa shows what your body did the day before. Clear the name to stop; old marks are kept.") {
+                    things.forEachIndexed { i, name ->
+                        if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
+                        FieldRow("Thing ${i + 1}", name, "Not set") {
+                            things = things.toMutableList().also { l -> l[i] = it.take(24) }
+                            saveMark(i + 1, things[i])
+                        }
+                    }
                 }
             }
         }

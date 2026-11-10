@@ -35,6 +35,7 @@ object Prefs {
     private const val KEY_CAR_ADDRESS     = "car_address"
     private const val KEY_CAR_NAME        = "car_name"
     private const val KEY_DRIVE_WARNED    = "drive_warned_wake"
+    private const val KEY_MARK_NAMES      = "mark_names"
 
     private fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -115,6 +116,11 @@ object Prefs {
     var Context.driveWarnedWake: Long
         get() = prefs(this).getLong(KEY_DRIVE_WARNED, 0L)
         set(v) = prefs(this).edit().putLong(KEY_DRIVE_WARNED, v).apply()
+
+    /** The three "Things to mark" names as the server last gave them: index 0 = slot 1, "" = unused. For the mark widget. */
+    var Context.markNames: List<String>
+        get() = (prefs(this).getString(KEY_MARK_NAMES, "") ?: "").split('\n').let { n -> List(3) { n.getOrElse(it) { "" } } }
+        set(v) = prefs(this).edit().putString(KEY_MARK_NAMES, v.joinToString("\n")).apply()
 
     /** Minutes between background syncs (ring read + push); 0 = background sync off. */
     var Context.syncIntervalMin: Int

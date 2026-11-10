@@ -81,6 +81,7 @@ object Api {
     suspend fun stress(ctx: Context, date: LocalDate) = get(ctx, "/stress?date=$date")
     suspend fun journal(ctx: Context, days: Int) = get(ctx, "/journal?days=$days")
     suspend fun insights(ctx: Context) = get(ctx, "/journal/insights")
+    suspend fun marks(ctx: Context) = get(ctx, "/marks")
     suspend fun settings(ctx: Context) = get(ctx, "/settings") as? JsonObject
     suspend fun notifications(ctx: Context) = get(ctx, "/notifications/pending")
 
