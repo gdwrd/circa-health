@@ -87,6 +87,7 @@ import dev.ring.health.R
 import dev.ring.health.SampleStore
 import dev.ring.health.Prefs.apiToken
 import dev.ring.health.Prefs.batteryAlerts
+import dev.ring.health.Prefs.goalsPushed
 import dev.ring.health.Prefs.lastBatteryPct
 import dev.ring.health.Prefs.lastCharging
 import dev.ring.health.Prefs.lastSyncMs
@@ -101,6 +102,7 @@ import dev.ring.health.Prefs.vmUrl
 import dev.ring.health.SyncLog
 import dev.ring.health.SyncWorker
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -111,6 +113,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 @SuppressLint("MissingPermission")
 @Composable
@@ -191,12 +194,32 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var pickWake by remember { mutableStateOf<String?>(null) } // "wake_weekday" | "wake_weekend"
     var birth by remember { mutableStateOf("") }
     LaunchedEffect(url, token) {
+        // Goals typed on this phone and not yet on the server go up first; until that works the server's are not copied down.
+        if (!ctx.goalsPushed) ctx.goalsPushed = Api.patchSettings(ctx, mapOf(
+            "step_goal" to JsonPrimitive(ctx.stepGoal.coerceIn(1000, 100000)),
+            "sleep_need_min" to JsonPrimitive((ctx.sleepNeedHours * 60).roundToInt().coerceIn(240, 720)),
+        )) != null
         med = Api.settings(ctx)
         birth = (med?.get("birth_year") as? JsonPrimitive)?.contentOrNull.orEmpty()
+        if (ctx.goalsPushed) med?.let { s ->
+            (s["step_goal"] as? JsonPrimitive)?.doubleOrNull?.let { ctx.stepGoal = it.roundToInt(); steps = ctx.stepGoal.toString() }
+            (s["sleep_need_min"] as? JsonPrimitive)?.doubleOrNull?.let { ctx.sleepNeedHours = it.toFloat() / 60; sleepNeed = ctx.sleepNeedHours.toString().removeSuffix(".0") }
+        }
     }
     var patchFailed by remember { mutableIntStateOf(0) } // key of the backend switches: a failed PATCH resets them to the stored value
     fun patchMed(key: String, v: JsonPrimitive) {
         activity.lifecycleScope.launch { Api.patchSettings(ctx, mapOf(key to v))?.let { med = it } ?: patchFailed++ }
+    }
+    // The goal fields change per keystroke: a value is stored and sent only after 800 ms without typing, so "1200" on the
+    // way from "12000" to "50" is never saved. null (out of range) drops a pending save and keeps the old value.
+    val goalJobs = remember { mutableMapOf<String, Job>() }
+    fun saveGoal(key: String, v: Int?) {
+        goalJobs[key]?.cancel()
+        if (v != null) goalJobs[key] = activity.lifecycleScope.launch {
+            delay(800)
+            if (key == "step_goal") ctx.stepGoal = v else ctx.sleepNeedHours = v / 60f
+            Api.patchSettings(ctx, mapOf(key to JsonPrimitive(v)))?.let { med = it } ?: run { patchFailed++; ctx.goalsPushed = false } // not sent: the next load pushes it
+        }
     }
 
     // (stored, oldest ts, waiting) of the phone's sample history; re-read on open and after "Send all history".
@@ -284,14 +307,17 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                     }
                     Hairline(Modifier.padding(start = AppSpace.l))
                 }
-                FieldRow("Step goal", steps, "8000", KeyboardType.Number) {
+                // Out of range (NaN and Infinity fail both comparisons): nothing is stored or sent, the row shows the range.
+                fun goal(s: String) = s.toIntOrNull()?.takeIf { it in 1000..100000 }
+                fun need(s: String) = s.replace(',', '.').toFloatOrNull()?.takeIf { it > 4f && it <= 12f }
+                FieldRow("Step goal", steps, "8000", KeyboardType.Number, supporting = if (goal(steps) == null) "1000 to 100000" else null) {
                     steps = it.filter(Char::isDigit)
-                    steps.toIntOrNull()?.let { n -> ctx.stepGoal = n }
+                    saveGoal("step_goal", goal(steps))
                 }
                 Hairline(Modifier.padding(start = AppSpace.l))
-                FieldRow("Sleep need (h)", sleepNeed, "7.5", KeyboardType.Decimal) {
+                FieldRow("Sleep need (h)", sleepNeed, "7.5", KeyboardType.Decimal, supporting = if (need(sleepNeed) == null) "Above 4, up to 12" else null) {
                     sleepNeed = it
-                    it.replace(',', '.').toFloatOrNull()?.let { h -> ctx.sleepNeedHours = h }
+                    saveGoal("sleep_need_min", need(it)?.let { h -> (h * 60).roundToInt() })
                 }
                 med?.let { s ->
                     listOf("wake_weekday" to "Wake up · weekdays", "wake_weekend" to "Wake up · weekends").forEach { (k, title) ->
@@ -695,9 +721,11 @@ private fun FieldRow(
     placeholder: String,
     keyboard: KeyboardType = KeyboardType.Text,
     password: Boolean = false,
+    supporting: String? = null,
     onChange: (String) -> Unit,
 ) {
     val c = AppTheme.colors
+    Column {
     Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
         Text(title, style = AppType.body, modifier = Modifier.width(120.dp))
         BasicTextField(
@@ -715,6 +743,11 @@ private fun FieldRow(
                 }
             },
         )
+    }
+    if (supporting != null) Text(
+        supporting, style = AppType.footnote, color = c.activity, textAlign = TextAlign.End,
+        modifier = Modifier.fillMaxWidth().padding(start = AppSpace.l, end = AppSpace.l, bottom = AppSpace.s),
+    )
     }
 }
 

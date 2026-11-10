@@ -12,6 +12,7 @@ object Prefs {
     private const val KEY_API_TOKEN       = "api_token"
     private const val KEY_STEP_GOAL       = "step_goal"
     private const val KEY_SLEEP_NEED_H    = "sleep_need_h"
+    private const val KEY_GOALS_PUSHED    = "goals_pushed"
     private const val KEY_LAST_SYNC_MS    = "last_sync_ms"
     private const val KEY_LAST_SLEEP_MS   = "last_sleep_ms"
     private const val KEY_LAST_SCREEN_MS  = "last_screen_ms"
@@ -53,6 +54,11 @@ object Prefs {
     var Context.sleepNeedHours: Float
         get() = prefs(this).getFloat(KEY_SLEEP_NEED_H, 7.5f)
         set(v) = prefs(this).edit().putFloat(KEY_SLEEP_NEED_H, v).apply()
+
+    /** False until the backend holds this phone's step goal and sleep need; Settings then pushes them before it reads the server's. */
+    var Context.goalsPushed: Boolean
+        get() = prefs(this).getBoolean(KEY_GOALS_PUSHED, false)
+        set(v) = prefs(this).edit().putBoolean(KEY_GOALS_PUSHED, v).apply()
 
     /** Last sync whose push succeeded (or had nothing to push); 0 = never. Drives deep sync and the stale warning. */
     var Context.lastSyncMs: Long
