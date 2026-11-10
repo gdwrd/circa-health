@@ -22,8 +22,14 @@ def test_max_hr_zones_zone_of() -> None:
 
 
 def test_load() -> None:
-    assert cardio.load([150.0] * 12, B) == {"load": 18.0, "minutes": [0, 0, 60, 0, 0]}  # an hour in zone 3
-    assert cardio.load([0.0, 100.0, 125.0, 180.0], B) == {"load": 3.0, "minutes": [5, 0, 0, 0, 5]}
+    assert cardio.load(hr((0, [150.0] * 12)), B) == {"load": 18.0, "minutes": [0, 0, 60, 0, 0]}  # an hour in zone 3
+    assert cardio.load(hr((0, [0.0, 100.0, 125.0, 180.0])), B) == {"load": 3.0, "minutes": [5, 0, 0, 0, 5]}
+
+
+def test_off_grid_sample_shares_its_slot() -> None:
+    """A live reading between two 5-min samples neither breaks a calm run nor adds 5 min of load."""
+    assert cardio.restorative(hr((0, [55.0] * 4)) | {T0 + 450.0: 56.0}, 52, {}, awake) == 20
+    assert cardio.load({T0 + 0.0: 150.0, T0 + 100.0: 150.0}, B) == {"load": 1.5, "minutes": [0, 0, 5, 0, 0]}
 
 
 def test_target_bands_and_none() -> None:

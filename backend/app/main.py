@@ -110,8 +110,10 @@ def _score_day(d: date) -> None:
     n = ss[0] if ss else None
     naps = [{k: x[k] for k in ("start", "end", "total_min")} for x in ss[1:] if x["total_min"] >= 20]
 
+    asleep = ss + _sessions(d + timedelta(1))  # tonight's sleep starts on d but ends on d + 1
+
     def awake(ts: float) -> bool:
-        return ts <= now.timestamp() and not any(x["start"] <= ts < x["end"] for x in ss)
+        return ts <= now.timestamp() and not any(x["start"] <= ts < x["end"] for x in asleep)
 
     pm = round(n["phone_min"]) if n else 0
     if pm >= 1:  # auto journal row on the evening date, so insights pair it with this night
@@ -193,7 +195,7 @@ def _score_day(d: date) -> None:
     mh = cardio.max_hr(int(cfg["birth_year"]), d) if cfg["birth_year"] else None
     bounds = cardio.zones(mh, base["rhr"]) if mh and base["rhr"] else None
     steps_h = {int(samples.midnight(d).timestamp()) + 3600 * h: v for h, v in steps.items()}  # cardio keys by hour start
-    load = cardio.load(list(day_hr.values()), bounds) | {"bounds": bounds} if bounds else None
+    load = cardio.load(day_hr, bounds) | {"bounds": bounds} if bounds else None
     workouts = cardio.workouts(day_hr, steps_h, bounds, awake, cfg["low_step_kind"]) if bounds else []
     for start, kind in db.workout_kinds(d).items():  # the user's label beats the guess, across rescores
         for w in workouts:

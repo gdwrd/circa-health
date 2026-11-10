@@ -107,6 +107,26 @@ def test_total_min_is_span_minus_awake() -> None:
     assert c["inputs"]["sleep_min"] == 450 and c["sleep"]["efficiency"] == scoring._lin(450 / 480, 0.75, 0.95)
 
 
+def test_pre_midnight_sleep_is_not_awake_time(monkeypatch) -> None:
+    """Yesterday 20:00-24:00 worn at 54 bpm, asleep from 23:00 (a session ending today): the last hour is not day time."""
+    monkeypatch.delenv("TZ", raising=False)
+    d = date.today() - timedelta(1)
+    m = samples.midnight(d).timestamp()
+    t0 = m + 23 * 3600
+    for i in range(1, 15):
+        db.save_day(d - timedelta(i), (None, None, None), {"inputs": {"rhr": 50.0}}, {})
+    load({"biometric_sleep_end_ts": {t0: t0 + 420 * 60}, "biometric_sleep_total_min": {t0: 420.0},
+          "biometric_hr_bpm": {m + 20 * 3600 + i * 300: 54.0 for i in range(48)},
+          "biometric_stress": {m + 22 * 3600: 80.0, t0 + 1800: 20.0}, "biometric_steps": {m + 20 * 3600: 10.0}})
+    main._score_day(d)
+    c = db.days(d, d)[0]["c"]
+    assert c["inputs"]["restorative_min"] == 180 and c["wear"] == {"worn_hours": 3, "awake_hours": 23}
+    assert c["stress"] == scoring.stress_zones([80.0])
+    quiet = scoring.activity_score({"steps": 10.0, "calories": None, "awake_hourly_steps": [10.0, 0.0, 0.0]},
+                                   db.setting("step_goal"), None, None)
+    assert c["activity"]["inactive_hours"] == quiet["contributors"]["inactive_hours"]
+
+
 def _strain_day(monkeypatch, d: date, calm: bool = False) -> None:
     """Score d from a faked night: strained = HR falling late to 75, HRV 20 ms, 60 min awake; calm = usual values."""
     t0 = (samples.midnight(d) - timedelta(hours=1)).timestamp()

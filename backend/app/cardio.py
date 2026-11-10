@@ -20,8 +20,17 @@ def zone_of(bpm: float, bounds: list[float]) -> int:
     return sum(bpm >= b for b in bounds)
 
 
-def load(bpm: list[float], bounds: list[float]) -> dict:
-    z = [zone_of(v, bounds) for v in bpm if v > 0]
+def _slots(hr: dict[float, float]) -> dict[float, float]:
+    """Worn samples as one mean per 300 s slot, so an off-grid live reading shares its slot instead of adding one."""
+    by: dict[float, list[float]] = {}
+    for t, v in hr.items():
+        if v > 0:
+            by.setdefault(t // STEP * STEP, []).append(v)
+    return {t: mean(v) for t, v in by.items()}
+
+
+def load(hr: dict[float, float], bounds: list[float]) -> dict:
+    z = [zone_of(v, bounds) for v in _slots(hr).values()]
     return {"load": round(sum(0.5 * x for x in z), 1), "minutes": [5 * z.count(i) for i in range(1, 6)]}
 
 
@@ -59,11 +68,12 @@ def workouts(hr: dict[float, float], steps_h: dict[int, float], bounds: list[flo
     out = []
     for s in segs:
         start, end = int(s[0]), int(s[-1]) + STEP
-        bpm = [v for t, v in hr.items() if start <= t < end and v > 0]
+        seg = {t: v for t, v in hr.items() if start <= t < end and v > 0}
+        bpm = list(seg.values())
         hours = range(_hour(start), end, 3600)
         steps = mean(steps_h.get(h, 0.0) for h in hours)
         out.append({"start": start, "end": end, "minutes": (end - start) // 60, "avg_bpm": round(mean(bpm)),
-                    "max_bpm": max(bpm), "load": load(bpm, bounds)["load"],
+                    "max_bpm": max(bpm), "load": load(seg, bounds)["load"],
                     "kind": "walk" if steps >= 1000 else low_step_kind, "confirmed": False})
     return out
 
@@ -73,7 +83,8 @@ def restorative(hr: dict[float, float], rhr: float | None, steps_h: dict[int, fl
     """Minutes in runs of >= 3 consecutive calm samples: awake, bpm <= 1.10 x rhr, hour steps < 100."""
     if rhr is None:
         return None
-    calm = sorted(t for t, v in hr.items() if v > 0 and awake(t) and v <= 1.1 * rhr and steps_h.get(_hour(t), 0.0) < 100)
+    hr = _slots({t: v for t, v in hr.items() if awake(t)})
+    calm = sorted(t for t, v in hr.items() if v <= 1.1 * rhr and steps_h.get(_hour(t), 0.0) < 100)
     total, run, prev = 0, 0, None
     for t in calm + [None]:
         if t is not None and prev is not None and t - prev == STEP:
