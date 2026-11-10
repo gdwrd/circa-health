@@ -71,6 +71,18 @@
                 android:resource="@xml/ring_widget_info" />
         </receiver>
 
+        <receiver
+            android:name=".widget.MarkWidgetReceiver"
+            android:exported="true"
+            android:label="@string/mark_widget_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/mark_widget_info" />
+        </receiver>
+
         <!-- Share report / Export CSV: read-only grants on cacheDir/share/ only -->
         <provider
             android:name="androidx.core.content.FileProvider"

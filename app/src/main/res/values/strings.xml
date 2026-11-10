@@ -2,4 +2,6 @@
 <resources>
     <string name="app_name">Circa</string>
     <string name="widget_description">Readiness, sleep and activity at a glance.</string>
+    <string name="mark_widget_label">Circa: Mark</string>
+    <string name="mark_widget_description">Mark a moment with one tap.</string>
 </resources>

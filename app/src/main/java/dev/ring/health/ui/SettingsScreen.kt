@@ -101,6 +101,7 @@ import dev.ring.health.Prefs.lastBatteryPct
 import dev.ring.health.Prefs.lastCharging
 import dev.ring.health.Prefs.lastSyncMs
 import dev.ring.health.Prefs.markNames
+import dev.ring.health.widget.MarkWidget
 import dev.ring.health.Prefs.ringAddress
 import dev.ring.health.Prefs.sleepNeedHours
 import dev.ring.health.Prefs.usageAccess
@@ -249,7 +250,12 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         goalJobs["mark_$slot"] = activity.lifecycleScope.launch { delay(800); patchMed("mark_$slot", JsonPrimitive(name.trim())) }
     }
     // The names as the server holds them, kept for the mark widget.
-    LaunchedEffect(med) { med?.let { s -> ctx.markNames = (1..3).map { (s["mark_$it"] as? JsonPrimitive)?.contentOrNull.orEmpty() } } }
+    LaunchedEffect(med) {
+        med?.let { s ->
+            val names = (1..3).map { (s["mark_$it"] as? JsonPrimitive)?.contentOrNull.orEmpty() }
+            if (names != ctx.markNames) { ctx.markNames = names; MarkWidget().updateAll(ctx) }
+        }
+    }
 
     // (stored, oldest ts, waiting) of the phone's sample history; re-read on open and after "Send all history".
     var stored by remember { mutableStateOf(Triple(0, 0L, 0)) }

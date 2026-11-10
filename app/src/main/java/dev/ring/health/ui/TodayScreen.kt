@@ -15,6 +15,7 @@ import dev.ring.health.Prefs.notificationAccess
 import dev.ring.health.bookmark
 import dev.ring.health.mark
 import dev.ring.health.Prefs.markNames
+import dev.ring.health.widget.MarkWidget
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import java.time.Instant
@@ -271,7 +272,8 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
         loadMarks()
         Api.settings(ctx)?.let { s ->
             s["medication_time"].str()?.let { medTime = it }; medStarted = s["medication_started"].str()
-            ctx.markNames = (1..3).map { s["mark_$it"].str().orEmpty() }
+            val names = (1..3).map { s["mark_$it"].str().orEmpty() }
+            if (names != ctx.markNames) { ctx.markNames = names; MarkWidget().updateAll(ctx) }
         }
         Api.insights(ctx).obj()?.let { insights = it["kinds"].obj() }
         Api.experiments(ctx).obj()?.let { exp = it["active"].obj() }
