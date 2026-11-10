@@ -125,6 +125,19 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             val battery = collectBattery(conn)
             if (battery != null) onBattery(battery)
 
+            // ── HR log interval ───────────────────────────────────────────
+            // The ring ships logging one reading per 15 min; the backend's workout detection needs one per 5 min.
+            conn.writePacket(ColmiProtocol.hrLogSettingsRequest())
+            val hrLog = withTimeoutOrNull(5_000) {
+                var p: ByteArray
+                do p = conn.notifyV1.receive() while (p.size < 4 || p[0] != ColmiProtocol.CMD_HR_LOG_SETTINGS || p[1].toInt() != 1)
+                p
+            }
+            if (hrLog != null && (hrLog[2].toInt() != 1 || hrLog[3].toInt() != 5)) {
+                conn.writePacket(ColmiProtocol.hrLogEvery5MinRequest())
+                log("Ring: heart rate log set to every 5 min (was ${if (hrLog[2].toInt() == 1) "every ${hrLog[3].toInt() and 0xff} min" else "off"})")
+            }
+
             // ── Heart rate — today + yesterday (deep: 7 days) ─────────────
             val hrSamples = mutableListOf<HrSample>()
             for (daysBack in 0..days) {

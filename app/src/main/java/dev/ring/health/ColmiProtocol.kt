@@ -23,6 +23,7 @@ object ColmiProtocol {
     // ── Command bytes ──────────────────────────────────────────────────────
     const val CMD_BATTERY: Byte           = 0x03
     const val CMD_SYNC_HEART_RATE: Byte   = 0x15
+    const val CMD_HR_LOG_SETTINGS: Byte   = 0x16
     const val CMD_SYNC_STRESS: Byte       = 0x37
     const val CMD_SYNC_HRV: Byte          = 0x39
     const val CMD_SYNC_ACTIVITY: Byte     = 0x43.toByte()
@@ -54,6 +55,10 @@ object ColmiProtocol {
     // ── Request builders ──────────────────────────────────────────────────
 
     fun batteryRequest(): ByteArray = buildPacket(byteArrayOf(CMD_BATTERY))
+
+    // HR log settings. The read answers [0x16, 0x01, enabled (1 on, 2 off), interval minutes]; the write is the Gadgetbridge / tahnok form.
+    fun hrLogSettingsRequest(): ByteArray = buildPacket(byteArrayOf(CMD_HR_LOG_SETTINGS, 0x01))
+    fun hrLogEvery5MinRequest(): ByteArray = buildPacket(byteArrayOf(CMD_HR_LOG_SETTINGS, 0x02, 0x01, 0x05))
 
     // HR history for a given calendar day.
     // Ring treats its internal clock as local-time-as-UTC, so we adjust.
