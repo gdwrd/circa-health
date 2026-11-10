@@ -125,6 +125,16 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             val battery = collectBattery(conn)
             if (battery != null) onBattery(battery)
 
+            // ── Clock ─────────────────────────────────────────────────────
+            // A ring that lost power (or a new one) dates every sample wrong; a missing reply never fails the sync.
+            conn.writePacket(ColmiProtocol.setTimeRequest())
+            val clock = withTimeoutOrNull(5_000) {
+                var p: ByteArray
+                do p = conn.notifyV1.receive() while (p.isEmpty() || p[0] != ColmiProtocol.CMD_SET_DATE_TIME)
+                p
+            }
+            log(if (clock != null) "Ring: clock set" else "Ring: clock set, no reply")
+
             // ── Hardware / firmware version ───────────────────────────────
             // Tells the ring variants apart (R02_V3.0, RY02_V3.0, RT02R_V3.1 ...); logged once per app start.
             if (!ringVersionLogged) {

@@ -24,6 +24,7 @@ object ColmiProtocol {
     val CHAR_HARDWARE_REV: UUID = UUID.fromString("00002a27-0000-1000-8000-00805f9b34fb")
 
     // ── Command bytes ──────────────────────────────────────────────────────
+    const val CMD_SET_DATE_TIME: Byte     = 0x01
     const val CMD_BATTERY: Byte           = 0x03
     const val CMD_SYNC_HEART_RATE: Byte   = 0x15
     const val CMD_HR_LOG_SETTINGS: Byte   = 0x16
@@ -58,6 +59,16 @@ object ColmiProtocol {
     // ── Request builders ──────────────────────────────────────────────────
 
     fun batteryRequest(): ByteArray = buildPacket(byteArrayOf(CMD_BATTERY))
+
+    // Clock: 01 yy MM dd HH mm ss, each BCD, phone local time (Gadgetbridge Yawell form).
+    fun setTimeRequest(): ByteArray {
+        val c = Calendar.getInstance()
+        fun bcd(v: Int): Byte = (((v / 10) shl 4) or (v % 10)).toByte()
+        return buildPacket(byteArrayOf(
+            CMD_SET_DATE_TIME, bcd(c.get(Calendar.YEAR) % 100), bcd(c.get(Calendar.MONTH) + 1), bcd(c.get(Calendar.DAY_OF_MONTH)),
+            bcd(c.get(Calendar.HOUR_OF_DAY)), bcd(c.get(Calendar.MINUTE)), bcd(c.get(Calendar.SECOND)),
+        ))
+    }
 
     // HR log settings. The read answers [0x16, 0x01, enabled (1 on, 2 off), interval minutes]; the write is the Gadgetbridge / tahnok form.
     fun hrLogSettingsRequest(): ByteArray = buildPacket(byteArrayOf(CMD_HR_LOG_SETTINGS, 0x01))
