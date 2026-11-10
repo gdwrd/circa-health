@@ -16,7 +16,36 @@ WORDS = {"resting_hr": "resting heart rate", "hrv_balance": "heart rate variabil
 NOUNS = {"rhr": ("Resting HR", " bpm"), "hrv": ("HRV", " %"), "awake": ("awake time", " min"),
          "spo2": ("blood oxygen", " %"), "temp": ("temperature", " °C")}
 LOGGED = {"alcohol": "alcohol", "workout": "a workout", "sick": "feeling unwell", "travel": "travel",
-          "stress": "stress", "late_meal": "a late meal"}
+          "stress": "stress", "late_meal": "a late meal", "caffeine_late": "late coffee"}
+
+
+def because(day: date, today: date) -> list[dict]:
+    """Night kinds in day's journal (auto rows too) with what insights.kinds (as /journal/insights) says about each:
+    the strong bed_start effect, else the strong sleep_score effect, else None."""
+    start = today - timedelta(insights.DAYS)
+    entries = db.journal(start.isoformat())
+    on = {e["kind"] for e in entries if e["date"] == day.isoformat() and not (e["kind"] == "phone_in_bed" and int(e["value"] or 0) < 20)}
+    if not on & set(insights.NIGHT_KINDS):
+        return []
+    ks = insights.kinds(db.days(start, today), entries, today, {}, db.settings()["medication_started"], db.breaths(start, today))
+    out = []
+    for k in (k for k in insights.NIGHT_KINDS if k in on):
+        strong = [e for e in ks[k].get("all", []) if e["strong"]]
+        eff = next((e for m in ("bed_start", "sleep_score") for e in strong if e["metric"] == m), None)
+        out.append({"kind": k, "status": ks[k]["status"], "need": ks[k].get("need"), "n_with": ks[k]["n_with"], "effect": eff})
+    return out
+
+
+def _because_line(day: date, today: date) -> str:
+    """One sentence for the first logged kind that has an effect, else ''."""
+    for b in because(day, today):
+        e = b["effect"]
+        if e and b["kind"] in LOGGED:
+            n, up = round(abs(e["delta"])), e["delta"] > 0
+            what = f"you fall asleep about {n} min {'later' if up else 'earlier'}" if e["metric"] == "bed_start" \
+                else f"your sleep score is about {n} points {'higher' if up else 'lower'}"
+            return f" After {LOGGED[b['kind']]} {what}."
+    return ""
 
 
 def _now() -> datetime:
@@ -124,7 +153,8 @@ def _bedtime(now: datetime, dates: set[date]) -> None:
                      f"before your {at('wake_min')} alarm.", now)
         elif target - timedelta(minutes=60) <= now < target and not _fired("bedtime", now, noon):
             extra = f" +{round(p['extra_min'])} min tonight to catch up." if p["extra_min"] > 0 else ""
-            _add("bedtime", "Wind down", f"In bed by {at('in_bed_by_min')} to be rested for {at('wake_min')}.{extra}", now)
+            _add("bedtime", "Wind down", f"In bed by {at('in_bed_by_min')} to be rested for {at('wake_min')}.{extra}"
+                 f"{_because_line(noon.date(), d)}", now)
         return
     if _fired("bedtime", now):
         return
@@ -139,7 +169,7 @@ def _bedtime(now: datetime, dates: set[date]) -> None:
         target = noon + timedelta(minutes=median(_after_noon(s) for s in starts))
         title, body = "Bedtime soon", f"Your usual bedtime is {target:%H:%M}."
     if target - timedelta(minutes=30) <= now < target:
-        _add("bedtime", title, body, now)
+        _add("bedtime", title, body + _because_line(noon.date(), d), now)
 
 
 def _stillup(now: datetime, dates: set[date]) -> None:
@@ -266,6 +296,8 @@ def _morning(now: datetime, dates: set[date]) -> None:
         return
     if row["readiness_score"] is not None:
         body += f" · Readiness {row['readiness_score']}"
+    if score is not None and score < 70:
+        body += _because_line(now.date() - timedelta(1), now.date())
     _add("morning", "Last night" + ("" if score is None else f" · Sleep {score}"), body, now, {"open": "sleep"})
 
 
@@ -391,7 +423,7 @@ KINDS = ("readiness", "bedtime", "bedtime_soon", "inactivity", "strain", "checki
 def evaluate(dates: set[date]) -> None:
     now = _now()
     muted = set(db.settings()["muted"].split(","))
-    for rule, kind in ((_readiness, "readiness"), (_bedtime, "bedtime"), (_inactivity, "inactivity"),
+    for rule, kind in ((_bedtime, "bedtime"), (_inactivity, "inactivity"),
                        (_weekly, "weekly"), (_strain, "strain"), (_checkin, "checkin"), (_morning, "morning"),
                        (_monthly, "monthly"), (_stillup, "stillup"), (_experiment, "experiment"),
                        (_workout, "workout"), (_receipt, "receipt")):

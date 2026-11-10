@@ -38,6 +38,11 @@ def seed(d: date, ready: int | None = None, contrib: dict | None = None) -> None
     db.save_day(d, (None, ready, None), {"readiness": contrib, "session": {"start": s.timestamp(), "end": e.timestamp()}}, {})
 
 
+def ready(d: date = D) -> None:
+    """_readiness stays as a function but no longer runs from evaluate."""
+    notify._readiness(notify._now(), {d})
+
+
 def kinds() -> list[str]:
     return [n["kind"] for n in notify.pending()]
 
@@ -45,12 +50,12 @@ def kinds() -> list[str]:
 def test_readiness_once(monkeypatch) -> None:
     seed(D, 82, {"resting_hr": 90.0, "hrv_balance": 40.0, "sleep": None})
     at(monkeypatch, 8)
-    notify.evaluate({D})
-    notify.evaluate({D})
+    ready()
+    ready()
     (n,) = notify.pending()
     assert n["title"] == "Readiness 82" and "heart rate variability" in n["body"] and "Oura" not in n["body"]
     at(monkeypatch, 8, day=D + timedelta(1))
-    notify.evaluate({D})  # no new night scored today
+    ready()  # no new night scored today
     assert kinds() == ["readiness"]
 
 
@@ -60,7 +65,7 @@ def test_readiness_appends_cardio_target(monkeypatch) -> None:
         db.save_day(D - timedelta(i), (None, None, None), {"inputs": {"cardio_load": 10.0}}, {})
     db.set_settings({"birth_year": "1990"})
     at(monkeypatch, 8)
-    notify.evaluate({D})
+    ready()
     (n,) = notify.pending()
     assert n["body"] == "Lowest factor: resting heart rate (90). Cardio target 8–11."
 
@@ -347,14 +352,17 @@ def test_morning_waits_for_scored_night(monkeypatch) -> None:
     assert "morning" in kinds()
 
 
-def test_bedtime_uses_best_window(monkeypatch) -> None:
+def seed_best_window() -> None:
     """14 scored nights: even days in bed 22:00 (quality 90), odd days 23:30 (60) → window 22:00-23:00."""
-    walk()
     for i in range(14):
         d, q = D - timedelta(i), 90.0 if i % 2 == 0 else 60.0
         s = samples.midnight(d - timedelta(1)) + timedelta(hours=22, minutes=0 if i % 2 == 0 else 30 * 3)
         c = {k: q for k in ("total", "efficiency", "restfulness", "rem", "deep")} | {"timing": 0.0, "regularity": 0.0}
         db.save_day(d, (None, None, None), {"sleep": c, "session": {"start": s.timestamp(), "end": s.timestamp() + 8 * 3600}}, {})
+
+
+def test_bedtime_uses_best_window(monkeypatch) -> None:
+    seed_best_window()
     assert notify.bedtime_window(D)["start_min"] == 600
     at(monkeypatch, 21, 20)
     notify.evaluate(set())
@@ -404,14 +412,14 @@ def test_monthly_needs_ten_days(monkeypatch) -> None:
 
 
 def test_muted_kind_skipped_other_still_fires(monkeypatch) -> None:
-    seed(D, 82, {"resting_hr": 90.0})
-    db.set_settings({"muted": "readiness,weekly"})
-    at(monkeypatch, 8)
+    seed_morning()
+    db.set_settings({"muted": "morning,weekly"})
+    at(monkeypatch, 9)
     notify.evaluate({D})
-    assert "readiness" not in kinds()
+    assert "morning" not in kinds()
     db.set_settings({"muted": "bedtime"})
     notify.evaluate({D})
-    assert "readiness" in kinds()
+    assert "morning" in kinds()
 
 
 def test_bad_muted_422() -> None:
@@ -624,12 +632,12 @@ def test_calm_readiness_band_word_no_number(monkeypatch) -> None:
         d = D + timedelta(i)
         seed(d, score, {"resting_hr": 90.0, "hrv_balance": 40.0})
         at(monkeypatch, 8, day=d)
-        notify.evaluate({d})
+        ready(d)
         n = notify.pending()[-1]
         assert (n["kind"], n["title"], n["body"]) == ("readiness", word, "Lowest factor: heart rate variability.")
     seed(d + timedelta(1), 90)  # no contributors
     at(monkeypatch, 8, day=d + timedelta(1))
-    notify.evaluate({d + timedelta(1)})
+    ready(d + timedelta(1))
     assert (notify.pending()[-1]["title"], notify.pending()[-1]["body"]) == ("Ready", "Based on last night's sleep.")
 
 
@@ -670,7 +678,9 @@ def test_guess_readiness_and_morning_carry_no_score_or_band_word(monkeypatch) ->
     seed_morning(86, 93)
     at(monkeypatch, 9)
     notify.evaluate({D})
-    r, m = notify.pending()
+    (m,) = notify.pending()  # one morning notification: no readiness one
+    ready()
+    r = notify.pending()[-1]
     assert (r["kind"], r["title"], r["body"], r["extra"]) == (
         "readiness", "Your scores are in", "Guess first, then see them.", {"open": "today"})
     assert (m["kind"], m["title"], m["body"], m["extra"]) == ("morning", "Last night", "7 h 15 min asleep", {"open": "today"})
@@ -738,3 +748,80 @@ def test_receipt_waits_for_the_guess(monkeypatch) -> None:
     db.add_guess(D, None, 1)  # "Just show me" is an answer too
     notify.evaluate(set())
     assert kinds() == ["receipt"]
+
+
+COFFEE = [{"kind": "caffeine_late", "status": "ok", "need": None, "n_with": 4, "effect": {"metric": "bed_start", "delta": 25.4}}]
+
+
+def because_is(mp: pytest.MonkeyPatch, rows: list[dict]) -> list[tuple[date, date]]:
+    calls: list[tuple[date, date]] = []
+    mp.setattr(notify, "because", lambda day, today: calls.append((day, today)) or rows)
+    return calls
+
+
+def test_because_line_wording_and_first_with_effect(monkeypatch) -> None:
+    eff = lambda kind, metric, delta: {"kind": kind, "status": "ok", "need": None, "n_with": 4,
+                                       "effect": {"metric": metric, "delta": delta}}
+    learning = {"kind": "alcohol", "status": "learning", "need": 2, "n_with": 1, "effect": None}
+    for row, line in ((eff("caffeine_late", "bed_start", 25.4), " After late coffee you fall asleep about 25 min later."),
+                      (eff("alcohol", "bed_start", -14.6), " After alcohol you fall asleep about 15 min earlier."),
+                      (eff("late_meal", "sleep_score", -6.2), " After a late meal your sleep score is about 6 points lower."),
+                      (eff("stress", "sleep_score", 4.0), " After stress your sleep score is about 4 points higher.")):
+        because_is(monkeypatch, [learning, row])  # a kind without an effect is skipped
+        assert notify._because_line(D, D) == line
+    because_is(monkeypatch, [eff("phone_in_bed", "bed_start", 30.0), eff("alcohol", "bed_start", 20.0)])
+    assert notify._because_line(D, D) == " After alcohol you fall asleep about 20 min later."  # no wording for the kind: skipped
+    because_is(monkeypatch, [learning])
+    assert notify._because_line(D, D) == ""
+    because_is(monkeypatch, [])
+    assert notify._because_line(D, D) == ""
+
+
+def test_bedtime_body_gets_the_because_sentence(monkeypatch) -> None:
+    db.set_settings({"wake_weekday": "07:00"})
+    calls = because_is(monkeypatch, COFFEE)
+    at(monkeypatch, 22, 40)
+    notify.evaluate(set())
+    assert bed() == [("bedtime", "Wind down", "In bed by 23:15 to be rested for 07:00. After late coffee you fall asleep about 25 min later.")]
+    assert calls == [(D, D)]  # this evening's journal
+    at(monkeypatch, 23, 25)  # the lights-out one stays as it was
+    notify.evaluate(set())
+    assert bed()[1:] == [("bedtime_soon", "Time for bed", "Lights out by 23:30 — 7 h 30 min before your 07:00 alarm.")]
+
+
+def test_bedtime_fallback_body_gets_the_because_sentence(monkeypatch) -> None:
+    seed_best_window()
+    because_is(monkeypatch, COFFEE)
+    at(monkeypatch, 21, 40)
+    notify.evaluate(set())
+    (n,) = notify.pending()
+    assert n["body"] == "Your best nights start around 22:00. After late coffee you fall asleep about 25 min later."
+
+
+def test_morning_because_only_when_sleep_score_under_70(monkeypatch) -> None:
+    calls = because_is(monkeypatch, COFFEE)
+    for score, want in ((60, "7 h 15 min asleep · Readiness 71 After late coffee you fall asleep about 25 min later."),
+                        (70, "7 h 15 min asleep · Readiness 71"), (None, "7 h 15 min asleep · Readiness 71")):
+        seed_morning(score, 71)
+        at(monkeypatch, 9)
+        notify.evaluate(set())
+        assert notify.pending()[-1]["body"] == want
+        with closing(db.connect()) as con, con:
+            con.execute("DELETE FROM notifications")
+    assert calls == [(D - timedelta(1), D)]  # yesterday's evening, asked only for the 60
+    for s in ({"calm": "1"}, {"guess": "1"}):  # calm and guess-first bodies would give the night away
+        db.set_settings({"calm": "0", "guess": "0"} | s)
+        seed_morning(60, 71)
+        notify.evaluate(set())
+        assert notify.pending()[-1]["body"] == "7 h 15 min asleep"
+        with closing(db.connect()) as con, con:
+            con.execute("DELETE FROM notifications")
+    assert len(calls) == 1
+
+
+def test_one_morning_notification(monkeypatch) -> None:
+    seed_morning(78, 82)
+    at(monkeypatch, 8)
+    notify.evaluate({D})
+    notify.evaluate({D})
+    assert kinds() == ["morning"]

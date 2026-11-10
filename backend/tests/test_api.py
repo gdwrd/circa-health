@@ -925,3 +925,49 @@ def test_moments_derived_auto_rows_now_and_feeling_notes(tmp_path, monkeypatch) 
         j = c.get("/today", headers=H).json()["now"]
         assert (j["dose"], j["dose_end"], j["notes"]) == ("09:50", "17:50",
             {"tired": "Coffee too early.", "flat": "x", "wired": "x", "good": "x"})
+
+
+def seed_nights(d: date, on: set[int], later: bool = True, gap: bool = True) -> None:
+    """20 nights ending d-19..d (offset j = days before d). Offsets in `on` follow a late-coffee evening (the day before):
+    `later` puts them to bed an hour later, `gap` scores them 20 points lower."""
+    for j in range(20):
+        w = d - timedelta(j)
+        hit = j in on
+        if hit:
+            db.add_journal((w - timedelta(1)).isoformat(), "caffeine_late", None, None, j)
+        s = samples.midnight(w) + timedelta(hours=0 if hit and later else -1)
+        sess = {"start": s.timestamp(), "end": s.timestamp() + 7 * 3600, "deep_min": 60, "rem_min": 90, "total_min": 400, "awake_min": 20}
+        db.save_day(w, (60 if hit and gap else 80, None, None), {"session": sess}, {})
+
+
+def test_because_learning_ok_and_nothing_strong() -> None:
+    d = main._today()
+    assert main._because(d) == []  # nothing logged
+    db.add_journal(d.isoformat(), "caffeine_late", None, None, 0)
+    db.add_journal(d.isoformat(), "medication", "08:00", None, 1)  # not a night kind
+    assert main._because(d) == [{"kind": "caffeine_late", "status": "learning", "need": 3, "n_with": 0, "effect": None}]
+    seed_nights(d, {2, 6, 10})
+    (b,) = main._because(d)  # the same insights.kinds call as /journal/insights
+    ins = TestClient(app).get("/journal/insights", headers=H).json()["kinds"]["caffeine_late"]
+    assert (b["kind"], b["status"], b["need"], b["n_with"]) == ("caffeine_late", "ok", None, 3)
+    assert b["effect"] == next(e for e in ins["all"] if e["metric"] == "bed_start") and b["effect"]["delta"] == 60.0
+    seed_nights(d, {2, 6, 10}, later=False)  # same bed time: the sleep score is the strong one
+    assert main._because(d)[0]["effect"]["metric"] == "sleep_score" and main._because(d)[0]["effect"]["delta"] == -20.0
+    seed_nights(d, {2, 6, 10}, later=False, gap=False)
+    assert main._because(d)[0]["status"] == "ok" and main._because(d)[0]["effect"] is None
+    db.add_auto(d.isoformat(), "alcohol")  # auto rows count like any other
+    assert [x["kind"] for x in main._because(d)] == ["alcohol", "caffeine_late"]
+    db.add_journal(d.isoformat(), "phone_in_bed", "5", None, 2)  # a quick check is not phone in bed
+    assert "phone_in_bed" not in [x["kind"] for x in main._because(d)]
+
+
+def test_today_because_today_only() -> None:
+    d = main._today()
+    seed_nights(d, {0, 4, 9})  # yesterday evening is a late-coffee evening
+    with TestClient(app) as c:
+        j = c.get("/today", headers=H).json()["because"]
+        assert j["today"] == [] and [x["kind"] for x in j["yesterday"]] == ["caffeine_late"]
+        assert j["yesterday"][0]["effect"]["metric"] == "bed_start"
+        db.add_journal(d.isoformat(), "alcohol", None, None, 3)
+        assert [x["kind"] for x in c.get("/today", headers=H).json()["because"]["today"]] == ["alcohol"]
+        assert c.get(f"/today?date={d - timedelta(1)}", headers=H).json()["because"] is None

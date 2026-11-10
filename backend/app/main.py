@@ -110,6 +110,10 @@ def _moments(d: date) -> list[dict]:
     return sorted(out, key=lambda x: x["ts"])
 
 
+def _because(d: date) -> list[dict]:
+    return notify.because(d, _today())
+
+
 def _now(d: date) -> dict:
     """The reply card: today's latest dose and window, still hours, and the feeling notes."""
     meds = [e["value"] for e in db.journal(d.isoformat()) if e["kind"] == "medication" and e["date"] == d.isoformat() and e["value"]]
@@ -450,6 +454,7 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
         "vitals": _vitals(),
         "wear": row["c"].get("wear"),
         "moments": _moments(d), "now": _now(d) if d == _today() else None,
+        "because": {"today": _because(d), "yesterday": _because(d - timedelta(1))} if d == _today() else None,
         "signals": {**sig, "status": "learning" if sig["reason"] else "ok", "explain": notify.explain(_today())},
         "inputs": row["inputs"],
         "cardio": {"status": status, "load": row["inputs"].get("cardio_load"),
