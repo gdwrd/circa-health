@@ -54,6 +54,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import java.time.LocalDate
 import java.time.LocalTime
+import java.time.ZoneId
 import kotlin.math.floor
 import kotlin.math.ceil
 import kotlin.math.roundToInt
@@ -83,6 +84,7 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
     var steps by remember { mutableStateOf<Trend?>(null) }
     var journalWorkout by remember { mutableStateOf<Set<String>>(emptySet()) } // dates with a journal "workout"
     var editing by remember { mutableStateOf<JsonObject?>(null) }
+    var adding by remember { mutableStateOf(false) }
     var open by remember { mutableStateOf<Double?>(null) } // start of the expanded workout row
     var refreshing by remember { mutableStateOf(false) }
     suspend fun loadDay() {
@@ -167,7 +169,7 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
                 Triple("In zones", duration(mins), "Time with your heart rate in a zone."),
             )
         }
-        if (workouts.isNotEmpty()) item {
+        item {
             Section("Workouts") {
                 workouts.forEachIndexed { i, w ->
                     if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
@@ -176,11 +178,14 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
                     WorkoutRow(w, isOpen) { open = if (isOpen) null else start }
                     if (isOpen) WorkoutHr(w, hr) { editing = w }
                 }
-                Hairline(Modifier.padding(start = AppSpace.l))
-                Box(Modifier.padding(AppSpace.l)) {
-                    if (date.toString() in journalWorkout) Text("In your journal", style = AppType.footnote, color = c.secondaryLabel)
-                    else TintButton("Add to journal") {
-                        scope.launch { if (Api.addJournal(ctx, date.toString(), "workout") != null) journalWorkout = journalWorkout + date.toString() }
+                if (workouts.isNotEmpty()) Hairline(Modifier.padding(start = AppSpace.l))
+                Column(Modifier.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
+                    TintButton("Add workout") { adding = true }
+                    if (workouts.isNotEmpty()) {
+                        if (date.toString() in journalWorkout) Text("In your journal", style = AppType.footnote, color = c.secondaryLabel)
+                        else TintButton("Add to journal") {
+                            scope.launch { if (Api.addJournal(ctx, date.toString(), "workout") != null) journalWorkout = journalWorkout + date.toString() }
+                        }
                     }
                 }
             }
@@ -195,7 +200,8 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
             title = { Text("What was this?") },
             text = {
                 Column {
-                    (KINDS + ("none" to "Not a workout")).forEach { (k, name) ->
+                    // "none" drops a detected session and deletes one entered by hand
+                    (KINDS + ("none" to if (w["manual"].str() == "true") "Remove" else "Not a workout")).forEach { (k, name) ->
                         Text(
                             name + if (k == cur) "  ✓" else "",
                             style = AppType.body, color = if (k == cur) c.tint else c.label,
@@ -213,6 +219,64 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
             confirmButton = {},
             dismissButton = { TextButton({ editing = null }) { Text("Cancel") } },
         )
+    }
+    if (adding) AddWorkout(date, { adding = false }) { start, end, kind ->
+        val a = Api.addWorkout(ctx, date, start, end, kind)?.get("workouts") as? JsonArray
+        // load before closing (closing cancels this coroutine): the day's journal entry is new
+        if (a != null) { workouts = a.mapNotNull { it.obj() }; load(); adding = false }
+        a != null
+    }
+}
+
+/** Kind, start and end on [date] for a workout the ring missed. [save] returns false to keep the dialog open. */
+@Composable
+private fun AddWorkout(date: LocalDate, onDismiss: () -> Unit, save: suspend (Long, Long, String) -> Boolean) {
+    val c = AppTheme.colors
+    val now = remember { LocalTime.now().withSecond(0).withNano(0) }
+    var kind by remember { mutableStateOf("ride") }
+    var start by remember { mutableStateOf(now.minusMinutes(30)) }
+    var end by remember { mutableStateOf(now) }
+    var picking by remember { mutableStateOf<String?>(null) }
+    var failed by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    AlertDialog(
+        onDismissRequest = onDismiss, containerColor = c.card,
+        title = { Text("Add a workout") },
+        text = {
+            Column {
+                KINDS.forEach { (k, name) ->
+                    Text(
+                        name + if (k == kind) "  ✓" else "", style = AppType.body, color = if (k == kind) c.tint else c.label,
+                        modifier = Modifier.fillMaxWidth().clickable { kind = k }.padding(vertical = AppSpace.m),
+                    )
+                }
+                Hairline()
+                listOf("Start" to start, "End" to end).forEach { (name, t) ->
+                    Row(Modifier.fillMaxWidth().clickable { picking = name }.padding(vertical = AppSpace.m)) {
+                        Text(name, style = AppType.body, modifier = Modifier.weight(1f))
+                        Text(clock(t), style = AppType.body, color = c.tint)
+                    }
+                }
+                Text(
+                    if (failed) "Couldn't save. It must last 5 minutes to 12 hours, and the server must be reachable."
+                    else "Heart rate and load show only what the ring measured in that time.",
+                    style = AppType.footnote, color = c.secondaryLabel,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton({
+                val zone = ZoneId.systemDefault()
+                scope.launch { failed = !save(date.atTime(start).atZone(zone).toEpochSecond(), date.atTime(end).atZone(zone).toEpochSecond(), kind) }
+            }) { Text("Save", color = c.tint) }
+        },
+        dismissButton = { TextButton(onDismiss) { Text("Cancel", color = c.tint) } },
+    )
+    picking?.let { which ->
+        TimePickDialog((if (which == "Start") start else end).toString(), { picking = null }) { hhmm ->
+            LocalTime.parse(hhmm).let { if (which == "Start") start = it else end = it }
+            picking = null
+        }
     }
 }
 
@@ -288,18 +352,19 @@ private fun WorkoutRow(w: JsonObject, open: Boolean, onClick: () -> Unit) {
     val b = clock(w["end"].num() ?: 0.0)
     // "2:10–2:52 PM": drop the start's AM/PM when both share it.
     val span = (if (!a.last().isDigit() && a.takeLast(3) == b.takeLast(3)) a.dropLast(3) else a) + "–" + b
-    val guessed = if (w["confirmed"].str() == "true") "" else " · guessed"
+    // A workout entered by hand has bpm / load only where the ring measured something.
+    val detail = listOfNotNull(
+        span, w["max_bpm"].num()?.let { "max ${it.roundToInt()}" }, w["load"].num()?.let { "load ${it.roundToInt()}" },
+        if (w["manual"].str() == "true") "added by you" else if (w["confirmed"].str() == "true") null else "guessed",
+    ).joinToString(" · ")
     Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = AppSpace.l, top = AppSpace.m, bottom = AppSpace.m), verticalAlignment = Alignment.CenterVertically) {
         Icon(icon, null, tint = c.heart, modifier = Modifier.size(28.dp))
         Column(Modifier.weight(1f).padding(start = AppSpace.m)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("${KINDS.firstOrNull { it.first == kind }?.second ?: "Workout"} · ${duration(w["minutes"].num()?.roundToInt() ?: 0)}", style = AppType.body, modifier = Modifier.weight(1f))
-                Text("avg ${w["avg_bpm"].num()?.roundToInt()} bpm", style = AppType.subhead, color = c.secondaryLabel)
+                w["avg_bpm"].num()?.let { Text("avg ${it.roundToInt()} bpm", style = AppType.subhead, color = c.secondaryLabel) }
             }
-            Text(
-                "$span · max ${w["max_bpm"].num()?.roundToInt()} · load ${w["load"].num()?.roundToInt()}$guessed",
-                style = AppType.footnote, color = c.secondaryLabel,
-            )
+            Text(detail, style = AppType.footnote, color = c.secondaryLabel)
         }
         Icon(
             Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = c.secondaryLabel,
@@ -318,7 +383,8 @@ private fun WorkoutHr(w: JsonObject, hr: List<Pair<Double, Double>>, onRelabel: 
     val name = (KINDS.firstOrNull { it.first == w["kind"].str() }?.second ?: "Workout").lowercase()
     Column(Modifier.padding(bottom = AppSpace.l)) {
         Text(
-            "Heart rate during this $name: avg ${w["avg_bpm"].num()?.roundToInt()} · max ${w["max_bpm"].num()?.roundToInt()} bpm",
+            w["avg_bpm"].num()?.let { "Heart rate during this $name: avg ${it.roundToInt()} · max ${w["max_bpm"].num()?.roundToInt()} bpm" }
+                ?: "The ring recorded no heart rate during this $name.",
             style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l),
         )
         if (xy.isNotEmpty()) {

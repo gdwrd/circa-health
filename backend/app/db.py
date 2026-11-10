@@ -27,6 +27,7 @@ INSERT OR IGNORE INTO settings VALUES('step_goal','8000'),('sleep_need_min','450
   ('medication_time','08:00'),('medication_window_h','8'),('birth_year',''),('low_step_kind','workout'),('muted',''),
   ('wake_weekday',''),('wake_weekend',''),('calm','');
 CREATE TABLE IF NOT EXISTS workout_kind(date TEXT, start INTEGER, kind TEXT, PRIMARY KEY(date, start));
+CREATE TABLE IF NOT EXISTS workout_manual(date TEXT, start INTEGER, "end" INTEGER, kind TEXT, PRIMARY KEY(date, start));
 CREATE TABLE IF NOT EXISTS sleep_override(date TEXT PRIMARY KEY, start INTEGER, "end" INTEGER);
 CREATE TABLE IF NOT EXISTS breath_session(start INTEGER PRIMARY KEY, "end" INTEGER, rounds INTEGER,
   hr_start REAL, hr_end REAL, hr_min REAL, feel_before INTEGER, feel_after INTEGER, stress_before REAL,
@@ -183,6 +184,25 @@ def workout_kinds(d: date) -> dict[int, str]:
 def set_workout_kind(d: date, start: int, kind: str) -> None:
     with closing(connect()) as con, con:
         con.execute("INSERT OR REPLACE INTO workout_kind VALUES(?,?,?)", (d.isoformat(), start, kind))
+
+
+def manual_workouts(d: date) -> list[dict]:
+    """Workouts the user entered by hand for local date d."""
+    return [dict(r) for r in query('SELECT start, "end", kind FROM workout_manual WHERE date=? ORDER BY start',
+                                   (d.isoformat(),))]
+
+
+def add_manual_workout(d: date, start: int, end: int, kind: str) -> None:
+    with closing(connect()) as con, con:
+        con.execute("INSERT OR REPLACE INTO workout_manual VALUES(?,?,?,?)", (d.isoformat(), start, end, kind))
+
+
+def set_manual_workout_kind(d: date, start: int, kind: str) -> bool:
+    """Relabels the manual workout at (d, start), or removes it for kind "none"; False when there is none."""
+    sql, args = ("DELETE FROM workout_manual WHERE date=? AND start=?", (d.isoformat(), start)) if kind == "none" else \
+        ("UPDATE workout_manual SET kind=? WHERE date=? AND start=?", (kind, d.isoformat(), start))
+    with closing(connect()) as con, con:
+        return con.execute(sql, args).rowcount > 0
 
 
 def sleep_override(d: date) -> tuple[int, int] | None:

@@ -341,6 +341,26 @@ def test_cardio_settings_today_and_workout_relabel(tmp_path, monkeypatch) -> Non
         assert r.json()["workouts"] == []  # "not a workout" drops it, and it stays dropped across a rescore
         main._score_day(d)
         assert db.days(d, d)[0]["c"]["workouts"] == []
+
+        # entered by hand at 14:00-14:45 (54 bpm measured): listed as measured, relabelled, then removed
+        m0 = int(m) + 14 * 3600
+        body = {"date": d.isoformat(), "start": m0, "end": m0 + 2700, "kind": "ride"}
+        (w,) = c.post("/workouts", json=body, headers=H).json()["workouts"]
+        assert w == {"start": m0, "end": m0 + 2700, "minutes": 45, "avg_bpm": 54, "max_bpm": 54.0, "load": 0.0,
+                     "kind": "ride", "confirmed": True, "manual": True}
+        assert [e["kind"] for e in db.journal(d.isoformat()) if e["date"] == d.isoformat()] == ["workout"]
+        for bad in (body | {"end": m0 + 60}, body | {"end": m0 + 13 * 3600}, body | {"kind": "none"},
+                    body | {"date": (d - timedelta(1)).isoformat()}, body | {"start": "x"}):
+            assert c.post("/workouts", json=bad, headers=H).status_code == 422, bad
+        r = c.patch("/workouts", json={"date": d.isoformat(), "start": m0, "kind": "walk"}, headers=H)
+        assert [(x["kind"], x["manual"]) for x in r.json()["workouts"]] == [("walk", True)]
+        # one that covers the detected 10:00-10:30 session replaces it (the "none" label on it is lifted first)
+        db.set_workout_kind(d, int(w0), "ride")
+        r = c.post("/workouts", json=body | {"start": int(w0) - 600, "end": int(w0) + 2400}, headers=H)
+        assert [(x["start"], x.get("manual")) for x in r.json()["workouts"]] == [(int(w0) - 600, True), (m0, True)]
+        for s in (int(w0) - 600, m0):
+            r = c.patch("/workouts", json={"date": d.isoformat(), "start": s, "kind": "none"}, headers=H)
+        assert [(x["start"], x.get("manual")) for x in r.json()["workouts"]] == [(int(w0), None)]  # the detected one is back
         assert c.patch("/settings", json={"birth_year": ""}, headers=H).json()["birth_year"] == ""
 
 

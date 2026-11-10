@@ -113,6 +113,10 @@ object Api {
     suspend fun setWorkoutKind(ctx: Context, date: LocalDate, start: Long, kind: String) =
         call(ctx, "/workouts", "PATCH", JsonObject(mapOf("date" to JsonPrimitive(date.toString()), "start" to JsonPrimitive(start), "kind" to JsonPrimitive(kind))).toString()) as? JsonObject
 
+    /** POST /workouts adds a workout entered by hand ([start], [end] in unix s, start on [date]); returns `{workouts: [...]}`, or null on failure. */
+    suspend fun addWorkout(ctx: Context, date: LocalDate, start: Long, end: Long, kind: String) =
+        call(ctx, "/workouts", "POST", JsonObject(mapOf("date" to JsonPrimitive(date.toString()), "start" to JsonPrimitive(start), "end" to JsonPrimitive(end), "kind" to JsonPrimitive(kind))).toString()) as? JsonObject
+
     /** PATCH /sleep overrides the night ending on [date] (unix s); returns GET /sleep, or null on failure. */
     suspend fun setSleep(ctx: Context, date: LocalDate, start: Long, end: Long) =
         call(ctx, "/sleep", "PATCH", JsonObject(mapOf("date" to JsonPrimitive(date.toString()), "start" to JsonPrimitive(start), "end" to JsonPrimitive(end))).toString()) as? JsonObject

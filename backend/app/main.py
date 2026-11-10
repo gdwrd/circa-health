@@ -211,6 +211,14 @@ def _score_day(d: date) -> None:
                 w["kind"], w["confirmed"] = kind, True
                 break
     workouts = [w for w in workouts if w["kind"] != "none"]  # "not a workout": the user dismissed it
+    for m in db.manual_workouts(d):  # entered by hand: replaces a detected session it overlaps; bpm / load only as measured
+        seg = {t: v for t, v in day_hr.items() if m["start"] <= t < m["end"]}
+        workouts = [w for w in workouts if w["end"] <= m["start"] or w["start"] >= m["end"]] + [{
+            "start": m["start"], "end": m["end"], "minutes": (m["end"] - m["start"]) // 60,
+            "avg_bpm": round(mean(seg.values())) if seg else None, "max_bpm": max(seg.values(), default=None),
+            "load": cardio.load(seg, bounds)["load"] if bounds else None, "kind": m["kind"], "confirmed": True,
+            "manual": True}]
+    workouts.sort(key=lambda w: w["start"])
     if any(w["minutes"] >= 20 or w["confirmed"] for w in workouts):  # auto journal row; a manual entry is never touched
         db.add_auto(d.isoformat(), "workout")
     else:
@@ -791,7 +799,20 @@ def patch_workouts(body: dict = Body(...)) -> dict:
     d, start, kind = _day(str(body.get("date"))), body.get("start"), body.get("kind")
     if not isinstance(start, int) or isinstance(start, bool) or kind not in ("walk", "ride", "workout", "none"):
         raise HTTPException(422, "bad start or kind")
-    db.set_workout_kind(d, start, kind)
+    if not db.set_manual_workout_kind(d, start, kind):  # a manual one is relabelled or (kind "none") removed
+        db.set_workout_kind(d, start, kind)
+    _score_day(d)
+    return {"workouts": db.days(d, d)[0]["c"]["workouts"]}
+
+
+@api.post("/workouts")
+def post_workouts(body: dict = Body(...)) -> dict:
+    """A workout entered by hand (5 min to 12 h, starting on `date`): the ring does not see every session."""
+    d, start, end, kind = _day(str(body.get("date"))), body.get("start"), body.get("end"), body.get("kind")
+    if not all(_int(v, 0, 2**32) for v in (start, end)) or not 300 <= end - start <= 12 * 3600 \
+            or kind not in ("walk", "ride", "workout") or _dt(start).date() != d:
+        raise HTTPException(422, "bad start, end or kind")
+    db.add_manual_workout(d, start, end, kind)
     _score_day(d)
     return {"workouts": db.days(d, d)[0]["c"]["workouts"]}
 
