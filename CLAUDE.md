@@ -18,7 +18,7 @@ The plans are `docs/PLAN.md` … `docs/PLAN8.md` (current: `PLAN8.md`); the task
 - Release build (only when the ledger item is a release): `.\gradlew.bat assembleRelease` → `app/build/outputs/apk/release/app-release.apk`, then
   `& "$env:LOCALAPPDATA\Android\Sdk\build-tools\35.0.0\apksigner.bat" verify --print-certs app\build\outputs\apk\release\app-release.apk`.
   Cert SHA-256 must start `3c236b22` (same keystore as v1.0.0 or Android refuses the upgrade).
-- Metric emission pattern: `metrics += Metric(name, labels, value, timestampMs)` in `SyncWorker.buildMetrics`; the `last*Ms` watermark in `Prefs` decides what is new. Follow it.
+- Metric emission pattern: `metrics += Metric(name, labels, value, timestampMs)` in `SyncWorker.buildMetrics`; the `last*Ms` watermark in `Prefs` decides what is new (sleep has none: every session the ring holds is re-sent each sync). Follow it.
 - Phase 2 UI is Jetpack Compose + Material3, restyled to an Apple Health look via `ui/Theme.kt` tokens only (no inline colors); keep `ColmiProtocol`, `ColmiConnection`, `SyncWorker`, `MetricsPusher`, `Prefs` unchanged except what the ledger item names.
 
 ## Python Rules (backend/)

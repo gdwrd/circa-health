@@ -14,10 +14,8 @@ object Prefs {
     private const val KEY_SLEEP_NEED_H    = "sleep_need_h"
     private const val KEY_GOALS_PUSHED    = "goals_pushed"
     private const val KEY_LAST_SYNC_MS    = "last_sync_ms"
-    private const val KEY_LAST_SLEEP_MS   = "last_sleep_ms"
     private const val KEY_LAST_SCREEN_MS  = "last_screen_ms"
     private const val KEY_PHONE_SENSOR    = "phone_sensor"
-    private const val KEY_SLEEP_SCHEMA    = "sleep_schema"
     private const val KEY_SYNC_INTERVAL   = "sync_interval_min"
     private const val KEY_ASKED_BATTERY   = "asked_battery"
     private const val KEY_BATTERY_PCT     = "battery_pct"
@@ -69,10 +67,6 @@ object Prefs {
         get() = prefs(this).getLong(KEY_LAST_SYNC_MS, 0L)
         set(v) = prefs(this).edit().putLong(KEY_LAST_SYNC_MS, v).apply()
 
-    var Context.lastSleepMs: Long
-        get() = prefs(this).getLong(KEY_LAST_SLEEP_MS, 0L)
-        set(v) = prefs(this).edit().putLong(KEY_LAST_SLEEP_MS, v).apply()
-
     /** Newest phone screen on/off event already stored; 0 = never read (first read starts 7 days back). */
     var Context.lastScreenMs: Long
         get() = prefs(this).getLong(KEY_LAST_SCREEN_MS, 0L)
@@ -96,11 +90,6 @@ object Prefs {
     var Context.askedBattery: Boolean
         get() = prefs(this).getBoolean(KEY_ASKED_BATTERY, false)
         set(v) = prefs(this).edit().putBoolean(KEY_ASKED_BATTERY, v).apply()
-
-    // 2 = sleep sessions pushed with awake/end/stage series (v1.1+); 3 = with complete multi-packet stages (v2.0.3).
-    var Context.sleepSchema: Int
-        get() = prefs(this).getInt(KEY_SLEEP_SCHEMA, 0)
-        set(v) = prefs(this).edit().putInt(KEY_SLEEP_SCHEMA, v).apply()
 
     /** Last ring battery level (-1 unknown) and charging state; the two flags make each alert fire once. */
     var Context.lastBatteryPct: Int

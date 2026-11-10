@@ -40,11 +40,9 @@ import dev.ring.health.Prefs.lastBatteryPct
 import dev.ring.health.Prefs.lastCharging
 import dev.ring.health.Prefs.lastDeepSyncDay
 import dev.ring.health.Prefs.lastScreenMs
-import dev.ring.health.Prefs.lastSleepMs
 import dev.ring.health.Prefs.phoneSensor
 import dev.ring.health.Prefs.usageAccess
 import dev.ring.health.Prefs.staleWarned
-import dev.ring.health.Prefs.sleepSchema
 import dev.ring.health.Prefs.syncIntervalMin
 import dev.ring.health.Prefs.todayJson
 import dev.ring.health.Prefs.todayJsonMs
@@ -237,7 +235,6 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
             // ── Compute + push metrics ────────────────────────────────────
             val metrics = buildMetrics(
-                applicationContext,
                 battery, hrSamples, hrvSamples,
                 activitySamples, stressSamples, spo2Samples, sleepSessions
             )
@@ -269,11 +266,6 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             } else {
                 log("Server: pushed $sent samples to $vmUrl (${pusher.lastResult})")
                 runCatching { postPending() }.onSuccess { n -> if (n > 0) log("Server: showed $n notifications") }
-            }
-            if (metrics.isNotEmpty()) {
-                sleepSessions.maxOfOrNull { it.endMs }
-                    ?.let { applicationContext.lastSleepMs = it }
-                applicationContext.sleepSchema = 4
             }
 
             // Widget snapshot (a failed push returned above); plain VM answers /today 404 (null), so the widget keeps "Open to sync".
@@ -438,7 +430,6 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
     }
 
     private fun buildMetrics(
-        ctx: Context,
         battery: BatteryStatus?,
         hrSamples: List<HrSample>,
         hrvSamples: List<HrvSample>,
@@ -451,9 +442,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         val labels  = mapOf("device" to "colmi_r02")
         val nowMs   = System.currentTimeMillis()
 
-        // No watermarks for slot data: whole days are re-sent and VM dedup keeps the larger sample.
-        // Once after an upgrade that changed sleep parsing: re-send the sessions the ring still holds.
-        val lastSleepMs    = if (ctx.sleepSchema < 4) 0L else ctx.lastSleepMs
+        // No watermarks for slot data or sleep: everything the ring holds is re-sent and VM dedup keeps the larger sample.
 
         // ── Battery (always push — instantaneous reading) ─────────────────
         if (battery != null) {
@@ -492,11 +481,9 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             metrics += Metric("biometric_spo2_min_pct", labels, s.min.toDouble(), s.timestampMs)
         }
 
-        // ── Sleep: total + stage breakdown for every new or grown session ──
-        // Watermark is the session END: the ring extends tonight's record (same start) while you sleep,
-        // and VM dedup keeps the larger sample, so re-sending the grown session replaces the stub.
-        val newSessions = sessions.filter { it.endMs > lastSleepMs && it.durationMinutes > 0 }
-        for (s in newSessions) {
+        // ── Sleep: total + stage breakdown for every session the ring holds ──
+        // No watermark: a reply cut off by the timeout loses stages, and only a re-send on a later sync completes the night.
+        for (s in sessions.filter { it.durationMinutes > 0 }) {
             metrics += Metric("biometric_sleep_total_min", labels, s.durationMinutes.toDouble(), s.startMs)
 
             val deepMin  = s.stages.filter { it.stage == SLEEP_DEEP  }.sumOf { it.durationMinutes }
