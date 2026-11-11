@@ -3,6 +3,7 @@ package dev.ring.health.ui
 import android.media.MediaMetadata
 import android.widget.Toast
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.FitnessCenter
 import androidx.compose.material.icons.rounded.Bedtime
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Coffee
@@ -26,9 +27,6 @@ import dev.ring.health.Prefs.notificationAccess
 import dev.ring.health.bookmark
 import dev.ring.health.mark
 import dev.ring.health.Prefs.markNames
-import dev.ring.health.Prefs.showNumbers
-import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
-import androidx.compose.ui.draw.rotate
 import dev.ring.health.widget.MarkWidget
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
@@ -84,6 +82,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.graphicsLayer
@@ -154,8 +153,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.SelfImprovement
-import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -230,23 +227,10 @@ private fun JsonElement?.num() = (this as? JsonPrimitive)?.doubleOrNull
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit, journalDate: String? = null, onJournalOpened: () -> Unit = {}) {
+fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? = null, onJournalOpened: () -> Unit = {}) {
     val haptic = LocalHapticFeedback.current
-    val gear = @Composable {
-        Box(Modifier.size(44.dp).clip(CircleShape).clickable(role = Role.Button) { haptic.tick(); onSettings() }, contentAlignment = Alignment.Center) {
-            Icon(Icons.Rounded.Settings, "Settings", tint = AppTheme.colors.tint, modifier = Modifier.size(24.dp))
-        }
-    }
-    if (backend != true) return PlaceholderTab("Today", backend, gear)
-    // Breathe only with the backend: the session is saved there.
-    val actions = @Composable {
-        Row {
-            Box(Modifier.size(44.dp).clip(CircleShape).clickable(role = Role.Button) { haptic.tick(); onBreathe() }, contentAlignment = Alignment.Center) {
-                Icon(Icons.Rounded.SelfImprovement, "Breathe", tint = AppTheme.colors.tint, modifier = Modifier.size(24.dp))
-            }
-            gear()
-        }
-    }
+    if (backend != true) return PlaceholderTab("Today", backend)
+    // Breathe and the Settings gear both come from LargeTitleScaffold (via LocalOpenBreathe / LocalOpenSettings).
     val ctx = LocalContext.current
     var data by remember { mutableStateOf<JsonObject?>(null) }
     var open by remember { mutableStateOf<String?>(null) }
@@ -255,7 +239,6 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
     var journal by remember { mutableStateOf<List<Entry>>(emptyList()) }
     var medTime by remember { mutableStateOf("08:00") }
     var medStarted by remember { mutableStateOf<String?>(null) }
-    var numbers by remember { mutableStateOf(ctx.showNumbers) }
     var sheet by remember { mutableStateOf(false) }
     var sheetDay by remember { mutableStateOf<Int?>(null) } // 0 Yesterday, 1 Today; null = by time of day
     var insights by remember { mutableStateOf<JsonObject?>(null) }
@@ -306,7 +289,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
     }
 
     val c = AppTheme.colors
-    LargeTitleScaffold("Today", action = actions, refreshing = refreshing, onRefresh = {
+    LargeTitleScaffold("Today", refreshing = refreshing, onRefresh = {
         scope.launch { refreshing = true; try { load() } finally { refreshing = false } }
     }) {
         val d = data ?: return@LargeTitleScaffold
@@ -341,8 +324,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
             return@LargeTitleScaffold
         }
         val said = guess?.get("value").num()?.roundToInt()
-        item { NumbersRow(numbers) { numbers = !numbers; ctx.showNumbers = numbers } }
-        if (numbers) item {
+        item {
             val r = d["readiness"].obj()
             val score = r?.get("score").num()?.roundToInt()
             val mood = when { score == null -> c.moodFair.copy(alpha = 0f); score >= 80 -> c.moodGood; score >= 60 -> c.moodFair; else -> c.moodLow }
@@ -394,10 +376,10 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
                 }
             }
         }
-        if (numbers) item {
+        item {
             InsetCard { SmallRings(d, open?.takeIf { it == "sleep" || it == "activity" }, { open = it }, medStarted) }
         }
-        if (numbers) d["cardio"].obj()?.let { item { CardioLoad(it) } }
+        d["cardio"].obj()?.let { item { CardioLoad(it) } }
         val tonight = d["tonight"].obj()
         val plan = tonight?.get("plan").obj()
         if (LocalTime.now().hour >= 18 && tonight != null && plan != null) item { TonightCard(plan, tonight["bedtime"].obj(), tonight["wind_down_usual"].num(), tonight["what_if"].obj(), becauseEntries(d, "today").mapNotNull(::tonightLine)) }
@@ -420,7 +402,7 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
         d["last_time"].obj()?.takeIf { (it["nights"].num() ?: 0.0) > 0 || it["before"].obj() != null || it["price"].obj()?.get("status").str() == "ok" || it["note"].str() != null }?.let { lt ->
             item { LastTimeCard(lt) { text -> scope.launch { answered(Api.putNote(ctx, lt["key"].str().orEmpty(), text), false) } } }
         }
-        if (numbers) item {
+        item {
             val v = d["vitals"].obj()
             val tiles = listOf("Heart rate" to ("hr" to "bpm"), "HRV" to ("hrv" to "ms"), "SpO₂ · latest" to ("spo2" to "%"), "Ring battery" to ("battery" to "%"))
             var expanded by remember { mutableStateOf<String?>(null) }
@@ -475,41 +457,36 @@ fun TodayScreen(backend: Boolean?, onSettings: () -> Unit, onBreathe: () -> Unit
     if (sheet) CheckInSheet(journal, medTime, scope, sheetDay, data, ::loadJournal) { sheet = false; sheetDay = null }
 }
 
-/** The one row that folds the hero, rings, cardio and vitals; folded by default, kept in `Prefs.showNumbers`. */
-@Composable
-private fun NumbersRow(open: Boolean, onToggle: () -> Unit) {
-    val haptic = LocalHapticFeedback.current
-    val turn by animateFloatAsState(if (open) 90f else 0f, label = "chevron")
-    InsetCard {
-        Row(Modifier.fillMaxWidth().clickable(role = Role.Button) { haptic.tick(); onToggle() }.padding(AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
-            Text("Scores and vitals", style = AppType.headline, modifier = Modifier.weight(1f))
-            Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, if (open) "Collapse" else "Expand", tint = AppTheme.colors.secondaryLabel, modifier = Modifier.rotate(turn))
-        }
-    }
-}
+/** One Day so far line; [color] null = a quiet intake (rounded square), else a disc in that colour, as the Right now tiles. */
+private class DayLine(val t: LocalTime, val title: String, val detail: String?, val icon: ImageVector, val color: Color?)
 
-/** Today's moments, doses and workouts in time order, the day facts as chips, and the way into the check-in sheet. */
+/** Today's moments, doses and workouts as a timeline (icon, name, time), the day facts as chips, and the way into the check-in sheet. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DaySoFar(d: JsonObject, today: List<Entry>, onFix: () -> Unit) {
     val c = AppTheme.colors
     val zone = ZoneId.systemDefault()
     val now = d["now"].obj()
+    val feel = mapOf(
+        "tired" to (Icons.Rounded.Bedtime to c.sleep), "flat" to (Icons.Rounded.HorizontalRule to c.stageCore),
+        "wired" to (Icons.Rounded.Bolt to c.stageAwake), "good" to (Icons.Rounded.WbSunny to c.readiness),
+    )
+    val had = mapOf("coffee" to Icons.Rounded.Coffee, "alcohol" to Icons.Rounded.WineBar, "meal" to Icons.Rounded.Restaurant)
     val lines = (
         today.filter { it.kind == "medication" }.mapNotNull { e ->
             val t = runCatching { LocalTime.parse(e.value.orEmpty()) }.getOrNull() ?: return@mapNotNull null
-            t to "Dose" + (now?.get("dose_end").str()?.takeIf { e.value == now?.get("dose").str() }?.let { " · active until about ${clock(it)}" } ?: "")
+            DayLine(t, "Dose", now?.get("dose_end").str()?.takeIf { e.value == now?.get("dose").str() }?.let { "Active until about ${clock(it)}" }, Icons.Rounded.Medication, null)
         } +
         (d["moments"] as? JsonArray).orEmpty().mapNotNull { it.obj() }.mapNotNull { m ->
             val s = m["ts"].num() ?: return@mapNotNull null
-            Instant.ofEpochSecond(s.toLong()).atZone(zone).toLocalTime() to m["kind"].str().orEmpty().replaceFirstChar { it.uppercase() }
+            val k = m["kind"].str().orEmpty()
+            DayLine(Instant.ofEpochSecond(s.toLong()).atZone(zone).toLocalTime(), k.replaceFirstChar { it.uppercase() }, null, feel[k]?.first ?: had[k] ?: Icons.Rounded.HorizontalRule, feel[k]?.second)
         } +
         (d["workouts"] as? JsonArray).orEmpty().mapNotNull { it.obj() }.mapNotNull { w ->
             val s = w["start"].num() ?: return@mapNotNull null
-            Instant.ofEpochSecond(s.toLong()).atZone(zone).toLocalTime() to
-                (w["kind"].str().orEmpty().replaceFirstChar { it.uppercase() } + (w["minutes"].num()?.roundToInt()?.let { " · $it min" } ?: ""))
+            DayLine(Instant.ofEpochSecond(s.toLong()).atZone(zone).toLocalTime(), w["kind"].str().orEmpty().replaceFirstChar { it.uppercase() }, w["minutes"].num()?.roundToInt()?.let { duration(it) }, Icons.Rounded.FitnessCenter, c.activity)
         }
-    ).sortedBy { it.first }
+    ).sortedBy { it.t }
     val facts = today.filter { it.kind != "medication" && it.kind != "breathe" && it.note != "auto" }
     val yesterday = if (LocalTime.now().hour < 12) becauseEntries(d, "yesterday").mapNotNull { b ->
         val e = b["effect"].obj() ?: return@mapNotNull null
@@ -517,14 +494,54 @@ private fun DaySoFar(d: JsonObject, today: List<Entry>, onFix: () -> Unit) {
         "Yesterday: $what. After it ${effectTail(e)}."
     } else emptyList()
     Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-        Text("Day so far", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
+        Row(Modifier.fillMaxWidth().padding(horizontal = AppSpace.xs), verticalAlignment = Alignment.Bottom) {
+            Text("Day so far", style = AppType.title, modifier = Modifier.weight(1f))
+            if (lines.isNotEmpty()) Text(if (lines.size == 1) "1 moment" else "${lines.size} moments", style = AppType.footnote, color = c.secondaryLabel)
+        }
         InsetCard {
-            Column(Modifier.fillMaxWidth().padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+            Column(Modifier.fillMaxWidth().padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
                 yesterday.forEach { Text(it, style = AppType.subhead) }
-                if (lines.isEmpty() && facts.isEmpty()) Text("Nothing yet today.", style = AppType.subhead, color = c.secondaryLabel)
-                lines.forEach { (t, text) -> Text("${clock(t)} $text", style = AppType.subhead) }
-                if (facts.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                    facts.forEach { JournalChip(it.label()) }
+                if (yesterday.isNotEmpty() && lines.isNotEmpty()) Hairline()
+                if (lines.isEmpty() && facts.isEmpty()) {
+                    Text("Nothing yet today.", style = AppType.body)
+                    Text("Tap a tile in Right now and it shows up here.", style = AppType.footnote, color = c.secondaryLabel)
+                }
+                // Timeline: time | node on a rail | what. No spacing between rows, so the rail runs unbroken.
+                if (lines.isNotEmpty()) Column {
+                    lines.forEachIndexed { i, l ->
+                        Row(
+                            Modifier.fillMaxWidth().height(IntrinsicSize.Min).semantics(mergeDescendants = true) {},
+                            horizontalArrangement = Arrangement.spacedBy(AppSpace.m),
+                        ) {
+                            Text(
+                                clock(l.t), style = AppType.footnote.copy(fontFeatureSettings = "tnum"), color = c.secondaryLabel,
+                                textAlign = TextAlign.End, modifier = Modifier.width(48.dp).padding(top = 5.dp), // 18 sp line centred on the 28 dp node
+                            )
+                            Box(
+                                Modifier.width(28.dp).fillMaxHeight().drawBehind {
+                                    // rail segment from under this node to the next one, with breathing room at both ends
+                                    if (i < lines.lastIndex) drawLine(c.separator, Offset(size.width / 2, 32.dp.toPx()), Offset(size.width / 2, size.height - 4.dp.toPx()), 2.dp.toPx(), StrokeCap.Round)
+                                },
+                                contentAlignment = Alignment.TopCenter,
+                            ) {
+                                Box(
+                                    Modifier.size(28.dp).background((l.color ?: c.secondaryLabel).copy(alpha = 0.14f), if (l.color != null) CircleShape else AppShape.small),
+                                    contentAlignment = Alignment.Center,
+                                ) { Icon(l.icon, null, tint = l.color ?: c.label, modifier = Modifier.size(16.dp)) }
+                            }
+                            Column(Modifier.weight(1f).padding(top = 3.dp, bottom = if (i < lines.lastIndex) AppSpace.l else 0.dp)) {
+                                Text(l.title, style = AppType.headline)
+                                l.detail?.let { Text(it, style = AppType.footnote, color = c.secondaryLabel) }
+                            }
+                        }
+                    }
+                }
+                if (facts.isNotEmpty()) {
+                    if (lines.isNotEmpty()) Hairline()
+                    Text("Also today", style = AppType.footnote, color = c.secondaryLabel)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                        facts.forEach { JournalChip(it.label()) }
+                    }
                 }
                 TintButton("Add or fix the day", Modifier.padding(top = AppSpace.xs)) { onFix() }
             }

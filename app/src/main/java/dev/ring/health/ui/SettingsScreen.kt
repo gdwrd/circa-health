@@ -135,7 +135,7 @@ import kotlin.math.roundToInt
 
 @SuppressLint("MissingPermission")
 @Composable
-fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, onBack: () -> Unit) {
+fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, backTo: String, onBack: () -> Unit) {
     val ctx = LocalContext.current
     val activity = ctx as ComponentActivity
     val c = AppTheme.colors
@@ -303,7 +303,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
 
     LargeTitleScaffold(
         "Settings",
-        back = { Text("‹ Today", style = AppType.headline, color = c.tint, modifier = Modifier.clickable(onClick = onBack).padding(start = AppSpace.xs, bottom = AppSpace.xs)) },
+        back = { Text("‹ $backTo", style = AppType.headline, color = c.tint, modifier = Modifier.clickable(onClick = onBack).padding(start = AppSpace.xs, bottom = AppSpace.xs)) },
     ) {
         item {
             Section("Ring", "Each sync reads new data from the ring and pushes it to the server.") {

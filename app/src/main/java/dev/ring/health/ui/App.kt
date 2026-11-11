@@ -70,7 +70,7 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
         // Re-detect on every tab change so a URL/token edited in Settings takes effect.
         LaunchedEffect(route) { backend = Api.cached(ctx) ?: Api.hasBackend(ctx) }
         fun go(t: TabItem) {
-            // Settings and Breathe sit above Today; pop them first or saveState/restoreState brings them back on the Today tab.
+            // Settings and Breathe sit above a tab; pop them first or saveState/restoreState brings them back on that tab.
             if (nav.currentDestination?.route in setOf("settings", "breathe")) nav.popBackStack()
             nav.navigate(t.route) {
                 popUpTo(nav.graph.findStartDestination().id) { saveState = true }
@@ -102,15 +102,22 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
             },
         ) { inner ->
             // Content runs under the tab bar so the bar can blur it; LargeTitleScaffold pads its list end by this.
-            CompositionLocalProvider(LocalBottomBar provides inner.calculateBottomPadding()) {
+            CompositionLocalProvider(
+                LocalBottomBar provides inner.calculateBottomPadding(),
+                LocalOpenSettings provides { nav.navigate("settings") { launchSingleTop = true } },
+                LocalOpenBreathe provides (if (backend == true) ({ nav.navigate("breathe") { launchSingleTop = true } }) else null),
+            ) {
             NavHost(nav, startDestination = TabItem.Today.route, modifier = Modifier.haze(haze)) {
-                composable(TabItem.Today.route) { TodayScreen(backend, { nav.navigate("settings") }, { nav.navigate("breathe") }, journalDate, onLinkHandled) }
+                composable(TabItem.Today.route) { TodayScreen(backend, { nav.navigate("breathe") }, journalDate, onLinkHandled) }
                 composable(TabItem.Sleep.route) { SleepScreen(backend) }
                 composable(TabItem.Activity.route) { ActivityScreen(backend, link?.takeIf { it.first == "workout" }?.second, onLinkHandled) }
                 composable(TabItem.Body.route) { BodyScreen(backend) }
                 composable(TabItem.Trends.route) { TrendsScreen(backend, link?.first == "month", onLinkHandled) }
                 composable("breathe") { BreatheScreen { nav.popBackStack() } }
-                composable("settings") { SettingsScreen(hasPermissions, requestPermissions) { nav.popBackStack() } }
+                composable("settings") {
+                    val from = TabItem.entries.firstOrNull { it.route == nav.previousBackStackEntry?.destination?.route }?.label ?: "Today"
+                    SettingsScreen(hasPermissions, requestPermissions, from) { nav.popBackStack() }
+                }
             }
             }
         }

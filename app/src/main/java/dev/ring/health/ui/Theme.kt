@@ -39,6 +39,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.CloudOff
+import androidx.compose.material.icons.rounded.Settings as SettingsIcon
+import androidx.compose.material.icons.rounded.SelfImprovement
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.semantics.Role
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -296,6 +300,12 @@ fun HapticFeedback.tick() = performHapticFeedback(HapticFeedbackType.TextHandleM
 /** Height of the tab bar the content scrolls under (App provides it). */
 val LocalBottomBar = compositionLocalOf { 0.dp }
 
+/** Opens Settings (App provides it); LargeTitleScaffold puts a gear on every screen without a back link. */
+val LocalOpenSettings = compositionLocalOf<(() -> Unit)?> { null }
+
+/** Opens Breathe (App provides it, only with the backend); LargeTitleScaffold puts a Breathe button on every screen without a back link. */
+val LocalOpenBreathe = compositionLocalOf<(() -> Unit)?> { null }
+
 object AppTheme {
     val colors: AppColors @Composable get() = LocalColors.current
     /** Blurred bar material: background blur under a lighter tabBar tint (haze falls back to the tint alone). */
@@ -416,6 +426,24 @@ fun LargeTitleScaffold(
     content: LazyListScope.() -> Unit,
 ) {
     val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    val open = LocalOpenSettings.current.takeIf { back == null }
+    val breathe = LocalOpenBreathe.current.takeIf { back == null }
+    val action: (@Composable () -> Unit)? = if (open == null && breathe == null) action else ({
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            action?.invoke()
+            breathe?.let { b ->
+                Box(Modifier.size(44.dp).clip(CircleShape).clickable(role = Role.Button) { haptic.tick(); b() }, contentAlignment = Alignment.Center) {
+                    Icon(Icons.Rounded.SelfImprovement, "Breathe", tint = c.tint, modifier = Modifier.size(24.dp))
+                }
+            }
+            open?.let { o ->
+                Box(Modifier.size(44.dp).clip(CircleShape).clickable(role = Role.Button) { haptic.tick(); o() }, contentAlignment = Alignment.Center) {
+                    Icon(Icons.Rounded.SettingsIcon, "Settings", tint = c.tint, modifier = Modifier.size(24.dp))
+                }
+            }
+        }
+    })
     val state = rememberLazyListState()
     val haze = remember { HazeState() }
     val collapsed by remember {

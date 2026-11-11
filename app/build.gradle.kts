@@ -11,7 +11,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "dev.ring.health"
+        applicationId = "com.nsheremet.circa"
         minSdk = 31          // BLUETOOTH_CONNECT requires API 31
         targetSdk = 35
         versionCode = 40
@@ -51,6 +51,10 @@ android {
     buildFeatures {
         compose = true
     }
+
+    testOptions {
+        unitTests.isIncludeAndroidResources = true // Robolectric
+    }
 }
 
 dependencies {
@@ -70,4 +74,10 @@ dependencies {
     implementation(libs.haze)
     implementation(libs.androidx.glance.appwidget)
     implementation(libs.play.services.location)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.androidx.compose.ui.test.junit4)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 }

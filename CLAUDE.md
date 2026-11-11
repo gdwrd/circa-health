@@ -1,6 +1,6 @@
 # Ring Health Tracker — agent rules
 
-Colmi R02 ring → Android app (`app/`, package `dev.ring.health`) → backend (`/api/v1/import/prometheus`, samples stored in `ring.db`).
+Colmi R02 ring → Android app (`app/`, package `dev.ring.health`, applicationId `com.nsheremet.circa`) → backend (`/api/v1/import/prometheus`, samples stored in `ring.db`).
 The Python backend (`backend/`) serves that import path, stores the samples and computes Sleep / Readiness / Activity scores.
 The plans are `docs/PLAN.md` … `docs/PLAN10.md` (current: `PLAN10.md`); the task ledger is `NEXTSTEPS.md`.
 
@@ -14,7 +14,7 @@ The plans are `docs/PLAN.md` … `docs/PLAN10.md` (current: `PLAN10.md`); the ta
 
 ## Kotlin / Android Rules
 - Kotlin 2.0.21, AGP 8.13.2, minSdk 31, targetSdk 35, JVM 17. Versions go in `gradle/libs.versions.toml`, never inline.
-- Check a change: `.\gradlew.bat :app:compileDebugKotlin` (PowerShell; `./gradlew.bat` from Git Bash). No unit tests exist in the app and none are planned; the compile is the check.
+- Check a change: `.\gradlew.bat :app:compileDebugKotlin` (PowerShell; `./gradlew.bat` from Git Bash). The compile is the main check. The only app tests are Robolectric UI tests in `app/src/test` (`.\gradlew.bat :app:testDebugUnitTest`, JVM, no device); run them when `ui/Theme.kt` or `ui/App.kt` changes.
 - Release build (only when the ledger item is a release): `.\gradlew.bat assembleRelease` → `app/build/outputs/apk/release/app-release.apk`, then
   `& "$env:LOCALAPPDATA\Android\Sdk\build-tools\35.0.0\apksigner.bat" verify --print-certs app\build\outputs\apk\release\app-release.apk`.
   Cert SHA-256 must start `3c236b22` (same keystore as v1.0.0 or Android refuses the upgrade).

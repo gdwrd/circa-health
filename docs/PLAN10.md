@@ -43,7 +43,7 @@ are as of `b2365fc`.
 | Feature | New switch? | How it is turned on or off |
 |---|---|---|
 | Right now, reply card, Day so far | No | Always there; they replace the Journal card |
-| Scores and vitals folded | Remembered toggle | A row on Today, `Prefs.showNumbers`, folded by default |
+| Scores and vitals | No | Always shown on Today; the fold row and `Prefs.showNumbers` were removed 2026-11-11 |
 | Evening / morning reaction | No | Shows only when something was logged |
 | Rides and walks from the phone | Yes, off by default | `Prefs.phoneMoves` plus Android's physical-activity permission |
 | Next alarm | No | No permission; falls back to the wake times in Settings |
@@ -134,16 +134,16 @@ Files: `Marks.kt`, `ui/TodayScreen.kt`, `widget/MarkWidget.kt`, `ui/Api.kt` (onl
 
 ### RN3 App: Day so far, numbers folded
 
-Files: `ui/TodayScreen.kt`, `Prefs.kt` (`showNumbers`).
+Files: `ui/TodayScreen.kt`, `Prefs.kt` (`showNumbers`, removed 2026-11-11).
 
 - `DaySoFar` replaces the Journal item (`:435`): today's moments, doses and workouts in time order, one line each
   ("08:05 Dose · active until about 16:05", "15:10 Coffee", "17:32 Tired", "18:10 Ride · 20 min"), the day facts
   logged today as chips under them, and "Add or fix the day" opening the existing `CheckInSheet` (unchanged: it is
   where yesterday and the day facts are logged). Empty state: "Nothing yet today."
-- Hero, small rings, cardio and vitals sit behind one row, "Scores and vitals", folded by default, remembered in
-  `Prefs.showNumbers`. The guess gate, Body signals, Last time, Tonight and the rest stay where they are.
+- Hero, small rings, cardio and vitals are always shown after the guess gate. The "Scores and vitals" fold row and
+  `Prefs.showNumbers` were removed 2026-11-11 (user: always visible). The guess gate, Body signals, Last time, Tonight and the rest stay where they are.
 - `MarkCard` stays for a named thing; with none named it shows nothing, as today.
-- Check: compile; emulator as RN2, plus folded / unfolded across an app restart, the guess gate with the fold.
+- Check: compile; emulator as RN2.
 
 ### EV1 Backend: because, one morning notification
 
