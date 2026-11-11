@@ -1,6 +1,6 @@
-# Ring Health Tracker — agent rules
+# Circa — agent rules
 
-Colmi R02 ring → Android app (`app/`, package `dev.ring.health`, applicationId `com.nsheremet.circa`) → backend (`/api/v1/import/prometheus`, samples stored in `ring.db`).
+Colmi R02 ring → Android app (`app/`, package `com.nsheremet.circa`, applicationId `com.nsheremet.circa`) → backend (`/api/v1/import/prometheus`, samples stored in `circa.db`).
 The Python backend (`backend/`) serves that import path, stores the samples and computes Sleep / Readiness / Activity scores.
 The plans are `docs/PLAN.md` … `docs/PLAN10.md` (current: `PLAN10.md`); the task ledger is `NEXTSTEPS.md`.
 
@@ -30,7 +30,7 @@ The plans are `docs/PLAN.md` … `docs/PLAN10.md` (current: `PLAN10.md`); the ta
 
 ## Infra
 - Compose file: `infra/docker-compose.yml`; `.env` next to it (gitignored), `infra/.env.example` is the template.
-- Check: `docker compose -f infra/docker-compose.yml config -q` (export `API_TOKEN=x` first). Local stack: `docker compose -f infra/docker-compose.yml up -d --build`; backend `:8429` only. Backup = copy `ring.db` (`docker cp ring-backend:/data/ring.db .`).
+- Check: `docker compose -f infra/docker-compose.yml config -q` (export `API_TOKEN=x` first). Local stack: `docker compose -f infra/docker-compose.yml up -d --build`; backend `:8429` only. Backup = copy `circa.db` (`docker cp circa-backend:/data/circa.db .`).
 - Homelab deploy: `scp` changed dirs to `d0p3@192.168.0.104:~/ring-health/`, then `ssh d0p3@192.168.0.104 "cd ~/ring-health/infra && docker compose up -d --build"`. Never `docker compose down -v` (deletes 10 y of ring data).
 - Never regenerate committed data or re-import history as a check.
 

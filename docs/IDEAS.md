@@ -24,14 +24,14 @@ Code facts below come from the ledger and `docs/PLAN8.md`, not from reading the 
     `infra/.env`.
   - Inputs that exist: the newest `biometric_hr_bpm > 0` sample (worn), phone screen events (only when "Phone as sleep
     sensor" is on), the usual wake time from the stored `inputs.bed_end`.
-  - A second person = a second backend container with its own `ring.db` (labels are dropped, so one database cannot
+  - A second person = a second backend container with its own `circa.db` (labels are dropped, so one database cannot
     hold two people). No multi-user change.
 - **Risks / open questions:**
   - A dead ring battery, a phone that is off, or no route from the phone to the homelab all look the same as trouble.
     The ladder (ask the wearer first, wait, then one message worded like "no data since 07:10, may be nothing") is the
     feature; without it the contact learns to ignore the alerts.
   - The ask-first step fails when the phone is the thing that is off; the backend must still escalate after the wait.
-  - Margin and wait are unknown: pick them from the real spread of morning sync times in ring.db, not by guess.
+  - Margin and wait are unknown: pick them from the real spread of morning sync times in circa.db, not by guess.
   - Copy never diagnoses and never says "emergency".
 
 ## Who woke whom: two rings in one bed
@@ -45,7 +45,7 @@ Code facts below come from the ledger and `docs/PLAN8.md`, not from reading the 
   ring costs about $20.
 - **Prior art found:** none for attributing one partner's wake-ups to the other.
 - **What it needs here:**
-  - A second ring, a second phone with the app, a second backend container with its own `ring.db` (as above).
+  - A second ring, a second phone with the app, a second backend container with its own `circa.db` (as above).
   - One read path across the two: an endpoint on one backend that fetches the other's nights (`httpx`, a second token),
     or one process that opens both databases read-only.
   - Inputs that exist per person: sleep stage points with timestamps (awake = wire stage 4, ledger BG1) and sleep debt.

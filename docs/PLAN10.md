@@ -1,4 +1,4 @@
-# Ring Health v10: a helper, not a tracker
+# Circa v10: a helper, not a tracker
 
 Status: plan (user direction, 2026-11-10), in the ledger since 2026-11-10 as "Active Task: v10": each `###` item below
 is one ledger item / one session. `docs/PLAN.md` … `PLAN9.md` stay the references for what already exists. Line numbers
@@ -11,7 +11,7 @@ are as of `b2365fc`.
   available, one tap away. Not wanted: praise, scores as goals, streaks.
 - What triggered it: tired at 17:30 at the office with nowhere obvious to say so (the journal is a per-day checkbox,
   "Things to mark" needs naming in Settings first), and a 18:10–18:30 ride home the app never saw.
-- Measured that day (homelab ring.db, read-only):
+- Measured that day (homelab circa.db, read-only):
   - The ring read 87, 53, 95, 60, 84 bpm during the ride. The sensor fails on handlebars; no threshold fixes that.
   - Calories are steps × about 8 in every hour (84 → 749, 351 → 2867, 926 → 7338): the ring's movement data is a step
     count and nothing else. The ride hour looked like a short walk.
@@ -179,7 +179,7 @@ Files: `ui/TodayScreen.kt`, `ui/SettingsScreen.kt`.
 
 ### R38 Release v3.19.0 + homelab deploy
 
-R18's pattern: ring.db backup, backend deploy, `assembleRelease`, cert `3c236b22`, push, GitHub release.
+R18's pattern: circa.db backup, backend deploy, `assembleRelease`, cert `3c236b22`, push, GitHub release.
 
 ## Phase 2: the phone as a sensor (release R39, v3.20.0)
 
@@ -243,7 +243,7 @@ Files: `SyncWorker.kt` (one metric beside the screen events), `notify.py`, `test
 - **SL1 What comes before a tired tap** (gate: 3 days with a tired tap; 5 with a dose as well). `insights.before`
   over tired days ("On tired days you slept 50 min less"), and the median time from dose to tired tap ("Your tired
   taps fall about 9 h 30 min after the dose"), shown on the reply card.
-- **SL2 Heads-up before the slump** (gate: 6 tired days in the real ring.db). `notify._slump`: 30 min before the
+- **SL2 Heads-up before the slump** (gate: 6 tired days in the real circa.db). `notify._slump`: 30 min before the
   usual time, counted from the dose when one is logged, from the clock otherwise; the body is your own note. It
   takes MM4's place for feelings; MM4 stays as written for named things.
 

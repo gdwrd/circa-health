@@ -1,4 +1,4 @@
-# Ring Health v7: experiments, calm, and the things other rings don't do
+# Circa v7: experiments, calm, and the things other rings don't do
 
 Status: plan (user direction, 2026-11-09). Not yet in the ledger: each `###` item below is one ledger item / one
 session. `docs/PLAN.md` … `PLAN7.md` stay the references for what already exists.

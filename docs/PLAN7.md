@@ -1,4 +1,4 @@
-# Ring Health v5.5: Breathe (4-7-8) + explanations
+# Circa v5.5: Breathe (4-7-8) + explanations
 
 Status: plan (user direction, 2026-11-09). Ledger items live in `NEXTSTEPS.md` under "Active Task: v5.5"; this file
 holds the detail each item points to. `docs/PLAN.md` … `PLAN6.md` stay the references for what already exists.
@@ -165,7 +165,7 @@ holds the detail each item points to. `docs/PLAN.md` … `PLAN6.md` stay the ref
 ### R11 Release v3.8.0 "Breathe"
 
 - versionCode 19 / 3.8.0; release build + `apksigner` cert `3c236b22`; emulator install -r over v3.7.0, 20 flings on
-  Today + open Breathe, crash buffer empty. Homelab: back up `ring.db` inside the volume as R10 did, redeploy
+  Today + open Breathe, crash buffer empty. Homelab: back up `circa.db` inside the volume as R10 did, redeploy
   `backend/` (G1; the index migration runs at start), smoke `/health`, `POST /breathe` 422, `/hr?date=` has `breaths`,
   `/today` 200. `git push`, GitHub release with the APK.
 
@@ -186,7 +186,7 @@ they are sequential; G2 can compile against the shapes above before G1 is deploy
   `liveHrStartRequest()` when no packet arrives for 5 s (one line in the loop); if it refuses while the SyncWorker is
   connected, the Begin guard shows the existing "ring may be busy" line.
 - Stress before/after rests on two ring samples each side (30 min grid); say "in the hour after", never "immediately".
-- The journal unique-index migration touches a live table on the homelab: back up `ring.db` first (R11 does).
+- The journal unique-index migration touches a live table on the homelab: back up `circa.db` first (R11 does).
 - `SelfImprovement` / `Sentiment*` icons must exist in `material-icons-extended`; fall back to `Spa` and to five
   numbered circles if not.
 - Sleep effects need weeks of sessions; the insights card's learning state covers this and nothing else is shown.

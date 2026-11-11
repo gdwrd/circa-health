@@ -1,4 +1,4 @@
-# Ring Health v3: insight features + a design with character
+# Circa v3: insight features + a design with character
 
 Status: plan (user-approved direction, 2026-11-08). Ledger items live in `NEXTSTEPS.md` under
 "Active Task: v3"; this file holds the detail each item points to. `docs/PLAN.md` (v2) stays the
@@ -123,7 +123,7 @@ Files: `backend/app/notify.py`, `backend/tests/test_notify.py`, `app/.../SyncWor
   (`open`, `date`); `MainActivity` hands the intent extras to `App`, which starts on Today with the sheet open on
   that date. Also used by the weekly notification later (`open=trends`).
 - Check: pytest (fires once, not when an entry exists, not outside the window); compile; emulator: launch with
-  `adb shell am start -n dev.ring.health/.MainActivity --es open journal --es date 2026-11-07` opens the sheet.
+  `adb shell am start -n com.nsheremet.circa/.MainActivity --es open journal --es date 2026-11-07` opens the sheet.
 
 ---
 
@@ -370,7 +370,7 @@ Files: `ui/SleepScreen.kt`, `ui/HeartScreen.kt`, `ui/StressScreen.kt`, `ui/Setti
 ### Release R3 — v3.0.0 "Design"
 `versionCode 10`, `3.0.0`; release + homelab unchanged (backend did not change in D). Before building, the orchestrator
 runs through all six tabs on the emulator in light and dark and looks for clipping, unreadable contrast and missing
-tokens (`grep -n "Color(0x" app/src/main/java/dev/ring/health/ui/*.kt` must only hit `Theme.kt`).
+tokens (`grep -n "Color(0x" app/src/main/java/com/nsheremet/circa/ui/*.kt` must only hit `Theme.kt`).
 
 ---
 
@@ -437,9 +437,9 @@ head at the top-right, where a small gap and a dot sit — the same gesture as t
   backgrounds; the user picks one before the ledger item runs.
 
 Implementation (ledger F1):
-- `applicationId` stays `dev.ring.health` so installs upgrade in place; `app_name` → "Circa", launcher label, `README`
+- `applicationId` stays `com.nsheremet.circa` so installs upgrade in place; `app_name` → "Circa", launcher label, `README`
   title ("Circa — self-hosted health for the Colmi ring"), GitHub release titles from the next release on, the
-  notification channel name, `Theme.RingHealthTracker` style name unchanged (not user-visible). The GitHub repo may be
+  notification channel name, `Theme.Circa` style name unchanged (not user-visible). The GitHub repo may be
   renamed later by the user (GitHub redirects the old URL).
 - **Adaptive icon**: `res/mipmap-anydpi-v26/ic_launcher.xml` with a vector foreground (`res/drawable/ic_launcher_fg.xml`),
   a flat background colour, and a `monochrome` layer so Android 13+ themed icons work; legacy `mipmap-*/ic_launcher.png`

@@ -13,5 +13,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "RingHealthTracker"
+rootProject.name = "Circa"
 include(":app")

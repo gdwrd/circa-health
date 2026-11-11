@@ -49,8 +49,8 @@ jobs:
               exit 1
               ;;
           esac
-          cp "$apk" "ring-health-${GITHUB_REF_NAME}.apk"
+          cp "$apk" "circa-${GITHUB_REF_NAME}.apk"
       - uses: softprops/action-gh-release@v2
         with:
-          files: ring-health-${{ github.ref_name }}.apk
+          files: circa-${{ github.ref_name }}.apk
           generate_release_notes: true

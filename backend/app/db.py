@@ -41,20 +41,20 @@ CREATE TABLE IF NOT EXISTS note(key TEXT PRIMARY KEY, text TEXT, ts INTEGER);
 
 
 def connect() -> sqlite3.Connection:
-    con = sqlite3.connect(os.environ.get("DB_PATH", "/data/ring.db"))
+    con = sqlite3.connect(os.environ.get("DB_PATH", "/data/circa.db"))
     con.row_factory = sqlite3.Row
     return con
 
 
-BACKUP = re.compile(r"ring-(\d{4}-\d{2}-\d{2})\.db")
+BACKUP = re.compile(r"(?:circa|ring)-(\d{4}-\d{2}-\d{2})\.db")  # ring- alternative keeps pre-Circa backups pruned
 BACKUP_LOCK = threading.Lock()  # concurrent rescores share the .tmp file
 
 
 def backup() -> None:
-    """Dated copy of ring.db next to it; keeps 14 days, judged by the date in the name (other files are never touched)."""
-    folder = Path(os.environ.get("DB_PATH", "/data/ring.db")).parent / "backups"
+    """Dated copy of circa.db next to it; keeps 14 days, judged by the date in the name (other files are never touched)."""
+    folder = Path(os.environ.get("DB_PATH", "/data/circa.db")).parent / "backups"
     today = datetime.now(samples.tz()).date()
-    target = folder / f"ring-{today.isoformat()}.db"
+    target = folder / f"circa-{today.isoformat()}.db"
     with BACKUP_LOCK:
         if not target.exists():
             folder.mkdir(exist_ok=True)
@@ -72,7 +72,21 @@ KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "sick", "travel", "
 TAG_ALIASES = {"caffeine": "caffeine_late"}
 
 
+def _adopt_old_db() -> None:
+    """Move the pre-Circa database (and its journal, if any) to the new name; an existing new DB is never touched."""
+    new = Path(os.environ.get("DB_PATH", "/data/circa.db"))
+    old = new.parent / "ring.db"
+    if new.exists() or not old.exists():
+        return
+    # journal first so a crash between the renames is recoverable
+    journal = new.parent / "ring.db-journal"
+    if journal.exists():
+        journal.rename(new.parent / f"{new.name}-journal")
+    old.rename(new)
+
+
 def init() -> None:
+    _adopt_old_db()
     with closing(connect()) as con, con:
         con.executescript(SCHEMA)
         if "extra" not in {r[1] for r in con.execute("PRAGMA table_info(notifications)")}:

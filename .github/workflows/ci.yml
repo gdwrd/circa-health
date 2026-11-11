@@ -38,4 +38,4 @@ jobs:
       - run: pip install -r backend/requirements.txt
       - run: python -m compileall -q backend/app
       - run: python -m pytest backend/tests -q
-      - run: docker build -t ring-backend:ci backend
+      - run: docker build -t circa-backend:ci backend

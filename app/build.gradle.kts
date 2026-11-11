@@ -7,7 +7,7 @@ plugins {
 }
 
 android {
-    namespace = "dev.ring.health"
+    namespace = "com.nsheremet.circa"
     compileSdk = 35
 
     defaultConfig {

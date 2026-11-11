@@ -1,4 +1,4 @@
-# Ring Health v9: guess first, drive check, last time, hold my place, mark the moment
+# Circa v9: guess first, drive check, last time, hold my place, mark the moment
 
 Status: plan (user direction, 2026-11-10), in the ledger since 2026-11-10 as "Active Task: v9": each `###` item below
 is one ledger item / one session. `docs/PLAN.md` … `PLAN8.md` stay the references for what already exists. Two more ideas from the same
@@ -41,7 +41,7 @@ general "Labs" screen: every switch is a second state to check by hand, and the 
 ## What exists (do not rebuild)
 
 - Backend settings: defaults in the `INSERT OR IGNORE` of `db.SCHEMA` (`db.py:26`, runs on every start, so a new key
-  appears on an existing ring.db), `_settings_out` (`main.py:750`), validators in `SETTINGS` (`main.py:778`).
+  appears on an existing circa.db), `_settings_out` (`main.py:750`), validators in `SETTINGS` (`main.py:778`).
   `calm` is the model for `guess`: `/today.calm`, `notify.py:59` and `:254`, the widget (`RingWidget.kt:87`).
 - Per day, `daily.contributors` holds `inputs`, `session` (`start`, `end`, `total_min` = minutes asleep, `awake_min`…),
   `sleep_extra.naps` (`start`, `end`, `total_min`), `signals` (`index`, `level`: calm under 25, elevated to 50, high
@@ -292,7 +292,7 @@ reduce-motion. What was not checked goes in the ledger line.
   and a `ChevronRow("Notification access", "Off")`, as the usage-access rows do. Off deletes the log. Footer gains:
   "Hold my place shows where in a podcast or audiobook you fell asleep. Android calls the permission notification
   access; Circa only uses it to see what is playing and never reads your notifications."
-- Check: compile; emulator: `adb shell cmd notification allow_listener dev.ring.health/dev.ring.health.PlaybackListener`,
+- Check: compile; emulator: `adb shell cmd notification allow_listener com.nsheremet.circa/com.nsheremet.circa.PlaybackListener`,
   play something long in any player, read the lines with `run-as`. If no emulator player publishes a duration, that
   part moves to the real phone.
 
@@ -362,7 +362,7 @@ reduce-motion. What was not checked goes in the ledger line.
 
 ### R36 Release v3.22.0 "Mark the moment" + homelab deploy
 
-### MM4 Heads-up notification (later: only after one thing has 6 marked days in the real ring.db)
+### MM4 Heads-up notification (later: only after one thing has 6 marked days in the real circa.db)
 
 - `notify._mark`, kind `mark` (`KINDS`; `NOTIFY_KINDS` "Marked things"): on a morning that looks like the pattern,
   when `hits / alike` is 1 in 3 or more and `alike` is 6 or more (starting guesses, mine; set them from the real

@@ -1,4 +1,4 @@
-# Ring Health v2: Oura-style app + scoring backend
+# Circa v2: Oura-style app + scoring backend
 
 ## Context
 
@@ -21,7 +21,7 @@ ring ──BLE──▶ Android app ──POST /api/v1/import/prometheus──�
 ```
 
 - **Backend speaks the VictoriaMetrics import path.** The app already POSTs Prometheus text to
-  `$baseUrl/api/v1/import/prometheus` ([MetricsPusher.kt:50](app/src/main/java/dev/ring/health/MetricsPusher.kt:50)).
+  `$baseUrl/api/v1/import/prometheus` ([MetricsPusher.kt:50](app/src/main/java/com/nsheremet/circa/MetricsPusher.kt:50)).
   The backend implements the same path, forwards the body verbatim to VM, and marks the touched dates for
   rescoring. "No backend" mode = the user points the app at VM directly; nothing else changes. The app
   detects backend presence by `GET $baseUrl/today` returning 200 vs 404.
@@ -36,7 +36,7 @@ ring ──BLE──▶ Android app ──POST /api/v1/import/prometheus──�
 ## Phase 1 — data gaps + backend + Grafana scores (implement first)
 
 ### 1a. App v1.1: emit what scoring needs (small change, same keystore)
-In `SyncWorker.buildMetrics` sleep section ([SyncWorker.kt:336-345](app/src/main/java/dev/ring/health/SyncWorker.kt:336)):
+In `SyncWorker.buildMetrics` sleep section ([SyncWorker.kt:336-345](app/src/main/java/com/nsheremet/circa/SyncWorker.kt:336)):
 - `biometric_sleep_awake_min` (stage `SLEEP_AWAKE` already parsed, never emitted)
 - `biometric_sleep_end_ts` (value = `endMs/1000`, timestamp = `startMs`) so timing/efficiency are computable
 - `biometric_sleep_stage{...}` state series: one sample per stage segment, value 1 light / 2 deep / 3 REM / 4 awake
@@ -105,7 +105,7 @@ Backend also writes `score_sleep`, `score_readiness`, `score_activity`, `stress_
 - README: new architecture diagram, backend section, "point the app at the backend (8429) or at VM (8428)".
 - Deploy to homelab (`~/ring-health`), set token in `.env`, `docker compose up -d --build`.
 
-## Phase 2 — new Android UI (same package `dev.ring.health`, so v1 users upgrade in place)
+## Phase 2 — new Android UI (same package `com.nsheremet.circa`, so v1 users upgrade in place)
 - Jetpack Compose + Material3 (add `org.jetbrains.kotlin.plugin.compose` 2.0.21, compose BOM, navigation-compose,
   Vico for charts, kotlinx-serialization for JSON). Keep `ColmiProtocol`, `ColmiConnection`, `SyncWorker`,
   `MetricsPusher`, `Prefs` unchanged except: `Prefs` gains `apiToken`; `MetricsPusher` sends the bearer header when set.

@@ -1,4 +1,4 @@
-# Ring Health v5.4: Activity tab + five-tab bar
+# Circa v5.4: Activity tab + five-tab bar
 
 Status: plan (user direction, 2026-11-09). Ledger items live in `NEXTSTEPS.md` under "Active Task: v5.4"; this file
 holds the detail each item points to. `docs/PLAN.md`, `PLAN3.md`, `PLAN4.md`, `PLAN5.md` stay the references for what
@@ -112,7 +112,7 @@ already exists; nothing in them is re-derived here.
 ### R10 Release v3.7.0 "Activity"
 
 - versionCode 18 / 3.7.0; release build + `apksigner` cert `3c236b22`; emulator install -r over v3.6.0, 20 flings on
-  Today and Activity, crash buffer empty. Homelab: back up `ring.db` inside the volume as R9 did, redeploy `backend/`
+  Today and Activity, crash buffer empty. Homelab: back up `circa.db` inside the volume as R9 did, redeploy `backend/`
   (A1), smoke `/health`, `/activity`, `/activity?date=bad` 422, `/today` 200. `git push`, GitHub release with the APK.
 
 ## Ledger order and parallelism

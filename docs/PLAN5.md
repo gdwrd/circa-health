@@ -1,4 +1,4 @@
-# Ring Health v5: load, recovery and the long view
+# Circa v5: load, recovery and the long view
 
 Status: plan (user direction, 2026-11-09). Ledger items live in `NEXTSTEPS.md` under "Active Task: v5"; this file holds
 the detail each item points to. `docs/PLAN.md` (scores), `docs/PLAN3.md` (journal, signals, design) and `docs/PLAN4.md`
@@ -271,7 +271,7 @@ New group order, each a `Section` with a one-sentence footer; rows keep the exis
 
 ### R6 Release v3.3.0 "Load & recovery"
 - versionCode 13 / 3.3.0; same keystore (cert `3c236b22`); `install -r` over v3.2.0 on Pixel_9a; 20 fast flings on
-  Today, Settings and Trends with the month card open, crash buffer empty. Homelab backend redeploy (backup `ring.db`
+  Today, Settings and Trends with the month card open, crash buffer empty. Homelab backend redeploy (backup `circa.db`
   first, never `down -v`; `scp` only the dirs that changed since v3.2.0), smoke `/health`, `/today` (has `cardio`,
   `tonight`), `/sleep` (has `debt`, `bedtime`), `/month`, `/settings` (has `birth_year`, `low_step_kind`, `muted`) 200.
 - Then, as the user asked: `git push origin main`, `gh release create v3.3.0 ring-health-v3.3.0.apk --target main

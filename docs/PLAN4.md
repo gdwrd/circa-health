@@ -1,4 +1,4 @@
-# Ring Health v4: day history + ring notifications
+# Circa v4: day history + ring notifications
 
 Status: plan (user direction, 2026-11-08). Ledger items live in `NEXTSTEPS.md` under "Active Task: v4";
 this file holds the detail each item points to. `docs/PLAN.md` (scores) and `docs/PLAN3.md` (journal, signals,
@@ -108,12 +108,12 @@ design) stay the references for what already exists; nothing in them is re-deriv
 - Timing caveat (accepted): the notification lands at the first sync ≥ 30 min after wake — up to one sync
   interval late — and only once the ring has reported the finished night and the backend has rescored it. The app
   posts pending notifications right after its own push; if the rescore has not finished, it arrives next sync.
-- Check: backend suite green; `compileDebugKotlin`; `adb shell am start -n dev.ring.health/.MainActivity --es open sleep`
+- Check: backend suite green; `compileDebugKotlin`; `adb shell am start -n com.nsheremet.circa/.MainActivity --es open sleep`
   opens the Sleep tab cold + warm.
 
 ## Phase R
 
 ### R5 Release v3.2.0 "Day history + ring alerts"
 - versionCode 12 / 3.2.0; same keystore (cert `3c236b22`); `install -r` over v3.1.0 on Pixel_9a; 20 fast flings on
-  Heart with the picker, crash buffer empty. Homelab backend redeploy (backup `ring.db` first, never `down -v`), smoke
+  Heart with the picker, crash buffer empty. Homelab backend redeploy (backup `circa.db` first, never `down -v`), smoke
   `/health`, `/hr?date=`, `/stress?date=`, `/today?date=`, `/sleep?date=` 200. Push + `gh release create` are the user's.

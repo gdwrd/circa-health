@@ -1,7 +1,7 @@
-"""One-off: copy every VictoriaMetrics sample into ring.db `samples`, then rescore the last 60 days on a copy.
+"""One-off: copy every VictoriaMetrics sample into circa.db `samples`, then rescore the last 60 days on a copy.
 
 Run next to the `app` package: `python migrate_vm.py` (env: VM_URL, DB_PATH, TZ). Safe to re-run (larger value wins).
-Only `samples` is written to the live ring.db; the rescore happens on a temp copy and its diffs are printed.
+Only `samples` is written to the live circa.db; the rescore happens on a temp copy and its diffs are printed.
 """
 import json
 import math
@@ -68,12 +68,12 @@ def report(stats: dict[str, list[int]]) -> None:
 
 
 def rescore_diff() -> None:
-    live = os.environ.get("DB_PATH", "/data/ring.db")
+    live = os.environ.get("DB_PATH", "/data/circa.db")
     cols = ("sleep_score", "readiness_score", "activity_score")
     today = datetime.now(samples.tz()).date()
     dates = [today - timedelta(i) for i in range(DAYS - 1, -1, -1)]  # ascending: baselines read the prior days' new rows
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-        copy = os.path.join(tmp, "ring.db")
+        copy = os.path.join(tmp, "circa.db")
         with closing(sqlite3.connect(live)) as src, closing(sqlite3.connect(copy)) as dst:
             src.backup(dst)
         os.environ["DB_PATH"] = copy
