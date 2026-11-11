@@ -3,6 +3,17 @@ package dev.ring.health.ui
 import android.media.MediaMetadata
 import android.widget.Toast
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Bedtime
+import androidx.compose.material.icons.rounded.Bolt
+import androidx.compose.material.icons.rounded.Coffee
+import androidx.compose.material.icons.rounded.HorizontalRule
+import androidx.compose.material.icons.rounded.Medication
+import androidx.compose.material.icons.rounded.Restaurant
+import androidx.compose.material.icons.rounded.WbSunny
+import androidx.compose.material.icons.rounded.WineBar
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.clipRect
@@ -1531,25 +1542,34 @@ private fun NoteDialog(note: String?, onDismiss: () -> Unit, onNote: (String) ->
 
 private val FEELINGS = listOf("tired", "flat", "wired", "good")
 
-/** Tap: now. Long press: an earlier time today. */
+/** One Right now tile: an icon disc over its label; [color] null = a quiet intake tile. Tap: now. Long press: an earlier time today. [on] = just logged. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun NowPill(label: String, onLong: () -> Unit, onTap: () -> Unit) {
+private fun NowTile(label: String, icon: ImageVector, color: Color?, on: Boolean, modifier: Modifier, onLong: () -> Unit, onTap: () -> Unit) {
     val c = AppTheme.colors
     val haptic = LocalHapticFeedback.current
-    Text(
-        label, style = AppType.footnote.copy(fontWeight = FontWeight.Medium), color = c.label,
-        modifier = Modifier.clip(RoundedCornerShape(50)).background(c.secondaryLabel.copy(alpha = 0.16f))
+    val pop by animateFloatAsState(if (on) 1.1f else 1f, if (LocalReduceMotion.current) snap() else spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMediumLow), label = "pop")
+    val ink = color ?: c.label
+    Column(
+        modifier.clip(AppShape.small)
             .combinedClickable(role = Role.Button, onLongClickLabel = "Pick an earlier time", onLongClick = { haptic.tick(); onLong() }) { haptic.tick(); onTap() }
-            .padding(horizontal = 14.dp, vertical = 9.dp),
-    )
+            .padding(vertical = AppSpace.xs),
+        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(AppSpace.s),
+    ) {
+        // Feelings are round and in their own colour; intakes are quiet rounded squares.
+        Box(
+            Modifier.size(52.dp).graphicsLayer { scaleX = pop; scaleY = pop }
+                .background(if (on) ink else (color ?: c.secondaryLabel).copy(alpha = 0.14f), if (color != null) CircleShape else AppShape.card),
+            contentAlignment = Alignment.Center,
+        ) { Icon(icon, null, tint = if (on) c.card else ink, modifier = Modifier.size(26.dp)) }
+        Text(label, style = AppType.footnote.copy(fontWeight = FontWeight.Medium), maxLines = 1)
+    }
 }
 
 /**
  * Right now: four feelings and four intakes. A feeling or intake is the sample `moment_<kind>` (stored first, pushed once,
  * Undo = value 2 at the same second); Dose is a medication journal row. [onFeeling] gets the feeling just tapped, null when undone.
  */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun RightNow(day: String, scope: CoroutineScope, onFeeling: (String?) -> Unit, reload: suspend () -> Unit) {
     val c = AppTheme.colors
@@ -1582,24 +1602,36 @@ private fun RightNow(day: String, scope: CoroutineScope, onFeeling: (String?) ->
         scope.launch { mark(ctx, "moment_${j.first}", j.second, true); reload() }
     }
     LaunchedEffect(just) { if (just != null) { delay(10_000); just = null } }
-    val pills = @Composable { kinds: List<String> ->
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-            kinds.forEach { k -> NowPill(k.replaceFirstChar { it.uppercase() }, { pick = k }) { put(k, System.currentTimeMillis() / 1000 * 1000) } }
+    val tiles = @Composable { kinds: List<Triple<String, ImageVector, Color?>> ->
+        Row(Modifier.fillMaxWidth()) {
+            kinds.forEach { (k, icon, color) ->
+                NowTile(k.replaceFirstChar { it.uppercase() }, icon, color, just?.first == k, Modifier.weight(1f), { pick = k }) { put(k, System.currentTimeMillis() / 1000 * 1000) }
+            }
         }
     }
-    InsetCard {
-        Column(Modifier.fillMaxWidth().padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-            Text("How are you right now?", style = AppType.headline)
-            pills(FEELINGS)
-            Text("Just had", style = AppType.headline, modifier = Modifier.padding(top = AppSpace.xs))
-            pills(listOf("coffee", "alcohol", "meal", "dose"))
-            just?.let { j ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("${j.first.replaceFirstChar { it.uppercase() }} · ${clock(j.second / 1000.0)}", style = AppType.subhead, color = c.secondaryLabel)
-                    Text(
-                        "Undo", style = AppType.footnote.copy(fontWeight = FontWeight.Medium), color = c.tint,
-                        modifier = Modifier.padding(start = AppSpace.xs).clip(RoundedCornerShape(50)).clickable(role = Role.Button) { haptic.tick(); undo(j) }.padding(horizontal = AppSpace.m, vertical = 9.dp),
-                    )
+    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+        Text("Right now", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
+        InsetCard {
+            Column(Modifier.fillMaxWidth().padding(vertical = AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
+                Text("I feel", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l))
+                tiles(listOf(
+                    Triple("tired", Icons.Rounded.Bedtime, c.sleep), Triple("flat", Icons.Rounded.HorizontalRule, c.stageCore),
+                    Triple("wired", Icons.Rounded.Bolt, c.stageAwake), Triple("good", Icons.Rounded.WbSunny, c.readiness),
+                ))
+                Hairline(Modifier.padding(start = AppSpace.l))
+                Text("I just had", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l))
+                tiles(listOf(
+                    Triple("coffee", Icons.Rounded.Coffee, null), Triple("alcohol", Icons.Rounded.WineBar, null),
+                    Triple("meal", Icons.Rounded.Restaurant, null), Triple("dose", Icons.Rounded.Medication, null),
+                ))
+                just?.let { j ->
+                    Row(Modifier.padding(start = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
+                        Text("${j.first.replaceFirstChar { it.uppercase() }} · ${clock(j.second / 1000.0)}", style = AppType.subhead, color = c.secondaryLabel)
+                        Text(
+                            "Undo", style = AppType.footnote.copy(fontWeight = FontWeight.Medium), color = c.tint,
+                            modifier = Modifier.padding(start = AppSpace.xs).clip(RoundedCornerShape(50)).clickable(role = Role.Button) { haptic.tick(); undo(j) }.padding(horizontal = AppSpace.m, vertical = 9.dp),
+                        )
+                    }
                 }
             }
         }
