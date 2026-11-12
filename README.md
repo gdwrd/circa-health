@@ -1,38 +1,74 @@
+<div align="center">
+
+<img src="docs/brand/circa-icon.svg" width="96" alt="Circa logo">
+
 # Circa
 
-Self-hosted health tracking for the Colmi R02 smart ring.
+**A $20 smart ring, your own server, and a health app that tells you something useful.**
 
-> **Self-hosted.** Circa is a phone app plus a small backend **you** run in Docker
-> on your own machine, NAS, Raspberry Pi or homelab. There is no vendor cloud, no
-> account and no telemetry. The app does nothing useful without your backend, and
-> once it is running, your biometric data never leaves your network.
+[![CI](https://github.com/gdwrd/circa-health/actions/workflows/ci.yml/badge.svg)](https://github.com/gdwrd/circa-health/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/gdwrd/circa-health)](https://github.com/gdwrd/circa-health/releases)
+![Android 12+](https://img.shields.io/badge/Android-12%2B-3DDC84?logo=android&logoColor=white)
+![Self-hosted](https://img.shields.io/badge/self--hosted-Docker-2496ED?logo=docker&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-## Features
+<img src="docs/screenshots/today.png" width="24%" alt="Today">
+<img src="docs/screenshots/sleep.png" width="24%" alt="Sleep">
+<img src="docs/screenshots/heart.png" width="24%" alt="Heart">
+<img src="docs/screenshots/trends.png" width="24%" alt="Trends">
 
-Five tabs in the app, all driven by data from your own backend:
+</div>
 
-- **Today** — the day at a glance: today's Sleep, Readiness and Activity scores,
-  latest vitals, and quick access to journal, breathing and "why" notes.
-- **Sleep** — one night in detail: score, sleep stages, heart rate while asleep,
-  naps, sleep debt and a "last 7 nights" trend. You can edit a night's bed/wake times.
-- **Activity** — steps, calories and distance for the day, hour by hour, plus the
-  workouts it detects (walk, ride, workout) that you can relabel.
-- **Body** — two panels, **Heart** (current heart rate, trends, and the effect of
-  days on medication vs off) and **Stress** (stress through the day, load and
-  recovery, and a resilience level).
-- **Trends** — charts over days, a week and a month for the scores and the inputs
-  behind them.
+---
 
-Other things you get:
+The Colmi R02 is a smart ring that costs less than lunch for two. It records your
+heart rate, HRV, SpO₂, stress, steps and sleep all day. Its own app shows you the
+numbers and leaves it there.
 
-- **Scores**: Sleep, Readiness and Activity (0-100), each with the contributors
-  that drive it. They are **approximations against your own trailing 14-day
-  baselines**, not a reference implementation of any vendor's score.
-- **Home-screen widgets**: a ring widget and a mark widget.
-- **Breathe**: a guided 4-7-8 breathing session that tracks your heart rate.
-- **Notifications**: reminders and alerts pushed from the backend.
-- **Background sync**: the app wakes about every 5 minutes, drains whatever new
-  samples the ring has buffered, posts them to your backend, and disconnects.
+**Circa** turns those numbers into answers:
+
+- 🌙 **How did I sleep?** A Sleep score, a stage-by-stage hypnogram and your best bedtime window.
+- 🔋 **Am I recovered?** A Readiness score built on resting heart rate, HRV and sleep debt.
+- 🏃 **Did I move enough?** Activity, workouts it detects on its own, and time in heart-rate zones.
+- 🧠 **Why do I feel like this?** One-tap tags for coffee, alcohol, meals and doses, matched against what the ring saw.
+
+All of it runs on **your own hardware**. You get no vendor cloud, no account, no
+subscription and no telemetry. The app talks to a small Docker backend on your
+NAS, Raspberry Pi or homelab, and your data never leaves your network.
+
+> Every score is compared with **your own trailing 14 days**, not with a population
+> average. It is an approximation, not a medical device.
+
+## A tour
+
+<table>
+<tr>
+<td width="33%" valign="top"><img src="docs/screenshots/today.png" alt="Today screen"><br><b>Today</b><br>Say how you feel or what you just had in one tap, then see your Readiness for the day.</td>
+<td width="33%" valign="top"><img src="docs/screenshots/scores.png" alt="Scores and vitals"><br><b>Scores and vitals</b><br>Sleep, Readiness and Activity at a glance, plus heart rate, HRV, SpO₂ and ring battery.</td>
+<td width="33%" valign="top"><img src="docs/screenshots/sleep.png" alt="Sleep screen"><br><b>Sleep</b><br>Time asleep, stages and heart rate through the night. Fix the bed and wake times if the ring got them wrong.</td>
+</tr>
+<tr>
+<td valign="top"><img src="docs/screenshots/sleep-stages.png" alt="Sleep regularity"><br><b>Regularity and bedtime</b><br>See how consistent your nights are and which bedtime window gives you your best sleep.</td>
+<td valign="top"><img src="docs/screenshots/activity.png" alt="Activity screen"><br><b>Activity</b><br>Steps hour by hour, calories, distance, and the walks, rides and runs it detects, which you can relabel.</td>
+<td valign="top"><img src="docs/screenshots/heart.png" alt="Heart screen"><br><b>Heart</b><br>Heart rate through the day, with resting HR and HRV over 30 days against your baseline.</td>
+</tr>
+<tr>
+<td valign="top"><img src="docs/screenshots/stress.png" alt="Stress screen"><br><b>Stress</b><br>Time restored, relaxed, engaged or stressed through the day, plus load, recovery and resilience.</td>
+<td valign="top"><img src="docs/screenshots/trends.png" alt="Trends screen"><br><b>Trends</b><br>This week against last week, monthly summaries, and 30- or 90-day charts for every score.</td>
+<td valign="top"><img src="docs/screenshots/breathe.png" alt="Breathe screen"><br><b>Breathe</b><br>A guided 4-7-8 breathing session that tracks your heart rate while you do it.</td>
+</tr>
+</table>
+
+<sub>The screenshots show synthetic demo data.</sub>
+
+### Also in the box
+
+- 📱 **Home-screen widgets**: a score ring and a one-tap "mark" widget.
+- 🔔 **Notifications** from your backend: a low ring battery, reminders, signals worth a look.
+- 🔄 **Sync every 5 minutes**: the app wakes, drains the ring's buffer, posts the samples to your server, and disconnects.
+- 🛌 **Phone as sleep sensor** (optional): screen on/off times fix the nights you scrolled in bed.
+- 🧪 **Experiments**: A/B-test a habit and see whether it really changes your sleep or recovery.
+- 📤 **Your data, your format**: one SQLite file, a CSV export, and a plain HTTP API.
 
 ## How it works
 
@@ -227,6 +263,8 @@ All routes require `Authorization: Bearer <API_TOKEN>` except `GET /health`.
 
 - Protocol details reverse-engineered by the
   [Gadgetbridge](https://gadgetbridge.org/) community (GPL-3.0).
+- [jonas-werner/ring-health-tracker](https://github.com/jonas-werner/ring-health-tracker),
+  the project Circa started from. Thank you!
 - AndroidX, OkHttp — thanks to all the maintainers.
 
 ## License
