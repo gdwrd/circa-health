@@ -39,6 +39,8 @@ import java.io.File
 
 /** Stock RY02 3.00.33 plus the 92-byte motion patch, built by emu/patch_fw.py. */
 private const val BUNDLED_PATCH = "RY02_3.00.33_fullaccel.bin"
+/** Colmi's own RY02 3.00.33 image, unchanged: the way back from any patch. */
+private const val BUNDLED_STOCK = "RY02_3.00.33_250117.bin"
 
 /** Settings > Ring lab: record the patched firmware's full-rate motion stream, and install a firmware file on the ring. */
 @Composable
@@ -156,6 +158,11 @@ internal fun RingLabScreen(onBack: () -> Unit) {
             ) {
                 ButtonRow("Use built-in full-rate motion patch", enabled = !busy) {
                     file = FirmwareFile(ctx.assets.open(BUNDLED_PATCH).use { it.readBytes() })
+                    flashNote = ""
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ButtonRow("Restore stock firmware", enabled = !busy) {
+                    file = FirmwareFile(ctx.assets.open(BUNDLED_STOCK).use { it.readBytes() })
                     flashNote = ""
                 }
                 Hairline(Modifier.padding(start = AppSpace.l))

@@ -49,6 +49,14 @@ class RingLabTest {
         assertEquals("RY02_V3.0", fw.hardware)
     }
 
+    @Test fun bundledStockIsInstallable() {
+        val fw = FirmwareFile(java.io.File("src/main/assets/RY02_3.00.33_250117.bin").readBytes())
+        assertNull(fw.problem)
+        assertFalse(fw.modified)
+        assertEquals("RY02_3.00.33_250117", fw.version)
+        assertEquals("RY02_V3.0", fw.hardware)
+    }
+
     @Test fun firmwareFileChecks() {
         val vendor = FirmwareFile(image(0x0981))
         assertNull(vendor.problem)

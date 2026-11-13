@@ -48,3 +48,19 @@ def test_bluetooth_update_installs_patched_firmware():
     assert e.resets == 2                                # first-boot config reset, then the reset that ends the update
     assert e.ota["state"] == 5
     assert sum(n[:2] == bytes([0xA1, 5]) for n in e.notified) > 20   # only the patched firmware sends these
+
+
+def test_bluetooth_update_restores_stock_firmware(tmp_path):
+    import patch_fw
+    patched = tmp_path / "patched.bin"
+    patched.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()))
+    e = ringemu.Emu(quiet_mem=True, image=patched)      # starts on the patched firmware
+    e.ota_start(3000, ringemu.IMAGE.read_bytes())
+    e.hw["motion"] = {"at": 11000, "interval": None, "fire": lambda: e.raise_pin(22)}
+    e.command(11500, bytes([0xA1, 0x04]))
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(14000)
+    assert e.resets == 2 and e.ota["state"] == 5
+    after = [n for n in e.notified if n[0] == 0xA1]
+    assert after and not any(n[1] == 5 for n in after), after   # the stream runs, but at the stock 1-a-second rate
