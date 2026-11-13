@@ -407,17 +407,23 @@ object ColmiProtocol {
     /** One accelerometer sample in milli-g, in the sensor's own X / Y / Z order. */
     data class MotionSample(val x: Int, val y: Int, val z: Int)
 
+    /** [seq]: samples the ring has sent since boot including these, 1..[SEQ_MAX] then 1 again; 0 = firmware before circa8 (not numbered). */
+    data class MotionPacket(val seq: Int, val samples: List<MotionSample>)
+    const val SEQ_MAX = 0x3FFFF
+
     /**
      * `A1 05 nn <nn bytes>`: every accelerometer sample (25 a second), sent only by the patched firmware
      * (emu/patch_fw.py). nn is 6 or 12: one or two samples of little-endian X, Y, Z, 10 bits left-justified.
+     * The unused low 6 bits of the first sample's X, Y, Z carry seq bits 0-5, 6-11, 12-17 (FW12); `shr 6` drops them.
      * Scale assumes the +-4 g range the firmware sets (8 mg a step); not checked against a real ring.
      */
-    fun parseMotionPacket(value: ByteArray): List<MotionSample>? {
+    fun parseMotionPacket(value: ByteArray): MotionPacket? {
         if (value.size < 16 || value[0] != CMD_RAW_STREAM || value[1] != 0x05.toByte()) return null
         val n = (value[2].toInt() and 0xff) / 6
         if (n !in 1..2) return null
         fun mg(o: Int) = (((value[o + 1].toInt() shl 8) or (value[o].toInt() and 0xff)) shr 6) * 8
-        return List(n) { i -> MotionSample(mg(3 + 6 * i), mg(5 + 6 * i), mg(7 + 6 * i)) }
+        val seq = (value[3].toInt() and 63) or ((value[5].toInt() and 63) shl 6) or ((value[7].toInt() and 63) shl 12)
+        return MotionPacket(seq, List(n) { i -> MotionSample(mg(3 + 6 * i), mg(5 + 6 * i), mg(7 + 6 * i)) })
     }
 
     /** `A1 09 <count>`: a double tap on the ring (patched firmware, emu/patch_fw.py FW6); count goes 1, 2… per boot, wraps at 255. */

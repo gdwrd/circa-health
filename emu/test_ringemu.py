@@ -32,7 +32,8 @@ def test_patched_firmware_streams_every_accelerometer_sample():
         e.run(6000)
     sent = b"".join(n[3:3 + n[2]] for n in e.notified if n[:2] == bytes([0xA1, 5]))
     fed = b"".join(bytes.fromhex(ev["rx"])[1:] for ev in e.trace if ev["kind"] == "bus" and ev["tx"] == "a7" and ev["t"] >= 3000)
-    assert len(sent) >= 6 * 25 * 2 and sent == fed        # every sample the chip read after the command, in order
+    low6 = lambda b: bytes(v & 0xC0 if i % 2 == 0 else v for i, v in enumerate(b))     # FW12 counter bits out
+    assert len(sent) >= 6 * 25 * 2 and low6(sent) == low6(fed)   # every sample the chip read after the command, in order
     assert all(sum(n[:15]) & 0xFF == n[15] for n in e.notified)
 
 
@@ -57,11 +58,22 @@ def test_motion_only_stream_has_no_gaps_while_still():
     e.ota_start(3000, patch_fw.patch(ringemu.IMAGE.read_bytes()))
     e.command(11500, bytes([0xA1, 0x07]))
     e.command(71500, bytes([0xA1, 0x08]))
+    start = patch_fw.SEQ_MAX - 1000                     # FW12: about 40 s before the counter wraps
+    e.hw["seq"] = {"at": 11000, "interval": None, "fire": lambda: e.uc.mem_write(patch_fw.SEQ, start.to_bytes(4, "little"))}
     e.boot()
     with contextlib.redirect_stdout(io.StringIO()):
         e.run(80000)
     assert e.resets == 2 and e.ota["state"] == 5
     tx = [(ev["t"], bytes.fromhex(ev["data"])) for ev in e.trace if ev["kind"] == "ble_tx" and ev["data"][:2] == "a1"]
+    prev, wraps = start, 0                              # FW12: seq runs on by each packet's samples, no gap, 0 skipped
+    for t, n in tx:
+        if n[1] != 5: continue
+        seq = (n[3] & 63) | (n[5] & 63) << 6 | (n[7] & 63) << 12
+        want = prev + n[2] // 6
+        wraps += want > patch_fw.SEQ_MAX
+        assert seq == (want - patch_fw.SEQ_MAX if want > patch_fw.SEQ_MAX else want), (t, prev, seq)
+        prev = seq
+    assert wraps == 1
     assert [n[1] for t, n in tx if n[1] != 5] == [7, 8]                     # both commands echoed, no a1 ff
     times = [t for t, n in tx if n[1] == 5]
     samples = sum(n[2] // 6 for t, n in tx if n[1] == 5)

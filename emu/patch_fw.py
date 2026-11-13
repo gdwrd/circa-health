@@ -20,6 +20,10 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        the tap that wakes a resting ring is not in the samples.
   FW11 a batch read in mode 0x10 with no phone connected clears the mode instead of sending, as a1 08 would, so a
        missed a1 08 (phone out of range, app killed) no longer keeps the ring sampling until a restart.  a1 04 is untouched.
+  FW12 every a1 05 packet is numbered: seq = samples sent since boot including this packet's, 1..SEQ_MAX then 1 again
+       (never 0, so 0 everywhere = older firmware).  Its 18 bits go in the unused low 6 bits of the first sample's low
+       bytes (10-bit values, left-justified): bits 0-5 in xl (packet byte 3), 6-11 in yl (byte 5), 12-17 in zl (byte 7).
+       Wraps after 2^18 - 1 samples (about 2 h 55 min at 25 a second).  A gap is lost samples: seq - previous seq - samples.
   Version: the firmware texts the ring reports end in _circa<VERSION> instead of _250117, in the file's wrapper too.
 
 Usage: python patch_fw.py [stock.bin] [patched.bin]      (needs: pip install keystone-engine)
@@ -47,13 +51,15 @@ START_SAMPLING = 0x20BA3F               # flag the motion interrupt sets; the ne
 READ_TICK = 0x82E63C                    # gsensor_read_timer_id callback; the motion interrupt calls it directly
 MOTION_ONLY = 0x10
 TAP_T, TAP_Q, TAP_LO, TAP_HI, TAP_RUN = 20, 15, 3, 8, 4     # 640 mg, 480 mg; 120..320 ms apart at 25 Hz
-VERSION = 7                             # ours: 1 = v4.1.0 (FW1); 2, 3 = v4.2.0, v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected
+VERSION = 8                             # ours: 1 = v4.1.0 (FW1); 2, 3 = v4.2.0, v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected
                                         # taps, never fired on the ring); 5 = taps found in the samples (v4.2.3, firm taps only); 6 = normal taps
-                                        # (v4.2.4); 7 = motion stream ends when the phone leaves (FW11)
+                                        # (v4.2.4); 7 = motion stream ends when the phone leaves (FW11); 8 = numbered samples (FW12)
 STOCK_TEXT = b"3.00.33_250117"          # in the wrapper, the device-information text and the version command's reply
 # Free RAM: .bss ends at 0x20DC30, the largest RAM-code overlay (table at 0x2083D8, loader 0x8249D8) at 0x20DCF8,
 # and update_ram_layout(0x7000, ...) starts the heap at 0x20EC00.  Nothing else lives in between.
 TAP_STATE = 0x20DCF8                    # 8 bytes: count, last xh yh zh, quiet samples, jolt run, since first tap + 1, spare
+SEQ = TAP_STATE + 8                     # FW12: 4 bytes, the last packet's seq (0 after boot)
+SEQ_MAX = 0x3FFFF
 BSS_LEN = 0x824728                      # startup's .bss length literal (0x55DC), one reference (0x82445E)
 
 # Entered instead of the epilogue: sp is still the batch-read frame, r4 = bytes in this batch,
@@ -105,6 +111,34 @@ fits:
     adds  r1, r5, r6
     bl    0x{MEMCPY:x}
     adds  r6, r6, r7
+    ldr   r3, =0x{SEQ:x}
+    ldr   r0, [r3]
+    adds  r0, #1
+    cmp   r7, #6
+    beq   counted
+    adds  r0, #1
+counted:
+    ldr   r1, =0x{SEQ_MAX:x}
+    cmp   r0, r1
+    bls   inrange
+    subs  r0, r0, r1
+inrange:
+    str   r0, [r3]
+    mov   r1, sp
+    adds  r1, #3
+    movs  r2, #0
+field:
+    ldrb  r7, [r1, r2]
+    lsrs  r7, r7, #6
+    lsls  r7, r7, #6
+    lsls  r3, r0, #26
+    lsrs  r3, r3, #26
+    orrs  r7, r3
+    strb  r7, [r1, r2]
+    lsrs  r0, r0, #6
+    adds  r2, #2
+    cmp   r2, #4
+    bls   field
     mov   r0, sp
     movs  r1, #15
     bl    0x{CHECKSUM:x}
@@ -314,8 +348,8 @@ def patch(stock: bytes) -> bytes:
     redirect(UNKNOWN_SUB, UNKNOWN_CODE, MOTION_CMD)                                           # FW4
     redirect(STILL_CALL, asm(f"bl 0x{STILL_CHECK:x}", STILL_CALL), STILL_VETO)                # FW4
     assert img[off(BSS_LEN):off(BSS_LEN) + 4] == struct.pack("<I", 0x55DC)
-    # FW6: the startup zero-fill runs on over TAP_STATE; the overlay is copied in over its part afterwards
-    struct.pack_into("<I", img, off(BSS_LEN), TAP_STATE + 8 - 0x208654)
+    # FW6, FW12: the startup zero-fill runs on over TAP_STATE and SEQ; the overlay is copied in over its part afterwards
+    struct.pack_into("<I", img, off(BSS_LEN), SEQ + 4 - 0x208654)
     struct.pack_into("<I", img, WRAP + 8, len(img) - WRAP - HDR)        # Realtek header: payload length
     # Clear the header's "not ready" flag (0x0981 -> 0x0901).  The stock firmware only clears it itself after the
     # ROM's integrity check passes, and a modified image is expected to fail that check; pre-cleared, the boot ROM

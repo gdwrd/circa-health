@@ -152,13 +152,19 @@ fun motionFile(dir: File, label: String, time: LocalDateTime): File {
     return generateSequence(1) { it + 1 }.map { File(dir, if (it == 1) "$base.csv" else "$base-$it.csv") }.first { !it.exists() }
 }
 
+/** Samples missing between the packet numbered [prev] and [p]; 0 for the first packet (prev 0) or a ring without numbers. */
+fun lostSamples(prev: Int, p: ColmiProtocol.MotionPacket): Int =
+    if (prev == 0 || p.seq == 0) 0
+    else ((p.seq - prev + ColmiProtocol.SEQ_MAX) % ColmiProtocol.SEQ_MAX - p.samples.size).coerceAtLeast(0)
+
 /**
  * Turns the ring's motion-only stream on (`A1 07`; on a ring that answers `A1 FF`, the raw stream `A1 04` instead)
  * and writes every `A1 05` motion sample to [out] as CSV, after a `# label=` line, until cancelled.
- * [onUpdate] gets the sample count, the latest sample, how many stock 1-a-second packets and how many double taps came in.
+ * [onUpdate] gets the sample count, the latest sample, how many stock 1-a-second packets and how many double taps came in,
+ * and the lost samples (null while the ring's packets are not numbered).
  * Returns null on a normal stop, else what went wrong.
  */
-suspend fun recordMotion(ctx: Context, address: String, out: File, label: String, onUpdate: (Int, ColmiProtocol.MotionSample?, Int, Int) -> Unit): String? {
+suspend fun recordMotion(ctx: Context, address: String, out: File, label: String, onUpdate: (Int, ColmiProtocol.MotionSample?, Int, Int, Int?) -> Unit): String? {
     val conn = ColmiConnection(ctx, address)
     var started = false
     var rawStream = false // true once the ring refused A1 07 and the A1 04 raw stream runs instead
@@ -168,27 +174,37 @@ suspend fun recordMotion(ctx: Context, address: String, out: File, label: String
         out.parentFile?.mkdirs()
         out.bufferedWriter().use { w ->
             w.write("# label=$label\n")
-            w.write("n,arrival_ms,x_mg,y_mg,z_mg\n") // n counts samples (25 a second on the ring's clock); arrival is the phone's clock
+            // n counts samples received (25 a second on the ring's clock); arrival is the phone's clock;
+            // seq is the ring's own sample number (circa8 and later, 0 before), so a gap in it is a lost sample
+            w.write("n,arrival_ms,x_mg,y_mg,z_mg,seq\n")
             conn.writePacket(ColmiProtocol.motionOnlyStartRequest())
             started = true
             var n = 0
             var stock = 0
             var taps = 0
+            var prev = 0
+            var lost: Int? = null
             while (currentCoroutineContext().isActive) {
                 val p = conn.notifyV1.receive()
-                val samples = ColmiProtocol.parseMotionPacket(p)
-                if (samples == null) {
+                val packet = ColmiProtocol.parseMotionPacket(p)
+                if (packet == null) {
                     if (p.size >= 2 && p[0] == ColmiProtocol.CMD_RAW_STREAM && p[1] == 0xFF.toByte() && !rawStream) {
                         rawStream = true
                         conn.writePacket(ColmiProtocol.rawStreamStartRequest())
                     }
-                    if (p.size >= 2 && p[0] == ColmiProtocol.CMD_RAW_STREAM && p[1].toInt() == 3) onUpdate(n, null, ++stock, taps)
-                    if (ColmiProtocol.parseTapPacket(p) != null) onUpdate(n, null, stock, ++taps)
+                    if (p.size >= 2 && p[0] == ColmiProtocol.CMD_RAW_STREAM && p[1].toInt() == 3) onUpdate(n, null, ++stock, taps, lost)
+                    if (ColmiProtocol.parseTapPacket(p) != null) onUpdate(n, null, stock, ++taps, lost)
                     continue
                 }
                 val now = System.currentTimeMillis()
-                for (s in samples) w.write("${n++},$now,${s.x},${s.y},${s.z}\n")
-                onUpdate(n, samples.last(), stock, taps)
+                val samples = packet.samples
+                samples.forEachIndexed { i, s ->
+                    val seq = if (packet.seq == 0) 0 else (packet.seq - (samples.size - 1 - i) + ColmiProtocol.SEQ_MAX - 1) % ColmiProtocol.SEQ_MAX + 1
+                    w.write("${n++},$now,${s.x},${s.y},${s.z},$seq\n")
+                }
+                if (packet.seq != 0) lost = (lost ?: 0) + lostSamples(prev, packet)
+                prev = packet.seq
+                onUpdate(n, samples.last(), stock, taps, lost)
             }
         }
         null

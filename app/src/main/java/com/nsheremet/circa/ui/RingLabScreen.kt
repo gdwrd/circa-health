@@ -72,6 +72,7 @@ internal fun RingLabScreen(onBack: () -> Unit) {
     var samples by remember { mutableIntStateOf(0) }
     var stockPackets by remember { mutableIntStateOf(0) }
     var doubleTaps by remember { mutableIntStateOf(0) }
+    var lostSamples by remember { mutableStateOf<Int?>(null) }
     var last by remember { mutableStateOf<ColmiProtocol.MotionSample?>(null) }
     var startedAt by remember { mutableStateOf(0L) }
     var motionNote by remember { mutableStateOf("") }
@@ -99,15 +100,15 @@ internal fun RingLabScreen(onBack: () -> Unit) {
 
     fun toggleRecording() {
         recording?.let { it.cancel(); return }
-        samples = 0; stockPackets = 0; doubleTaps = 0; last = null; motionNote = "Connecting…"; startedAt = System.currentTimeMillis()
+        samples = 0; stockPackets = 0; doubleTaps = 0; lostSamples = null; last = null; motionNote = "Connecting…"; startedAt = System.currentTimeMillis()
         // shortcut: recordings live in cacheDir, the OS may clear them; move to filesDir if a week of files is ever lost
         val out = motionFile(shareDir, label, LocalDateTime.now())
         recording = scope.launch {
             var error: String? = null
             try {
                 error = withContext(Dispatchers.IO) {
-                    recordMotion(ctx, address!!, out, label) { n, s, stock, taps ->
-                        samples = n; stockPackets = stock; doubleTaps = taps
+                    recordMotion(ctx, address!!, out, label) { n, s, stock, taps, lost ->
+                        samples = n; stockPackets = stock; doubleTaps = taps; lostSamples = lost
                         if (s != null) last = s
                         motionNote = when {
                             n > 0 -> "Recording"
@@ -169,6 +170,10 @@ internal fun RingLabScreen(onBack: () -> Unit) {
                 val seconds = ((System.currentTimeMillis() - startedAt) / 1000.0).coerceAtLeast(1.0)
                 ValueRow("Samples", if (samples == 0) "–" else "$samples" + if (recording != null) "  (${"%.0f".format(samples / seconds)} a second)" else "")
                 Hairline(Modifier.padding(start = AppSpace.l))
+                if (samples > 0) {
+                    ValueRow("Lost samples", lostSamples?.toString() ?: "not numbered")
+                    Hairline(Modifier.padding(start = AppSpace.l))
+                }
                 ValueRow("Double taps", if (recording == null && doubleTaps == 0) "–" else "$doubleTaps")
                 Hairline(Modifier.padding(start = AppSpace.l))
                 ValueRow("Latest (mg)", last?.let { "x ${it.x}   y ${it.y}   z ${it.z}" } ?: "–")
