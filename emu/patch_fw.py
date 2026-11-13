@@ -23,6 +23,7 @@ Usage: python patch_fw.py [stock.bin] [patched.bin]      (needs: pip install key
 """
 import hashlib, struct, sys
 from pathlib import Path
+from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB
 from keystone import Ks, KS_ARCH_ARM, KS_MODE_THUMB
 
 HERE = Path(__file__).parent
@@ -46,7 +47,7 @@ TAP_WAIT_CFG = 0x82E292                 # bl ACCEL_WRITE with r0 = 0x38, r1 = 0x
 SAMPLE_CFG = 0x82D94E                   # bl ACCEL_WRITE with r0 = 0x38, r1 = 0: sampling start (chip types 0x11, 0x28)
 CHIP_TYPE = 0x20BA20                    # 0x11 = the LIS3DH-style default; +2 is set by the motion interrupt
 SAMPLE_THS = 0xB0                       # CLICK_THS while sampling: latch | 48 * 31 mg.  Guess, not tuned on a ring
-VERSION = 3                             # ours: 1 = v4.1.0 (FW1), 2 = v4.2.0 (FW4, FW6; broke on a worn ring), 3 = taps polled
+VERSION = 4                             # ours: 1 = v4.1.0 (FW1); 2 = v4.2.0, 3 = v4.2.1 (FW4, FW6: both crash on b.w); 4 = no b.w
 STOCK_TEXT = b"3.00.33_250117"          # in the wrapper, the device-information text and the version command's reply
 # Free RAM: .bss ends at 0x20DC30, the largest RAM-code overlay (table at 0x2083D8, loader 0x8249D8) at 0x20DCF8,
 # and update_ram_layout(0x7000, ...) starts the heap at 0x20EC00.  Nothing else lives in between.
@@ -130,7 +131,8 @@ reply:
     movs  r2, #0xa1
     strb  r2, [r1, #0]
     strb  r0, [r1, #1]
-    b     0x{REPLY:x}
+    ldr   r3, =0x{REPLY | 1:x}
+    bx    r3
 """
 
 # Replaces STILL_CHECK at its one call: 0 means "not still", so sampling goes on.
@@ -142,7 +144,8 @@ STILL_VETO = f"""
     movs  r0, #0
     bx    lr
 stock:
-    b     0x{STILL_CHECK:x}
+    ldr   r3, =0x{STILL_CHECK | 1:x}
+    bx    r3
 """
 
 
@@ -220,7 +223,13 @@ done:
 
 
 def asm(src: str, addr: int) -> bytes:
-    return bytes(Ks(KS_ARCH_ARM, KS_MODE_THUMB).asm(src, addr)[0])
+    code = bytes(Ks(KS_ARCH_ARM, KS_MODE_THUMB).asm(src, addr)[0])
+    # The chip is a Cortex-M0+: bl is its only 32-bit instruction we may emit.  A far "b" assembles to b.w, which
+    # faults on the ring (versions 2 and 3 did).  Checks the instructions only, not the literal pool after them.
+    count = sum(1 for line in src.splitlines() if line.strip() and not line.strip().endswith(":"))
+    for ins in list(Cs(CS_ARCH_ARM, CS_MODE_THUMB).disasm(code, addr))[:count]:
+        assert ins.size == 2 or ins.mnemonic == "bl", f"not a Cortex-M0+ instruction: {ins.mnemonic} {ins.op_str}"
+    return code
 
 
 def patch(stock: bytes) -> bytes:

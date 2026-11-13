@@ -195,7 +195,7 @@ but blank only in the emulator, and the ROM's own flash use (boot patch, `ftl_sa
 
 ## Patched image
 
-`RY02_3.00.33_fullaccel.bin` (built by `emu/patch_fw.py`, 316 bytes added) reports itself as `RY02_3.00.33_circa<n>` instead of `…_250117` (device information, version command, and the file's wrapper; `n` is `VERSION` in `patch_fw.py`: 1 = app v4.1.0, 2 = v4.2.0, which stopped answering on a worn ring, 3 = v4.2.1). It adds these ring-to-phone packets:
+`RY02_3.00.33_fullaccel.bin` (built by `emu/patch_fw.py`, 324 bytes added) reports itself as `RY02_3.00.33_circa<n>` instead of `…_250117` (device information, version command, and the file's wrapper; `n` is `VERSION` in `patch_fw.py`: 1 = app v4.1.0; 2 = v4.2.0 and 3 = v4.2.1, which both crash the ring; 4 = the first without long jumps). The chip is a Cortex-M0+: appended code may use 16-bit Thumb instructions and `bl` only. A far `b` assembles to `b.w`, which faults on the ring; `patch_fw.py` refuses to build it and the emulator runs as a Cortex-M0. It adds these ring-to-phone packets:
 
 | Packet | Patch | Meaning |
 |---|---|---|

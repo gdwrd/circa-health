@@ -15,7 +15,7 @@ Add --quiet-mem to hide raw register lines, --trace trace.js to record the run f
 """
 import argparse, bisect, collections, hashlib, json, math, re, struct, sys
 from pathlib import Path
-from unicorn import Uc, UcError, UC_ARCH_ARM, UC_MODE_THUMB, UC_MODE_MCLASS, UC_HOOK_CODE, \
+from unicorn import Uc, UcError, UC_ARCH_ARM, UC_MODE_THUMB, UC_HOOK_CODE, \
     UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_MEM_WRITE
 from unicorn.arm_const import *
 
@@ -78,7 +78,10 @@ class Emu:
             bases.setdefault(int(v, 16), n)
         self.periph = sorted(bases.items())
 
-        self.uc = uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_MCLASS)
+        # The chip is a Cortex-M0+: of the 32-bit instructions it only has bl, msr and mrs.  UC_MODE_MCLASS would
+        # force a Cortex-M33, which also runs the long jumps (b.w) that crash the real ring.
+        self.uc = uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB)
+        uc.ctl_set_cpu_model(UC_CPU_ARM_CORTEX_M0)
         uc.mem_map(0, 0x100000)
         uc.mem_write(0, b"\x70\x47" * 0x80000)             # ROM = all "bx lr"; calls are intercepted anyway
         uc.mem_map(0x200000, 0x40000)
