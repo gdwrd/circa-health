@@ -1,0 +1,4 @@
+
+# Ring firmware lab: third-party reference files and images stay byte-for-byte
+emu/sdk-ref/** -text
+*.bin binary

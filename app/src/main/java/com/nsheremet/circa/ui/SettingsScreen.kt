@@ -168,6 +168,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var driveNow by remember { mutableStateOf(System.currentTimeMillis()) }
     var pickInterval by remember { mutableStateOf(false) }
     var showLog by remember { mutableStateOf(false) }
+    var showLab by remember { mutableStateOf(false) }
     val stopScan = remember { arrayOfNulls<() -> Unit>(1) } // set while a scan runs
     DisposableEffect(activity) {
         val obs = LifecycleEventObserver { _, e ->
@@ -300,6 +301,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     }
 
     if (showLog) return SyncLogScreen { showLog = false }
+    if (showLab) return RingLabScreen { showLab = false }
 
     LargeTitleScaffold(
         "Settings",
@@ -324,6 +326,8 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 ChevronRow("Sync every", intervalLabel(interval) + stretch) { pickInterval = true }
                 Hairline(Modifier.padding(start = AppSpace.l))
                 ChevronRow("Sync log", "") { showLog = true }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ChevronRow("Ring lab", "") { showLab = true }
             }
         }
         item {
@@ -827,7 +831,7 @@ private fun SyncLogScreen(onBack: () -> Unit) {
 // ── iOS grouped-list pieces ────────────────────────────────────────────────
 
 @Composable
-private fun Section(header: String, footer: String? = null, rows: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
+internal fun Section(header: String, footer: String? = null, rows: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
     Column {
         Text(
             header, style = AppType.title,
@@ -844,7 +848,7 @@ private fun Section(header: String, footer: String? = null, rows: @Composable an
 }
 
 @Composable
-private fun ValueRow(title: String, value: String) {
+internal fun ValueRow(title: String, value: String) {
     Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
         Text(title, style = AppType.body, modifier = Modifier.width(120.dp))
         Text(value, style = AppType.body, color = AppTheme.colors.secondaryLabel, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
@@ -941,7 +945,7 @@ private fun StartDateDialog(initial: String, onDismiss: () -> Unit, onPick: (Str
 }
 
 @Composable
-private fun ButtonRow(title: String, enabled: Boolean = true, onClick: () -> Unit) {
+internal fun ButtonRow(title: String, enabled: Boolean = true, onClick: () -> Unit) {
     val c = AppTheme.colors
     Box(Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable(enabled = enabled, onClick = onClick).padding(horizontal = AppSpace.l), contentAlignment = Alignment.CenterStart) {
         Text(title, style = AppType.body, color = if (enabled) c.tint else c.secondaryLabel)

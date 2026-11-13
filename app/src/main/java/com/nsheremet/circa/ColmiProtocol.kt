@@ -391,4 +391,28 @@ object ColmiProtocol {
 
     private fun leUint16(buf: ByteArray, offset: Int): Int =
         (buf[offset].toInt() and 0xff) or ((buf[offset + 1].toInt() and 0xff) shl 8)
+
+    // ── Raw motion stream ─────────────────────────────────────────────────
+    const val CMD_RAW_STREAM: Byte = 0xA1.toByte()
+
+    fun rawStreamStartRequest(): ByteArray = buildPacket(byteArrayOf(CMD_RAW_STREAM, 0x04))
+    // A1 05 is the stop that pairs with A1 04. A1 02 (the stop for A1 01 / 06) also ends the packets but leaves the
+    // optical sensor powered, LEDs blinking; seen on the real ring 2026-11-13 and reproduced in emu/ringemu.py.
+    fun rawStreamStopRequest(): ByteArray = buildPacket(byteArrayOf(CMD_RAW_STREAM, 0x05))
+
+    /** One accelerometer sample in milli-g, in the sensor's own X / Y / Z order. */
+    data class MotionSample(val x: Int, val y: Int, val z: Int)
+
+    /**
+     * `A1 05 nn <nn bytes>`: every accelerometer sample (25 a second), sent only by the patched firmware
+     * (emu/patch_fw.py). nn is 6 or 12: one or two samples of little-endian X, Y, Z, 10 bits left-justified.
+     * Scale assumes the +-4 g range the firmware sets (8 mg a step); not checked against a real ring.
+     */
+    fun parseMotionPacket(value: ByteArray): List<MotionSample>? {
+        if (value.size < 16 || value[0] != CMD_RAW_STREAM || value[1] != 0x05.toByte()) return null
+        val n = (value[2].toInt() and 0xff) / 6
+        if (n !in 1..2) return null
+        fun mg(o: Int) = (((value[o + 1].toInt() shl 8) or (value[o].toInt() and 0xff)) shr 6) * 8
+        return List(n) { i -> MotionSample(mg(3 + 6 * i), mg(5 + 6 * i), mg(7 + 6 * i)) }
+    }
 }

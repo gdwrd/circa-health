@@ -33,6 +33,7 @@ class ColmiConnection(private val context: Context, private val address: String)
     private val descriptorWriteCh = Channel<Boolean>(1)
     private val charWriteCh       = Channel<Boolean>(1)
     private val charReadCh        = Channel<ByteArray?>(1)
+    private val mtuCh             = Channel<Int>(1)
 
     // Incoming notification channels — unbounded so we never drop a packet
     val notifyV1 = Channel<ByteArray>(Channel.UNLIMITED)
@@ -59,6 +60,10 @@ class ColmiConnection(private val context: Context, private val address: String)
 
         override fun onCharacteristicWrite(g: BluetoothGatt, char: BluetoothGattCharacteristic, status: Int) {
             charWriteCh.trySend(status == BluetoothGatt.GATT_SUCCESS)
+        }
+
+        override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+            mtuCh.trySend(if (status == BluetoothGatt.GATT_SUCCESS) mtu else 23)
         }
 
         // API 33+ path
@@ -142,6 +147,14 @@ class ColmiConnection(private val context: Context, private val address: String)
         while (charReadCh.tryReceive().isSuccess) Unit // a late answer must not answer this read
         if (!g.readCharacteristic(char)) return null
         return withTimeoutOrNull(timeoutMs) { charReadCh.receive() }?.toString(Charsets.US_ASCII)?.trim { it <= ' ' }
+    }
+
+    /** Asks for a larger packet size (firmware update writes); returns the size in force, 23 when the ring refuses. */
+    suspend fun requestMtu(mtu: Int, timeoutMs: Long = 5_000): Int {
+        val g = gatt ?: return 23
+        while (mtuCh.tryReceive().isSuccess) Unit
+        if (!g.requestMtu(mtu)) return 23
+        return withTimeoutOrNull(timeoutMs) { mtuCh.receive() } ?: 23
     }
 
     fun disconnect() {

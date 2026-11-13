@@ -2,7 +2,8 @@
 
 Colmi R02 ring → Android app (`app/`, package `com.nsheremet.circa`, applicationId `com.nsheremet.circa`) → backend (`/api/v1/import/prometheus`, samples stored in `circa.db`).
 The Python backend (`backend/`) serves that import path, stores the samples and computes Sleep / Readiness / Activity scores.
-The plans are `docs/PLAN.md` … `docs/PLAN10.md` (current: `PLAN10.md`); the task ledger is `NEXTSTEPS.md`.
+The plans are `docs/PLAN.md` … `docs/PLAN11.md` (app and backend: `PLAN10.md`; ring firmware: `PLAN11.md`); the task ledger is `NEXTSTEPS.md`.
+Ring firmware work lives in `emu/` (emulator `ringemu.py`, patch builder `patch_fw.py`; see `emu/README.md`). Check: `python -m pytest -q -p no:faulthandler emu/test_ringemu.py`. A firmware patch goes on a ring only after it passes there, installed through the emulated update.
 
 ## Token Economy & Workflow
 - Ponytail applies: smallest complete change, code first, minimal prose. No abstractions, options or "for later" code.

@@ -44,3 +44,13 @@ hs_err_pid*
 __pycache__/
 .pytest_cache/
 .pi/
+
+# ── Ring firmware lab ──
+# a recorded emulator run (regenerate with ringemu.py --trace)
+emu/trace.js
+# downloads for the older BlueX-based R02 ring; nothing here uses them
+emu/firmware/ROM_0_first128k_Bootloader_BLE_stack.bin
+emu/firmware/Flash_800000_3.0.06_Firmware.bin
+emu/firmware/R02_3.00.06_240523.bin
+emu/firmware/README.md
+emu/firmware/Firmware_URLs.txt

@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RY02 firmware trace</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --line: #d9dce3; --text: #1c2030; --muted: #6b7286;
+    --out: #2f6fed; --in: #12a150; --irq: #d98a00; --hot: #fff4d6; --metal-hi: 232; --metal-lo: 96;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14161c; --panel: #1d2029; --line: #333846; --text: #e6e8ef; --muted: #99a0b3;
+            --out: #6d9bff; --in: #3ecf7c; --irq: #ffb638; --hot: #3a3320; --metal-hi: 215; --metal-lo: 60; }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 650; }
+  header input[type=range] { flex: 1 1 220px; min-width: 160px; }
+  button, select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  #clock { font-variant-numeric: tabular-nums; min-width: 130px; }
+  main { display: grid; grid-template-columns: minmax(240px, 320px) 1fr; gap: 12px; padding: 12px 16px; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; min-width: 0; }
+  .panel h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 8px; }
+
+  /* ring: 72 flat segments on a circle, shaded per frame */
+  .scene { height: 230px; perspective: 800px; display: grid; place-items: center; overflow: hidden; }
+  .tilt { transform-style: preserve-3d; transform: rotateX(-34deg); }
+  .ring { position: relative; width: 0; height: 0; transform-style: preserve-3d; }
+  .seg { position: absolute; left: -5px; top: -24px; width: 10px; height: 48px; }
+  #ringnote { color: var(--muted); font-size: 12px; text-align: center; min-height: 34px; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 10px 0 0; }
+  dt { color: var(--muted); } dd { margin: 0; font-variant-numeric: tabular-nums; text-align: right; }
+  dd.big { font-size: 20px; font-weight: 650; }
+
+  svg { width: 100%; height: auto; display: block; }
+  .link { stroke: var(--line); stroke-width: 2; }
+  .node rect { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; rx: 8; transition: fill .3s; }
+  .node.hot rect { fill: var(--hot); transition: none; }
+  .node.mcu rect { stroke: var(--text); }
+  .node text { fill: var(--text); font-size: 13px; }
+  .node text.sub { fill: var(--muted); font-size: 11px; }
+  .node text.val { font-size: 11.5px; font-family: ui-monospace, Consolas, monospace; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip { border: 1px solid var(--line); border-radius: 999px; padding: 1px 10px; font-size: 12px; color: var(--muted); }
+  .chip.on { background: var(--out); border-color: var(--out); color: #fff; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
+
+  #logwrap { grid-column: 1 / -1; }
+  #log { height: 240px; overflow-y: auto; font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre; }
+  #log div { padding: 0 4px; }
+  #log .bus { color: var(--text); } #log .rom, #log .timer, #log .info { color: var(--muted); }
+  #log .ble_rx, #log .ble_tx, #log .ble_conn { color: var(--out); font-weight: 600; }
+  #log .irq { color: var(--irq); font-weight: 600; } #log .log { color: var(--in); } #log .adc { color: var(--in); }
+  #missing { padding: 40px 16px; max-width: 640px; margin: auto; }
+  code { background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>RY02 firmware trace</h1>
+  <button id="play">Pause</button>
+  <select id="speed" aria-label="Playback speed">
+    <option value="0.25">0.25×</option><option value="1" selected>1×</option><option value="4">4×</option><option value="16">16×</option>
+  </select>
+  <input id="seek" type="range" min="0" value="0" step="10" aria-label="Position in trace">
+  <span id="clock"></span>
+</header>
+
+<div id="missing" hidden>
+  <p><b>No trace loaded.</b> Record one next to this file, then reload:</p>
+  <p><code>python ringemu.py --ms 50000 --quiet-mem --trace trace.js --pin 3000:22 --cmd 6000:03 --cmd 8000:6901 --pin 42000:13</code></p>
+</div>
+
+<main id="app">
+  <section class="panel">
+    <h2>Ring</h2>
+    <div class="scene"><div class="tilt"><div class="ring" id="ring"></div></div></div>
+    <div id="ringnote"></div>
+    <dl>
+      <dt>Heart rate sent to phone</dt><dd class="big" id="hr">–</dd>
+      <dt>Acceleration read (mg)</dt><dd id="acc">–</dd>
+      <dt>Light level read</dt><dd id="ppg">–</dd>
+      <dt>Phone</dt><dd id="phone">not connected</dd>
+    </dl>
+  </section>
+
+  <section class="panel">
+    <h2>What the firmware is talking to</h2>
+    <svg viewBox="0 0 640 352" id="diagram" role="img" aria-label="Chip and peripherals"></svg>
+    <div class="legend">
+      <span><i style="background:var(--out)"></i>chip writes</span>
+      <span><i style="background:var(--in)"></i>chip reads</span>
+      <span><i style="background:var(--irq)"></i>interrupt</span>
+    </div>
+    <div class="chips" id="chips"></div>
+  </section>
+
+  <section class="panel" id="logwrap">
+    <h2>Events <label style="text-transform:none;letter-spacing:0;font-weight:400;margin-left:12px"><input type="checkbox" id="oscalls"> show OS calls</label></h2>
+    <div id="log"></div>
+  </section>
+</main>
+
+<script src="trace.js"></script>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const T = window.TRACE;
+if (!T) { $("missing").hidden = false; $("app").hidden = true; }
+const EV = T ? T.events : [];
+const END = EV.length ? EV[EV.length - 1].t : 0;
+
+// ---- diagram: chip in the middle, one box per thing it talks to
+const NODES = {
+  mcu:     { x: 240, y: 136, w: 160, h: 80, title: "RTL8762E chip", sub: "app image RY02 3.00.33" },
+  phone:   { x: 230, y: 8,   w: 180, h: 62, title: "Phone", sub: "Bluetooth, faked" },
+  ppg:     { x: 16,  y: 40,  w: 190, h: 62, title: "Heart-rate sensor", sub: "I2C 0x44" },
+  accel:   { x: 434, y: 40,  w: 190, h: 62, title: "Accelerometer", sub: "I2C 0x19" },
+  charger: { x: 16,  y: 250, w: 190, h: 62, title: "Device 0x07", sub: "I2C, charger? (unconfirmed)" },
+  adc:     { x: 434, y: 250, w: 190, h: 62, title: "Battery ADC", sub: "fixed fake reading" },
+  flash:   { x: 230, y: 282, w: 180, h: 62, title: "Flash", sub: "settings and data" },
+};
+const I2C_DEV = { 0x44: "ppg", 0x19: "accel", 0x07: "charger" };
+const CHIPS = ["boot", "app", "qc_app", "hub", "timers", "interrupts", "phone"];
+const NS = "http://www.w3.org/2000/svg";
+const svg = $("diagram");
+const el = (tag, attrs, parent, text) => {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (text != null) e.textContent = text;
+  (parent || svg).appendChild(e);
+  return e;
+};
+const center = n => [NODES[n].x + NODES[n].w / 2, NODES[n].y + NODES[n].h / 2];
+for (const n in NODES) if (n !== "mcu") {
+  const [x1, y1] = center("mcu"), [x2, y2] = center(n);
+  el("line", { class: "link", x1, y1, x2, y2 });
+}
+const pulses = el("g", {});
+for (const n in NODES) {
+  const d = NODES[n], g = el("g", { class: "node" + (n === "mcu" ? " mcu" : ""), id: "n-" + n });
+  el("rect", { x: d.x, y: d.y, width: d.w, height: d.h }, g);
+  el("text", { x: d.x + 10, y: d.y + 19, "font-weight": 600 }, g, d.title);
+  el("text", { x: d.x + 10, y: d.y + 34, class: "sub" }, g, d.sub);
+  d.val = el("text", { x: d.x + 10, y: d.y + 52, class: "val" }, g, "");
+}
+for (const c of CHIPS) { const s = document.createElement("span"); s.className = "chip"; s.id = "chip-" + c; s.textContent = c; $("chips").appendChild(s); }
+
+const lastPulse = {};
+function pulse(node, dir, delay = 0) {            // dir: "out" chip->device, "in" device->chip, "irq"
+  const key = node + dir, now = performance.now();
+  if (now - (lastPulse[key] || 0) < 110) return;   // keep fast playback readable
+  lastPulse[key] = now;
+  const [mx, my] = center("mcu"), [nx, ny] = center(node);
+  const [x1, y1, x2, y2] = dir === "out" ? [mx, my, nx, ny] : [nx, ny, mx, my];
+  const c = el("circle", { r: 5.5, cx: 0, cy: 0, fill: `var(--${dir})`, opacity: 0 }, pulses);
+  c.animate([{ transform: `translate(${x1}px,${y1}px)`, opacity: 1 }, { transform: `translate(${x2}px,${y2}px)`, opacity: 1 }],
+            { duration: 420, delay, easing: "ease-in-out" }).onfinish = () => c.remove();
+  const g = $("n-" + node);
+  g.classList.add("hot");
+  clearTimeout(g._t); g._t = setTimeout(() => g.classList.remove("hot"), 350);
+}
+
+// ---- ring
+const SEGS = 72, R = 92, ring = $("ring"), segs = [];
+for (let i = 0; i < SEGS; i++) {
+  const s = document.createElement("div");
+  s.className = "seg";
+  s.style.transform = `rotateY(${i * 360 / SEGS}deg) translateZ(${R}px)`;
+  ring.appendChild(s); segs.push(s);
+}
+const css = n => +getComputedStyle(document.documentElement).getPropertyValue(n);
+function drawRing(angle, led) {
+  ring.style.transform = `rotateY(${angle}deg)`;
+  const hi = css("--metal-hi"), lo = css("--metal-lo");
+  for (let i = 0; i < SEGS; i++) {
+    const a = (i * 360 / SEGS + angle) * Math.PI / 180;
+    const facing = Math.cos(a);                       // > 0: outer face towards the viewer
+    const sensor = i < 3 || i > SEGS - 3;             // the sensor bump sits on the inside
+    let v = facing > 0 ? lo + (hi - lo) * Math.pow(Math.max(0, Math.cos(a - 0.5)), 2) : lo * 0.8 + 45 * -facing;      // inner wall, seen through the hole
+    let col = `rgb(${v | 0},${v | 0},${(v * 1.04) | 0})`;
+    if (facing < 0 && sensor) col = led ? "rgb(70,235,120)" : "rgb(24,26,30)";
+    segs[i].style.background = col;
+    segs[i].style.boxShadow = facing < 0 && sensor && led ? "0 0 14px 4px rgba(70,235,120,.7)" : "none";
+  }
+}
+
+// ---- trace state
+let st, idx = 0, simT = 0, playing = true, lastFrame = 0, ringAngle = 20;
+function reset() {
+  st = { hr: null, acc: null, accAt: -1e9, ppg: null, ppgAt: -1e9, phone: "not connected", target: null };
+  for (const n in NODES) NODES[n].val.textContent = "";
+  $("log").textContent = "";
+}
+const bytes = hex => (hex.match(/../g) || []).map(h => parseInt(h, 16));
+const s16 = (lo, hi) => ((lo | hi << 8) << 16) >> 16;
+const chipFor = task => task.startsWith("tmr:") ? "timers" : task.startsWith("irq:") ? "interrupts" : task.startsWith("ble:") ? "phone" : task;
+const isOsCall = e => e.kind === "rom" && !/^(flash_|ftl_|SystemCall)/.test(e.name);
+
+function apply(e, live) {
+  let node = null, dir = "out";
+  if (e.kind === "bus") {
+    node = I2C_DEV[e.dev] || null;
+    const tx = bytes(e.tx), rx = bytes(e.rx);
+    if (node === "accel" && tx[0] === 0xa7 && rx.length === 7) {
+      st.acc = [0, 1, 2].map(i => (s16(rx[1 + 2 * i], rx[2 + 2 * i]) >> 6) * 8);
+      st.accAt = e.t;
+      st.target = Math.atan2(st.acc[1], st.acc[0]) * 180 / Math.PI;
+      NODES.accel.val.textContent = `x ${st.acc[0]}  y ${st.acc[1]}  z ${st.acc[2]}`;
+    } else if (node === "ppg" && (tx[0] === 0x41 || tx[0] === 0x02) && rx.length >= 3) {
+      const o = tx[0] === 0x41 ? rx.length - 3 : 0;
+      st.ppg = rx[o] | rx[o + 1] << 8 | rx[o + 2] << 16;
+      st.ppgAt = e.t;
+      NODES.ppg.val.textContent = "light " + st.ppg;
+    } else if (node) NODES[node].val.textContent = `reg ${e.tx.slice(0, 2)} ${rx.length ? "→ " + e.rx.slice(0, 12) : "← " + e.tx.slice(2, 14)}`;
+    if (live && node) { if (tx.length) pulse(node, "out"); if (rx.length) pulse(node, "in", 180); }
+    node = null;
+  } else if (e.kind === "adc") { node = "adc"; dir = "in"; NODES.adc.val.textContent = e.text.replace("ADC sample read -> ", "raw "); }
+  else if (e.kind === "rom" && /^(flash_|ftl_)/.test(e.name)) { node = "flash"; dir = /read|load/.test(e.name) ? "in" : "out"; NODES.flash.val.textContent = e.name; }
+  else if (e.kind === "irq") { node = e.pin === 22 ? "accel" : e.pin === 13 ? "charger" : null; dir = "irq"; }
+  else if (e.kind === "ble_conn") st.phone = "connected";
+  else if (e.kind === "ble_rx") { node = "phone"; dir = "in"; NODES.phone.val.textContent = "→ " + e.data.slice(0, 10) + "…"; }
+  else if (e.kind === "ble_tx") {
+    node = "phone";
+    const b = bytes(e.data);
+    NODES.phone.val.textContent = "← " + e.data.slice(0, 10) + "…";
+    if (b[0] === 0x69 && b[1] === 1 && b[3]) st.hr = b[3];
+  }
+  if (!live) return;
+  if (node) pulse(node, dir);
+  for (const c of CHIPS) $("chip-" + c).classList.toggle("on", c === chipFor(e.task));
+  if (isOsCall(e) && !$("oscalls").checked) return;
+  logLine(e);
+}
+function logLine(e) {
+  const log = $("log"), d = document.createElement("div");
+  d.className = e.kind;
+  d.textContent = `${(e.t / 1000).toFixed(3).padStart(8)}s  ${chipFor(e.task).padEnd(10)}  ${e.text}`;
+  log.appendChild(d);
+  while (log.childElementCount > 300) log.firstChild.remove();
+  log.scrollTop = log.scrollHeight;
+}
+function seek(t) {
+  reset(); simT = t; idx = 0;
+  while (idx < EV.length && EV[idx].t <= t) apply(EV[idx++], false);
+  const shown = EV.slice(0, idx).filter(e => !isOsCall(e) || $("oscalls").checked).slice(-120);
+  shown.forEach(logLine);
+}
+function render() {
+  $("clock").textContent = `${(simT / 1000).toFixed(2)} s / ${(END / 1000).toFixed(2)} s`;
+  $("seek").value = simT;
+  $("hr").textContent = st.hr ? st.hr + " bpm" : "–";
+  $("acc").textContent = st.acc ? st.acc.join("  ") : "–";
+  $("ppg").textContent = st.ppg ?? "–";
+  $("phone").textContent = st.phone;
+  const accLive = simT - st.accAt < 1500, led = simT - st.ppgAt < 700;
+  $("ringnote").textContent = accLive ? "Turning with the acceleration samples the firmware is reading."
+    : "Firmware is not reading the accelerometer; the ring is drawn with a slow idle spin.";
+  $("ringnote").textContent += led ? " Sensor light on." : "";
+  return [accLive, led];
+}
+function frame(now) {
+  const dt = Math.min(100, now - lastFrame); lastFrame = now;
+  if (playing && T) {
+    simT = Math.min(END, simT + dt * +$("speed").value);
+    while (idx < EV.length && EV[idx].t <= simT) apply(EV[idx++], true);
+    if (simT >= END) { playing = false; $("play").textContent = "Replay"; }
+  }
+  const [accLive, led] = render();
+  if (accLive && st.target != null) ringAngle += ((st.target - ringAngle + 540) % 360 - 180) * 0.12;
+  else if (playing) ringAngle += dt * 0.012;
+  drawRing(ringAngle, led);
+  requestAnimationFrame(frame);
+}
+$("play").onclick = () => {
+  if (simT >= END) seek(0);
+  playing = !playing || simT === 0;
+  $("play").textContent = playing ? "Pause" : "Play";
+};
+$("seek").max = END;
+$("seek").oninput = e => seek(+e.target.value);
+$("oscalls").onchange = () => seek(simT);
+addEventListener("keydown", e => { if (e.code === "Space" && e.target.tagName !== "BUTTON") { e.preventDefault(); $("play").click(); } });
+reset();
+requestAnimationFrame(t => { lastFrame = t; frame(t); });
+</script>
+</body>
+</html>
