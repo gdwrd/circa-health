@@ -166,7 +166,7 @@ def test_wearing_the_patched_ring_sends_no_taps():
     assert interrupts <= 10 and taps == 0 and resets == 1
 
 
-def light(on_ms, off_ms=None, leave_ms=None, credits=None):
+def light(on_ms, off_ms=None, leave_ms=None, credits=None, cmds=(), ms=44000):
     """Patched over Bluetooth, live heart rate from 11.5 s, a1 0a at on_ms -> (emu, a1 packets with times, queue reads).
     credits: notifications the link takes per 500 ms from on_ms (default: all).  e.waiting: most packets ever waiting
     in the firmware's send ring."""
@@ -193,9 +193,10 @@ def light(on_ms, off_ms=None, leave_ms=None, credits=None):
     if on_ms: e.command(on_ms, bytes([0xA1, 0x0A]))
     if off_ms: e.command(off_ms, bytes([0xA1, 0x0B]))
     if leave_ms: e.hw["leave"] = {"at": leave_ms, "interval": None, "fire": e.ble_disconnect}
+    for t, cmd in cmds: e.command(t, cmd)
     e.boot()
     with contextlib.redirect_stdout(io.StringIO()):
-        e.run(44000)
+        e.run(ms)
     assert e.resets == 2 and e.ota["state"] == 5
     tx = [(ev["t"], bytes.fromhex(ev["data"])) for ev in e.trace if ev["kind"] == "ble_tx" and ev["data"][:2] == "a1"]
     reads = [(ev["t"], bytes.fromhex(ev["rx"])) for ev in e.trace if ev["kind"] == "bus" and ev["dev"] == ringemu.PPG and ev["tx"] == "41"]
@@ -233,6 +234,17 @@ def test_light_samples_leave_room_on_a_slow_link():
     assert sum(n[1] == 0x0C for t, n in tx) > 40
     readings = [n[3] for n in e.notified if n[0] == 0x69 and n[3]]
     assert readings and all(abs(r - 60) <= 2 for r in readings), readings
+
+
+def test_light_copy_ends_with_the_measurement():
+    # ca0001 on the real ring: the stock stop 30.5 s after 69 01 with the copy still on killed the ring ~8 s later.
+    e, tx, reads = light(15000, cmds=[(46000, bytes([0x69, 0x01])), (48000, bytes([0xA1, 0x0A]))], ms=50000)
+    light_tx = [t for t, n in tx if n[1] == 0x0C]
+    assert any(t < 42000 for t in light_tx)
+    assert any(46000 < t < 48000 for t, rx in reads)                      # measuring again, copy off: no a1 0c
+    assert not [t for t in light_tx if 42000 <= t < 48000], light_tx[-5:]
+    assert any(t > 48000 for t in light_tx)                              # a1 0a turns it back on
+    assert [n[1] for t, n in tx if n[1] != 0x0C] == [0x0A, 0x0A]           # both echoed
 
 
 def test_light_mode_off_keeps_stock_behaviour():

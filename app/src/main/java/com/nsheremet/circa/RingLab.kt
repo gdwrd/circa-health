@@ -257,6 +257,7 @@ suspend fun recordLight(ctx: Context, address: String, out: File, onUpdate: (Int
             while (currentCoroutineContext().isActive) {
                 if (System.currentTimeMillis() - lastLock >= 30_000) {
                     conn.writePacket(ColmiProtocol.liveHrStartRequest())
+                    conn.writePacket(ColmiProtocol.lightOnRequest()) // ca0002 turns the copy off at each measurement end
                     lastLock = System.currentTimeMillis()
                 }
                 val p = withTimeoutOrNull(5_000) { conn.notifyV1.receive() } ?: continue

@@ -31,6 +31,11 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        with no phone connected clears the mode instead of sending, as FW11 does.  The rest of a read is dropped while
        LIGHT_ROOM or more packets wait to go out: the stock send ring has no full check, and a link slower than the
        samples (about 17 packets a second on the ring) would otherwise overwrite unsent packets, the 69 readings too.
+       Only reads whose return address is one of the drain's three queue reads (DRAIN_READS), with a length the drain
+       can produce (at most 189), are sent.  The copy turns itself off when the stock firmware stops the drain timer
+       (STOP_HOOK, every measurement end, e.g. live heart rate 30.5 s after 69 01), so a1 0a must follow each 69 01:
+       on the real ring (ca0001) a stock stop with the copy still on and the link up killed the ring about 8 s later
+       (cause not found; the emulator runs clean); a copy turned off before the stop never did.
   FW15b a1 0f answers the wear state and when it last changed:  a1 0f <state> <t0 t1 t2 t3> 00 .. checksum
        state 0 = unknown (no verdict since boot), 1 = worn, 2 = not worn; t = the firmware clock (word CLOCK, seconds
        since 2000-01-01 in the phone's local time as set-time 01 wrote it; it steps once a minute) at the change,
@@ -68,15 +73,19 @@ START_SAMPLING = 0x20BA3F               # flag the motion interrupt sets; the ne
 READ_TICK = 0x82E63C                    # gsensor_read_timer_id callback; the motion interrupt calls it directly
 MOTION_ONLY = 0x10
 TAP_T, TAP_Q, TAP_LO, TAP_HI, TAP_RUN = 20, 15, 3, 8, 4     # 640 mg, 480 mg; 120..320 ms apart at 25 Hz
-VERSION = 1                             # build number, tag ca0001.  Old scheme (tag circa<n>): 1 = v4.1.0 (FW1); 2, 3 = v4.2.0,
+VERSION = 2                             # build number, tag ca0002.  Old scheme (tag circa<n>): 1 = v4.1.0 (FW1); 2, 3 = v4.2.0,
                                         # v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected taps, never fired on the ring); 5 = taps found
                                         # in the samples (v4.2.3, firm taps only); 6 = normal taps (v4.2.4); 7 = motion stream ends when
                                         # the phone leaves (FW11); 8 = numbered samples (FW12); 9 = light samples (FW7a); 10 (circaA) =
                                         # wear state (FW15b); 11 (circaB) = light samples wait for room in the send ring (FW7a).
-                                        # New scheme: 1 (ca0001) = what circaB was, only the tag differs
+                                        # New scheme: 1 (ca0001) = what circaB was, only the tag differs; 2 (ca0002) = the light
+                                        # copy ends with the measurement and sends only the drain's own reads (FW7a)
 LIGHT_READ = 0x830238                   # optical read helper (reg, buf, len) for I2C 0x44; its epilogue below
-LIGHT_HOOK = 0x830268                   # mov r0, r4 ; pop {r1-r7, pc}: r4 = 0 if read, r6 = len, r7 = buf, [sp] = register
-LIGHT_EPILOGUE = bytes.fromhex("2046febd")
+LIGHT_HOOK = 0x830268                   # mov r0, r4 ; pop {r1-r7, pc}: r4 = 0 if read, r6 = len, r7 = buf, [sp] = register,
+LIGHT_EPILOGUE = bytes.fromhex("2046febd")   # [sp + 28] = the helper's return address (only the helper reaches here)
+DRAIN_READS = (0x83030D, 0x83031F, 0x8303E7)    # return addresses (Thumb bit set) of the drain's three register 0x41 reads
+STOP_HOOK = 0x830564                    # drain timer on/off 0x83054C, "off" branch: ldr r0, =0x20BD60 ; adds r0, #8 (timer
+STOP_CODE = bytes.fromhex("18480830")   # handle), then the delete; reached at every measurement end
 TX_RING = 0x209A32                      # QUEUE_PACKET's ring: u16 next to send, u16 next free, 128 slots; it never checks for room
 LIGHT_ROOM = 16                         # FW7a sends only while fewer packets than this wait (one read is about 6), so stock
                                         # replies are never overwritten and wait at most this many packets
@@ -261,11 +270,21 @@ LIGHT_COPY = f"""
     ldrb  r0, [r0]
     cmp   r0, #0
     beq   done
-    ldr   r0, [sp]
-    cmp   r0, #0x41
-    bne   done
     cmp   r4, #0
     bne   done
+    cmp   r6, #189
+    bhi   done
+    ldr   r0, [sp, #28]
+    ldr   r1, =0x{DRAIN_READS[0]:x}
+    cmp   r0, r1
+    beq   drain
+    ldr   r1, =0x{DRAIN_READS[1]:x}
+    cmp   r0, r1
+    beq   drain
+    ldr   r1, =0x{DRAIN_READS[2]:x}
+    cmp   r0, r1
+    bne   done
+drain:
     bl    0x{CONNECTED:x}
     cmp   r0, #0
     bne   send
@@ -321,6 +340,17 @@ fits:
 done:
     mov   r0, r4
     pop   {{r1, r2, r3, r4, r5, r6, r7, pc}}
+"""
+
+
+# Replaces the two instructions at STOP_HOOK (FW7a): the light copy ends with the measurement.  r1 is free (the
+# delete call that follows takes r0 only).
+LIGHT_STOP = f"""
+    ldr   r1, =0x{LIGHT:x}
+    movs  r0, #0
+    strb  r0, [r1]
+    ldr   r0, =0x20BD68
+    bx    lr
 """
 
 
@@ -494,6 +524,7 @@ def patch(stock: bytes) -> bytes:
     redirect(UNKNOWN_SUB, UNKNOWN_CODE, MOTION_CMD)                                           # FW4
     redirect(STILL_CALL, asm(f"bl 0x{STILL_CHECK:x}", STILL_CALL), STILL_VETO)                # FW4
     redirect(LIGHT_HOOK, LIGHT_EPILOGUE, LIGHT_COPY)                                          # FW7a
+    redirect(STOP_HOOK, STOP_CODE, LIGHT_STOP)                                                # FW7a
     redirect(WEAR_HOOK, asm(f"strb r0, [r5, #1]\nb 0x{WEAR_BACK:x}", WEAR_HOOK), WEAR_SEEN)   # FW15b
     assert img[off(BSS_LEN):off(BSS_LEN) + 4] == struct.pack("<I", 0x55DC)
     # FW6, FW12, FW7a, FW15b: the startup zero-fill runs on over TAP_STATE, SEQ, LIGHT and WEAR; the overlay is copied in over its part afterwards
