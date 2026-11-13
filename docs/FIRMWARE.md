@@ -195,20 +195,12 @@ but blank only in the emulator, and the ROM's own flash use (boot patch, `ftl_sa
 
 ## Patched image
 
-`RY02_3.00.33_fullaccel.bin` (built by `emu/patch_fw.py`, 324 bytes added) reports itself as `RY02_3.00.33_circa<n>` instead of `…_250117` (device information, version command, and the file's wrapper; `n` is `VERSION` in `patch_fw.py`: 1 = app v4.1.0; 2 = v4.2.0 and 3 = v4.2.1, which both crash the ring; 4 = the first without long jumps). The chip is a Cortex-M0+: appended code may use 16-bit Thumb instructions and `bl` only. A far `b` assembles to `b.w`, which faults on the ring; `patch_fw.py` refuses to build it and the emulator runs as a Cortex-M0. It adds these ring-to-phone packets:
+`RY02_3.00.33_fullaccel.bin` (built by `emu/patch_fw.py`, 384 bytes added) reports itself as `RY02_3.00.33_circa<n>` instead of `…_250117` (device information, version command, and the file's wrapper; `n` is `VERSION` in `patch_fw.py`: 1 = app v4.1.0; 2 = v4.2.0 and 3 = v4.2.1, which both crash the ring; 4 = v4.2.2, the first without long jumps; 5 = taps found in the samples). The chip is a Cortex-M0+: appended code may use 16-bit Thumb instructions and `bl` only. A far `b` assembles to `b.w`, which faults on the ring; `patch_fw.py` refuses to build it and the emulator runs as a Cortex-M0. It adds these ring-to-phone packets:
 
 | Packet | Patch | Meaning |
 |---|---|---|
 | `A1 05 nn <samples>` | FW1 | every accelerometer sample while a stream runs |
 | `A1 07` / `A1 08` | FW4 | echo of the motion-only stream start / stop commands |
-| `A1 09 <count>` | FW6 | a double tap, sent by the next batch read (up to 0.8 s later); count 1, 2… since boot, wraps at 255. A phone sending `A1 09` still gets `A1 FF`. |
+| `A1 09 <count>` | FW6 | a double tap, sent by the batch read that holds it (up to 0.8 s later); count 1, 2… since boot, wraps at 255. A phone sending `A1 09` still gets `A1 FF`. |
 
-Accelerometer registers FW6 changes (chip type `0x11`, the default; other chip types keep stock values):
-
-| Register | When | Stock | Patched |
-|---|---|---|---|
-| CLICK_CFG `0x38` | tap-wait | `0x15` (single click X/Y/Z) | `0x3F` (single and double click) |
-| TIME_WINDOW `0x3D` | tap-wait | never written | `0x0A` (400 ms at 25 Hz) |
-| CLICK_CFG `0x38` | sampling | `0x00` | `0x2A` (double click only, not on the interrupt pin) |
-| CLICK_THS `0x3A` | sampling | `0x05` left from tap-wait (0.16 g) | `0xB0` (latched, 1.5 g: a guess, not tuned on a ring) |
-| CLICK_SRC `0x39` | tap-wait setup, each batch read | never read | read (clears the latch; double-click bit sends `A1 09`) |
+FW6 leaves the accelerometer's registers as stock (versions 2 to 4 changed its click settings; on the ring the chip never reported a double click). Double taps are found in the samples at the end of each batch read: per sample, jolt = |dx| + |dy| + |dz| against the sample before, high bytes only (32 mg a step). A tap is a jolt of 1280 mg or more after two samples below 640 mg; a second tap 3 to 8 samples (120 to 320 ms) after the first is a double tap. More than 4 samples in a row at 640 mg or more is movement and cancels. The numbers come from `emu/testdata/taps.csv`, a real recording: 10 double taps in it, none while shaking or moving. Only while the ring samples: the tap that wakes a resting ring is not in the samples.

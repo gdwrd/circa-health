@@ -107,6 +107,7 @@ class Emu:
         self.hw = {}                # hardware event sources: name -> {at, interval or None, fire}
         self.accel_drained = self.accel_k = 0
         self.still = False          # True: the fake accelerometer lies flat and motionless
+        self.recording = None       # [(x, y, z) in mg, ...]: replayed, looping, instead of the fake motion
         self.click_src, self.last_tap = 0, None     # fake accelerometer's tap detector, see tap()
         self.ppg_drained = self.ppg_bytes = 0
         self.services, self.connected, self.subscribed, self.notified = [], False, set(), []
@@ -310,8 +311,9 @@ class Emu:
             i, k = reg - 0x28, self.accel_k
             if i == 5: self.accel_k += 1
             mg = (0, 0, 1000) if self.still else (1000 * math.cos(k * 0.25), 1000 * math.sin(k * 0.25), 60 * math.sin(k * 1.7))
+            if self.recording: mg = self.recording[k % len(self.recording)]
             mg = mg[i // 2]
-            raw = (int(mg / 8) << 6) & 0xFFFF           # 10-bit left-justified, 8 mg per step at +-4 g
+            raw = (int(mg // 8) << 6) & 0xFFFF          # 10-bit left-justified, 8 mg per step at +-4 g
             return raw >> 8 if i % 2 else raw & 0xFF
         return v
 

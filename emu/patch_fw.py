@@ -11,12 +11,13 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        the way the motion interrupt does; a1 08 clears it.  Both answer with an echo (a1 07 / a1 08).
        While the mode is 0x10 the firmware's "ring is still, back to tap-wait" decision is vetoed,
        so the 25 a second stream has no gaps.
-  FW6  the accelerometer's own double-click detection is turned on next to the stock single click (CLICK_CFG 0x38:
-       0x15 -> 0x3f in tap-wait, TIME_WINDOW 0x3d = 0x0a, 400 ms at 25 Hz).  While sampling CLICK_CFG is 0x2a
-       instead of 0 and CLICK_THS 0x3a is 0xb0: latched, 1.5 g instead of the 0.16 g wake threshold, so ordinary
-       movement is not a click.  Clicks stay off the interrupt pin while sampling, as in stock; the batch read
-       (every 0.8 s, in the sensor task) reads CLICK_SRC 0x39 and, when its double-click bit is set, sends
-       a1 09 <count>  (count from 1 per boot, wraps at 255).  Only for the stock chip type 0x11.
+  FW6  double taps are found in the samples themselves, at the end of every batch read (sensor task), so the
+       accelerometer keeps its stock settings and any chip type works.  Per sample, jolt = |dx| + |dy| + |dz|
+       against the sample before, high bytes only (32 mg a step).  A tap is a jolt of TAP_T or more after two
+       samples below TAP_Q; a second tap TAP_LO..TAP_HI samples after the first sends  a1 09 <count>  (count
+       from 1 per boot, wraps at 255).  More than TAP_RUN samples in a row at TAP_Q or more is movement and
+       cancels.  The numbers come from a real recording (emu/testdata/taps.csv).  Only while the ring samples:
+       the tap that wakes a resting ring is not in the samples.
   Version: the firmware texts the ring reports end in _circa<VERSION> instead of _250117, in the file's wrapper too.
 
 Usage: python patch_fw.py [stock.bin] [patched.bin]      (needs: pip install keystone-engine)
@@ -42,22 +43,22 @@ STILL_CHECK = 0x82EA30
 START_SAMPLING = 0x20BA3F               # flag the motion interrupt sets; the next read tick starts sampling
 READ_TICK = 0x82E63C                    # gsensor_read_timer_id callback; the motion interrupt calls it directly
 MOTION_ONLY = 0x10
-ACCEL_WRITE, ACCEL_READ = 0x82D548, 0x82D57A    # (reg, value) -> ok ; (reg) -> value, both take the I2C mutex
-TAP_WAIT_CFG = 0x82E292                 # bl ACCEL_WRITE with r0 = 0x38, r1 = 0x15: tap-wait CLICK_CFG, chip type 0x11
-SAMPLE_CFG = 0x82D94E                   # bl ACCEL_WRITE with r0 = 0x38, r1 = 0: sampling start (chip types 0x11, 0x28)
-CHIP_TYPE = 0x20BA20                    # 0x11 = the LIS3DH-style default; +2 is set by the motion interrupt
-SAMPLE_THS = 0xB0                       # CLICK_THS while sampling: latch | 48 * 31 mg.  Guess, not tuned on a ring
-VERSION = 4                             # ours: 1 = v4.1.0 (FW1); 2 = v4.2.0, 3 = v4.2.1 (FW4, FW6: both crash on b.w); 4 = no b.w
+TAP_T, TAP_Q, TAP_LO, TAP_HI, TAP_RUN = 40, 20, 3, 8, 4     # 1280 mg, 640 mg; 120..320 ms apart at 25 Hz
+VERSION = 5                             # ours: 1 = v4.1.0 (FW1); 2, 3 = v4.2.0, v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected
+                                        # taps, never fired on the ring); 5 = taps found in the samples
 STOCK_TEXT = b"3.00.33_250117"          # in the wrapper, the device-information text and the version command's reply
 # Free RAM: .bss ends at 0x20DC30, the largest RAM-code overlay (table at 0x2083D8, loader 0x8249D8) at 0x20DCF8,
 # and update_ram_layout(0x7000, ...) starts the heap at 0x20EC00.  Nothing else lives in between.
-TAP_COUNT = 0x20DCF8
+TAP_STATE = 0x20DCF8                    # 8 bytes: count, last xh yh zh, quiet samples, jolt run, since first tap + 1, spare
 BSS_LEN = 0x824728                      # startup's .bss length literal (0x55DC), one reference (0x82445E)
 
 # Entered instead of the epilogue: sp is still the batch-read frame, r4 = bytes in this batch,
 # the samples sit at sp+0x11.  r5-r7 are free because the epilogue restores them.
 FULL_ACCEL = f"""
-    bl    TAP_POLL
+    add   r0, sp, #0x10
+    adds  r0, #1
+    mov   r1, r4
+    bl    TAP_SCAN
     ldr   r0, =0x{RAW_MODE:x}
     ldrb  r0, [r0]
     cmp   r0, #0
@@ -149,51 +150,93 @@ stock:
 """
 
 
-# Replaces the tap-wait CLICK_CFG write: single and double click, and the double-click window.
-# Reads CLICK_SRC first so a click latched while sampling cannot hold the interrupt pin once clicks are routed to it.
-TAP_WAIT = f"""
-    push  {{r4, lr}}
-    movs  r0, #0x39
-    bl    0x{ACCEL_READ:x}
-    movs  r0, #0x38
-    movs  r1, #0x3f
-    bl    0x{ACCEL_WRITE:x}
-    mov   r4, r0
-    movs  r0, #0x3d
-    movs  r1, #0x0a
-    bl    0x{ACCEL_WRITE:x}
-    ands  r0, r4
-    pop   {{r4, pc}}
+# r0 = samples (xl xh yl yh zl zh each), r1 = bytes.  See FW6 in the docstring; state bytes at TAP_STATE.
+TAP_SCAN = f"""
+    push  {{r4, r5, r6, r7, lr}}
+    mov   r5, r0
+    adds  r6, r0, r1
+    ldr   r4, =0x{TAP_STATE:x}
+next:
+    cmp   r5, r6
+    bhs   out
+    ldrb  r0, [r4, #6]
+    cmp   r0, #0
+    beq   jolt
+    adds  r0, #1
+    cmp   r0, #{TAP_HI + 1}
+    bls   keep
+    movs  r0, #0
+keep:
+    strb  r0, [r4, #6]
+jolt:
+    movs  r7, #0
+    movs  r2, #1
+axis:
+    ldrsb r0, [r5, r2]
+    lsrs  r3, r2, #1
+    adds  r3, #1
+    ldrsb r1, [r4, r3]
+    strb  r0, [r4, r3]
+    subs  r0, r0, r1
+    bpl   pos
+    rsbs  r0, r0, #0
+pos:
+    adds  r7, r7, r0
+    adds  r2, #2
+    cmp   r2, #7
+    blo   axis
+    adds  r5, #6
+    cmp   r7, #{TAP_Q}
+    blo   tap
+    ldrb  r0, [r4, #5]
+    adds  r0, #1
+    cmp   r0, #{TAP_RUN}
+    bls   run
+    movs  r0, #0
+    strb  r0, [r4, #6]
+    movs  r0, #{TAP_RUN + 1}
+run:
+    strb  r0, [r4, #5]
+tap:
+    cmp   r7, #{TAP_T}
+    blo   rest
+    ldrb  r0, [r4, #4]
+    cmp   r0, #2
+    blo   rest
+    ldrb  r0, [r4, #6]
+    movs  r1, #1
+    cmp   r0, #{TAP_LO + 1}
+    blo   arm
+    movs  r1, #0
+    strb  r1, [r4, #6]
+    bl    SEND_TAP
+    b     rest
+arm:
+    strb  r1, [r4, #6]
+rest:
+    cmp   r7, #{TAP_Q}
+    blo   quiet
+    movs  r0, #0
+    strb  r0, [r4, #4]
+    b     next
+quiet:
+    ldrb  r0, [r4, #4]
+    cmp   r0, #200
+    bhs   full
+    adds  r0, #1
+    strb  r0, [r4, #4]
+full:
+    movs  r0, #0
+    strb  r0, [r4, #5]
+    b     next
+out:
+    pop   {{r4, r5, r6, r7, pc}}
 """
 
-# Replaces the sampling-start CLICK_CFG = 0 write: on chip type 0x11 keep double clicks on, at the higher threshold.
-SAMPLE_CLICK = f"""
+# One a1 09 <count> packet.
+SEND_TAP = f"""
     push  {{r4, lr}}
-    ldr   r4, =0x{CHIP_TYPE:x}
-    ldrb  r4, [r4]
-    cmp   r4, #0x11
-    bne   stock
-    movs  r1, #0x2a
-    bl    0x{ACCEL_WRITE:x}
-    movs  r0, #0x3a
-    movs  r1, #0x{SAMPLE_THS:x}
-stock:
-    bl    0x{ACCEL_WRITE:x}
-    pop   {{r4, pc}}
-"""
-
-# Called at the end of every batch read (sensor task): one a1 09 packet per latched double click.
-TAP_POLL = f"""
-    push  {{r4, lr}}
-    ldr   r0, =0x{CHIP_TYPE:x}
-    ldrb  r0, [r0]
-    cmp   r0, #0x11
-    bne   done
-    movs  r0, #0x39
-    bl    0x{ACCEL_READ:x}
-    lsls  r0, r0, #26
-    bpl   done
-    ldr   r1, =0x{TAP_COUNT:x}
+    ldr   r1, =0x{TAP_STATE:x}
     ldrb  r0, [r1]
     adds  r0, #1
     strb  r0, [r1]
@@ -217,7 +260,6 @@ TAP_POLL = f"""
     mov   r0, sp
     bl    0x{QUEUE_PACKET:x}
     add   sp, #16
-done:
     pop   {{r4, pc}}
 """
 
@@ -253,14 +295,13 @@ def patch(stock: bytes) -> bytes:
     text = b"3.00.33_circa%d" % VERSION
     assert len(text) == len(STOCK_TEXT) and img.count(STOCK_TEXT) == 3     # shortcut: one digit, rename the tag at version 10
     img[:] = img.replace(STOCK_TEXT, text)
-    redirect(HOOK, EPILOGUE, FULL_ACCEL.replace("TAP_POLL", hex(append(TAP_POLL))))          # FW1, FW6
+    scan = append(TAP_SCAN.replace("SEND_TAP", hex(append(SEND_TAP))))                        # FW6
+    redirect(HOOK, EPILOGUE, FULL_ACCEL.replace("TAP_SCAN", hex(scan)))                       # FW1
     redirect(UNKNOWN_SUB, UNKNOWN_CODE, MOTION_CMD)                                           # FW4
     redirect(STILL_CALL, asm(f"bl 0x{STILL_CHECK:x}", STILL_CALL), STILL_VETO)                # FW4
-    redirect(TAP_WAIT_CFG, asm(f"bl 0x{ACCEL_WRITE:x}", TAP_WAIT_CFG), TAP_WAIT)              # FW6
-    redirect(SAMPLE_CFG, asm(f"bl 0x{ACCEL_WRITE:x}", SAMPLE_CFG), SAMPLE_CLICK)              # FW6
     assert img[off(BSS_LEN):off(BSS_LEN) + 4] == struct.pack("<I", 0x55DC)
-    # FW6: the startup zero-fill runs on to TAP_COUNT + 4; the overlay is copied in over its part afterwards
-    struct.pack_into("<I", img, off(BSS_LEN), TAP_COUNT + 4 - 0x208654)
+    # FW6: the startup zero-fill runs on over TAP_STATE; the overlay is copied in over its part afterwards
+    struct.pack_into("<I", img, off(BSS_LEN), TAP_STATE + 8 - 0x208654)
     struct.pack_into("<I", img, WRAP + 8, len(img) - WRAP - HDR)        # Realtek header: payload length
     # Clear the header's "not ready" flag (0x0981 -> 0x0901).  The stock firmware only clears it itself after the
     # ROM's integrity check passes, and a modified image is expected to fail that check; pre-cleared, the boot ROM

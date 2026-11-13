@@ -72,32 +72,42 @@ def test_motion_only_stream_has_no_gaps_while_still():
     assert stops and 71500 < stops[-1] < 80000                                 # back to tap-wait after a1 08
 
 
-def test_double_tap_sends_one_packet_each():
-    import patch_fw
+def test_double_taps_in_a_real_recording():
+    # testdata/taps.csv: 51 s recorded on the ring (firmware version 4) while trying double taps of every kind,
+    # then shaking and moving.  The five firm, separate double taps are at samples 273/278, 302/308, 360/366,
+    # 392/397 and 430/435; samples 546-900 are shaking and movement and must count nothing.
+    import csv, patch_fw
+    rows = [r for r in csv.reader((ringemu.HERE / "testdata" / "taps.csv").open()) if r and r[0].isdigit()]
     e = ringemu.Emu(quiet_mem=True, trace=True)         # starts on stock firmware, installs the patch over Bluetooth
     e.ota_start(3000, patch_fw.patch(ringemu.IMAGE.read_bytes()))
-    for t in (12000, 20000, 21000, 30000, 30200, 38000, 38250):    # single tap; two taps 1 s apart; two double taps
-        e.tap(t)
-    e.command(25000, bytes([0xA1, 0x09]))              # a1 09 only goes ring -> phone
+    e.recording = [(0, 0, 1000)]
+    def start():
+        e.recording, e.accel_k = [tuple(int(v) for v in r[2:5]) for r in rows], 0
+    e.hw["rec"] = {"at": 12000, "interval": None, "fire": start}
+    e.command(12000, bytes([0xA1, 0x07]))
+    e.command(11000, bytes([0xA1, 0x09]))              # a1 09 only goes ring -> phone
     e.boot()
     with contextlib.redirect_stdout(io.StringIO()):
-        e.run(44000)
+        e.run(12000 + len(rows) * 40)
     assert e.resets == 2 and e.ota["state"] == 5
-    tx = [(ev["t"], bytes.fromhex(ev["data"])) for ev in e.trace if ev["kind"] == "ble_tx" and ev["data"][:2] == "a1"]
-    taps = [(t, n[2]) for t, n in tx if n[1] == 9]     # reported by the next batch read, at most 0.8 s later
-    assert [n for t, n in taps] == [1, 2] and 30200 <= taps[0][0] <= 31200 and 38250 <= taps[1][0] <= 39250, tx
-    assert all(sum(n[:15]) & 0xFF == n[15] for t, n in tx)
-    assert (25000, 0xFF) in [(t, n[1]) for t, n in tx]
-    wakes = [ev["t"] for ev in e.trace if ev["kind"] == "bus" and ev["tx"] == "2e80" and ev["t"] > 11000]
-    assert wakes == [12000, 20000, 30000, 38000]       # each first tap starts sampling once; second taps do not restart it
+    tx = [bytes.fromhex(ev["data"]) for ev in e.trace if ev["kind"] == "ble_tx" and ev["data"][:2] == "a1"]
+    assert tx[0][1] == 0xFF and all(sum(n[:15]) & 0xFF == n[15] for n in tx)
+    sent, taps = 0, []                                  # first sample of the batch each a1 09 was found in
+    for n in tx:
+        if n[1] == 5: sent += n[2] // 6
+        if n[1] == 9: taps.append((sent, n[2]))
+    assert [c for _, c in taps] == list(range(1, len(taps) + 1))
+    at = [i for i, _ in taps]
+    firm = [i for i in at if 240 <= i <= 440]
+    assert len(firm) == 5 and all(i <= t < i + 32 for i, t in zip(firm, (278, 308, 366, 397, 435))), at
+    assert not [i for i in at if 546 <= i <= 870], at
 
 
-def worn(image, taps=()):
+def worn(image):
     """30 s on a moving finger with the phone connected -> (accelerometer interrupts, double-tap packets, resets)."""
     e = ringemu.Emu(quiet_mem=True, trace=True, image=image)
     e.command(2500, bytes([0x03]))
     e.wear(3000)
-    for t in taps: e.tap(t)
     e.boot()
     with contextlib.redirect_stdout(io.StringIO()):
         e.run(33000)
@@ -110,11 +120,10 @@ def test_wearing_the_ring_interrupts_stock_only_to_wake():
     assert 0 < interrupts <= 10 and taps == 0 and resets == 1      # reset 1 is the first-boot config write
 
 
-def test_wearing_the_patched_ring_sends_only_real_double_taps():
-    # v4.2.0 (firmware version 2) kept double clicks on the interrupt pin at the wake threshold while sampling:
-    # about 8 interrupts and false taps a second here, and the real ring stopped answering on a finger.
-    interrupts, taps, resets = worn(ringemu.HERE / "firmware" / "RY02_3.00.33_fullaccel.bin", taps=(20000, 20200))
-    assert interrupts <= 10 and taps == 1 and resets == 1
+def test_wearing_the_patched_ring_sends_no_taps():
+    # Firmware version 2 kept double clicks on the interrupt pin while sampling: about 8 interrupts a second here.
+    interrupts, taps, resets = worn(ringemu.HERE / "firmware" / "RY02_3.00.33_fullaccel.bin")
+    assert interrupts <= 10 and taps == 0 and resets == 1
 
 
 def test_bluetooth_update_restores_stock_firmware(tmp_path):
