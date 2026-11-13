@@ -204,3 +204,50 @@ but blank only in the emulator, and the ROM's own flash use (boot patch, `ftl_sa
 | `A1 09 <count>` | FW6 | a double tap, sent by the batch read that holds it (up to 0.8 s later); count 1, 2… since boot, wraps at 255. A phone sending `A1 09` still gets `A1 FF`. |
 
 FW6 leaves the accelerometer's registers as stock (versions 2 to 4 changed its click settings; on the ring the chip never reported a double click). Double taps are found in the samples at the end of each batch read: per sample, jolt = |dx| + |dy| + |dz| against the sample before, high bytes only (32 mg a step). A tap is a jolt of 640 mg or more after a sample below 480 mg; a second tap 3 to 8 samples (120 to 320 ms) after the first is a double tap. More than 4 samples in a row at 480 mg or more is movement and cancels. The numbers come from `emu/testdata/taps.csv`, a real recording: 22 double taps in it (2 of its 3 gentle ones, the firm ones, the rhythmic tapping), none while shaking, one while moving. Version 5 used 1280 mg and 640 mg and needed hard taps. Only while the ring samples: the tap that wakes a resting ring is not in the samples.
+
+## Wear state (FW15a)
+
+The stock firmware has one. It decides "on the finger" from a reflection reading of the optical chip (I2C `0x44`),
+only while that chip runs, and when the answer is "not worn" it ends the measurement without writing the HR log. The
+0 the phone gets is an empty slot, not a measured 0. "Run" = seen in the emulator; "code" = read from disassembly
+only. Stock emulator caveat: its calibration is all zero, which pins the reading at `0x7FFF` (always worn); the
+"not worn" runs below faked a calibration (four offsets of 100) and the chip's reflection registers.
+
+| What | Where | Meaning | Known from |
+|---|---|---|---|
+| Wear byte | `0x20847D` | 1 worn, 0 not worn. Forced to 1 at every measurement start (`0x832198`, which also sets `0x20847E` = 2 so the first result counts as a change). Only meaningful while the chip runs. | run |
+| Detector | `0x831F74` | Reading (`0x8327F4`, int at `0x20D5DC`) below `[0x208478]` (800) on 5 batches in a row (counter `0x20D5A6`) writes 0 at `0x832004`; above `[0x208474]` (1000) counts back down and writes 1. A change to 0 calls `0x831E78`; to 1 restarts the sensor (`0x831F12(0)`, `(3)`). | run |
+| Detector call | `0x830AF6` | After each HR algorithm batch (`0x830898`), about every 0.33 s, only while the optical chip runs. | run |
+| Reading | `0x832722` | `0x83239C(1)` minus `0x83239C(0)`, each minus a calibration offset; `0x83239C(ch)` = the chip's 20-bit value in registers `0xC5+3ch`..`0xC7+3ch`, shifted right 4 (`0x832418(ch)`: registers `0xBC+3ch`..). Enabled per batch by `0x8327EE` (`0x20D5C9` = 1, chip writes `0x9C = 7`, `0x70 = 0`). With the fakes: 19500 on the finger, -200 off. | code, run with faked registers |
+| Calibration | `0x2086B8`..`0x2086BF` | Four offsets in the settings block `0x208660` (`ftl` offset `0x400`, 100 bytes). All zero → `0x20847F` = 0 (`0x8328A6`) → reading pinned at `0x7FFF`. `A1 06` runs a calibration (`0x832902`) and saves the block. Contents on the real ring: not known. | run |
+| Off-finger flag | `0x20BC87` | 1 = the last measurement ended not worn (`0x830988`, via `0x830980` when `0x8321E6`, which returns `0x20847D`, is 0; `0x20BC88` = 3 there). Set back to 0 when an HR batch is computed (`0x830944`), so also for the first ~1 s of every measurement. Getter `0x830CAC` returns 1 = worn, 0 = not worn; it has 10 callers. | run |
+| HR log | flash `0x878000` | Header, then one byte per slot from `0x8780E1`, written by `0x82F9C0` (from the per-second tick `0x82FA60` at `0x82FAEC`) only for 40..220 bpm. | run |
+
+Taking the ring off (run, faked calibration and reflection, HR log every 5 min): taken off at 605 s, 5 s into the
+second measurement → reading -200 → `0x20847D` = 0 at 606.4 s → `0x20BC87` = 1 → the tick `0x82FA60` (ticks 4..14
+check `0x830CAC`) stops the measurement at tick 7 (`0x82FBB6`) → no flash write, slot `0x8780E2` stays `0xFF`.
+
+Why the phone sees 0 (code): the log reader `0x82F9FE` (called from `0x828EF0`) copies the slots and sets every byte
+outside 40..220 to 0, so an unwritten `0xFF` slot reads as 0. In the emulator `15` reached `0x82F9FE` but took its
+"no data" exit, so the zeroing itself was not seen running.
+
+Never a 0: a measurement that runs to the end with a result below 40 logs a random 40..49 (`0x82FA9C`,
+`0x8247C4() % 10 + 40`); in the stock emulator with no light at all it logged `0x2A` and `0x30`. The same tick code
+also replaces results of 100 and up, or above 120, with random 90..99 or 95..104 under conditions not traced
+(`0x82D120`, `0x82CF40`, `0x20B850`).
+
+When it updates:
+
+- During every scheduled HR measurement (run).
+- After a "not worn" result: the minute routine (`0x82C998`) runs a 2.5 s check, `0x82F608` (sensor requester 2,
+  one-shot timer `0x9C4` ms, callback `0x82F570` reads `0x830CAC` and turns the sensor off), once a minute while the
+  counter `0x20B934` is at most 5: seen 6 checks (660..960 s), then none to 1080 s. While off, the 900 s HR log slot
+  ran no measurement of its own (run; which code skips it was not traced).
+- While worn, the same check when the minute counter at `0x20B942` is 29 mod 30 (code; what that counter counts is
+  not established).
+- `0x82937C` (reached through a pointer, caller not found) runs the same check and sends the 1-byte result with
+  `0x827CC2` (code).
+
+No timestamp of the last change is kept (none found). Not established: whether the real ring's calibration is set
+(the real ring's 0s off the finger suggest it is: a measurement that runs to the end never logs 0), and what wakes
+the check again after the 6 retries.
