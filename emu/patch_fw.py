@@ -29,7 +29,17 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        from the 320 ms drain 0x8302C0) is sent as it came off the bus:  a1 0c nn <nn bytes, 3 a sample, up to 4 samples>.
        Samples flow only while the stock firmware measures (live heart rate 69 01 and its own schedule).  A queue read
        with no phone connected clears the mode instead of sending, as FW11 does.
-  Version: the firmware texts the ring reports end in _circa<VERSION> instead of _250117, in the file's wrapper too.
+  FW15b a1 0f answers the wear state and when it last changed:  a1 0f <state> <t0 t1 t2 t3> 00 .. checksum
+       state 0 = unknown (no verdict since boot), 1 = worn, 2 = not worn; t = the firmware clock (word CLOCK, seconds
+       since 2000-01-01 in the phone's local time as set-time 01 wrote it; it steps once a minute) at the change,
+       little-endian, 0 while unknown.  One hook, WEAR_HOOK: the stock detector's own verdict store (5 readings in a
+       row below the low threshold -> 0, back above the high one with its counter at 0 -> 1; it stores the same verdict
+       on every batch while it holds), so the start-of-measurement "worn" that 0x20BC87 shows for a second is never
+       seen.  A change is recorded only when the verdict differs from the stored state.  The clock value is used, not
+       minutes counted since the change, because it is one load at the hook and every read returns the same bytes;
+       the phone turns it into a time with no conversion here.  Only observes: the detector stores what it would.
+  Version: the firmware texts the ring reports end in _circa<VERSION> instead of _250117, in the file's wrapper too
+  (one character: 0-9, then A = 10).
 
 Usage: python patch_fw.py [stock.bin] [patched.bin]      (needs: pip install keystone-engine)
 """
@@ -56,10 +66,10 @@ START_SAMPLING = 0x20BA3F               # flag the motion interrupt sets; the ne
 READ_TICK = 0x82E63C                    # gsensor_read_timer_id callback; the motion interrupt calls it directly
 MOTION_ONLY = 0x10
 TAP_T, TAP_Q, TAP_LO, TAP_HI, TAP_RUN = 20, 15, 3, 8, 4     # 640 mg, 480 mg; 120..320 ms apart at 25 Hz
-VERSION = 9                             # ours: 1 = v4.1.0 (FW1); 2, 3 = v4.2.0, v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected
+VERSION = 10                            # ours: 1 = v4.1.0 (FW1); 2, 3 = v4.2.0, v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected
                                         # taps, never fired on the ring); 5 = taps found in the samples (v4.2.3, firm taps only); 6 = normal taps
                                         # (v4.2.4); 7 = motion stream ends when the phone leaves (FW11); 8 = numbered samples (FW12);
-                                        # 9 = light samples (FW7a)
+                                        # 9 = light samples (FW7a); 10 (tag circaA) = wear state (FW15b)
 LIGHT_READ = 0x830238                   # optical read helper (reg, buf, len) for I2C 0x44; its epilogue below
 LIGHT_HOOK = 0x830268                   # mov r0, r4 ; pop {r1-r7, pc}: r4 = 0 if read, r6 = len, r7 = buf, [sp] = register
 LIGHT_EPILOGUE = bytes.fromhex("2046febd")
@@ -70,6 +80,10 @@ TAP_STATE = 0x20DCF8                    # 8 bytes: count, last xh yh zh, quiet s
 SEQ = TAP_STATE + 8                     # FW12: 4 bytes, the last packet's seq (0 after boot)
 SEQ_MAX = 0x3FFFF
 LIGHT = SEQ + 4                         # FW7a: 1 byte (+3 spare), light copy on
+WEAR = LIGHT + 4                        # FW15b: state byte (+3 spare), then 4 bytes: CLOCK at the last change
+WEAR_HOOK = 0x832004                    # detector: strb r0, [r5, #1] (r0 = 0 not worn / 1 worn) ; b 0x832010
+WEAR_BACK = 0x832010
+CLOCK = 0x2087B0                        # firmware clock, seconds since 2000-01-01 local; set by 01, +60 in the minute handler
 BSS_LEN = 0x824728                      # startup's .bss length literal (0x55DC), one reference (0x82445E)
 
 # Entered instead of the epilogue: sp is still the batch-read frame, r4 = bytes in this batch,
@@ -174,9 +188,25 @@ MOTION_CMD = f"""
     beq   light
     cmp   r0, #0xb
     beq   light
+    cmp   r0, #0xf
+    beq   wear
     strb  r5, [r6]
     movs  r0, #0xa1
     bx    lr
+wear:
+    ldr   r1, =0x{WEAR:x}
+    mov   r3, sp
+    ldrb  r2, [r1]
+    strb  r2, [r3, #2]
+    ldr   r2, [r1, #4]
+    strb  r2, [r3, #3]
+    lsrs  r2, r2, #8
+    strb  r2, [r3, #4]
+    lsrs  r2, r2, #8
+    strb  r2, [r3, #5]
+    lsrs  r2, r2, #8
+    strb  r2, [r3, #6]
+    b     reply
 light:
     ldr   r1, =0x{LIGHT:x}
     movs  r2, #0xb
@@ -276,6 +306,26 @@ fits:
 done:
     mov   r0, r4
     pop   {{r1, r2, r3, r4, r5, r6, r7, pc}}
+"""
+
+
+# Replaces the detector's verdict store (FW15b): r0 = 0 not worn / 1 worn, r5 = 0x20847C; r0-r3 are reloaded or
+# restored after 0x832010, the function's lr is on its stack.
+WEAR_SEEN = f"""
+    strb  r0, [r5, #1]
+    movs  r1, #2
+    subs  r1, r1, r0
+    ldr   r2, =0x{WEAR:x}
+    ldrb  r3, [r2]
+    cmp   r3, r1
+    beq   back
+    strb  r1, [r2]
+    ldr   r3, =0x{CLOCK:x}
+    ldr   r3, [r3]
+    str   r3, [r2, #4]
+back:
+    ldr   r3, =0x{WEAR_BACK | 1:x}
+    bx    r3
 """
 
 
@@ -421,17 +471,18 @@ def patch(stock: bytes) -> bytes:
         assert img[off(site):off(site) + 4] == expect, f"{site:#x} does not hold the expected code"
         img[off(site):off(site) + 4] = asm(f"bl 0x{append(code):x}", site)
 
-    text = b"3.00.33_circa%d" % VERSION
-    assert len(text) == len(STOCK_TEXT) and img.count(STOCK_TEXT) == 3     # shortcut: one digit, rename the tag at version 10
+    text = b"3.00.33_circa" + b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"[VERSION:VERSION + 1]
+    assert len(text) == len(STOCK_TEXT) and img.count(STOCK_TEXT) == 3     # shortcut: one character, rename the tag after Z (35)
     img[:] = img.replace(STOCK_TEXT, text)
     scan = append(TAP_SCAN.replace("SEND_TAP", hex(append(SEND_TAP))))                        # FW6
     redirect(HOOK, EPILOGUE, FULL_ACCEL.replace("TAP_SCAN", hex(scan)))                       # FW1
     redirect(UNKNOWN_SUB, UNKNOWN_CODE, MOTION_CMD)                                           # FW4
     redirect(STILL_CALL, asm(f"bl 0x{STILL_CHECK:x}", STILL_CALL), STILL_VETO)                # FW4
     redirect(LIGHT_HOOK, LIGHT_EPILOGUE, LIGHT_COPY)                                          # FW7a
+    redirect(WEAR_HOOK, asm(f"strb r0, [r5, #1]\nb 0x{WEAR_BACK:x}", WEAR_HOOK), WEAR_SEEN)   # FW15b
     assert img[off(BSS_LEN):off(BSS_LEN) + 4] == struct.pack("<I", 0x55DC)
-    # FW6, FW12, FW7a: the startup zero-fill runs on over TAP_STATE, SEQ and LIGHT; the overlay is copied in over its part afterwards
-    struct.pack_into("<I", img, off(BSS_LEN), LIGHT + 4 - 0x208654)
+    # FW6, FW12, FW7a, FW15b: the startup zero-fill runs on over TAP_STATE, SEQ, LIGHT and WEAR; the overlay is copied in over its part afterwards
+    struct.pack_into("<I", img, off(BSS_LEN), WEAR + 8 - 0x208654)
     struct.pack_into("<I", img, WRAP + 8, len(img) - WRAP - HDR)        # Realtek header: payload length
     # Clear the header's "not ready" flag (0x0981 -> 0x0901).  The stock firmware only clears it itself after the
     # ROM's integrity check passes, and a modified image is expected to fail that check; pre-cleared, the boot ROM

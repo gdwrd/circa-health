@@ -214,6 +214,63 @@ def test_light_mode_off_keeps_stock_behaviour():
     assert readings and all(abs(r - 60) <= 2 for r in readings), readings
 
 
+def on_and_off(image, reads, off_ms=605000, on_ms=750000):
+    """Image installed over Bluetooth, clock set to 06:00 at 12 s, HR log every 5 min, minute ticks, a1 0f at reads;
+    a calibrated ring (four offsets of 100) on the finger, taken off at off_ms, back on at on_ms.  The optical chip's
+    reflection registers are faked (FW15a): 19500 on the finger, -200 off; its light queue is the stock fake."""
+    import cmdmap
+    e = ringemu.Emu(quiet_mem=True, trace=True)
+    skin = {"on": True}
+    def chan(base):
+        if base == 0xC8: return 20000 if skin["on"] else 300
+        if base == 0xC5: return 500
+        if base == 0xBF and not e.uc.mem_read(0x20D5C9, 1)[0]: return chan(0xC8)   # once equal, which enables the reading
+        return 400
+    stock_ppg = e.ppg_read
+    def ppg(st, v):
+        reg = st["ptr"]
+        if 0xBC <= reg <= 0xCA and not (st["tx"] and st["tx"][0] == 0x41):
+            base = 0xBC + (reg - 0xBC) // 3 * 3
+            return (chan(base) << 4) >> 8 * (reg - base) & (0x0F if reg - base == 2 else 0xFF)
+        return stock_ppg(st, v)
+    e.ppg_read = ppg
+    cal = lambda uc, a, size, _: uc.mem_write(0x2086B8, bytes([100, 0] * 4))    # after 0x83286C copies the stored one
+    e.uc.hook_add(ringemu.UC_HOOK_CODE, cal, begin=0x832870, end=0x832870)
+    e.hw["off"] = {"at": off_ms, "interval": None, "fire": lambda: skin.update(on=False)}
+    e.hw["on"] = {"at": on_ms, "interval": None, "fire": lambda: skin.update(on=True)}
+    e.ota_start(3000, image)
+    e.command(12000, cmdmap.SET_TIME)
+    e.command(13000, bytes.fromhex("16020105"))
+    for t in reads: e.command(t, bytes([0xA1, 0x0F]))
+    e.hw["rtc"] = {"at": 60000, "interval": 60000, "fire": cmdmap.minute_tick(e), "keep": True}
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(1010000)
+    assert e.resets == 2 and e.ota["state"] == 5
+    return e
+
+
+def test_wear_state_and_when_it_changed():
+    import patch_fw
+    ringemu.PULSE_BPM = 60
+    six = 790668000                                     # cmdmap.SET_TIME, 2025-01-20 06:00:00, in seconds since 2000
+    reads = [30000, 350000, 355000, 640000, 645000, 1000000, 1005000]
+    e = on_and_off(patch_fw.patch(ringemu.IMAGE.read_bytes()), reads)
+    got = [bytes(n) for n in e.notified if n[:2] == bytes([0xA1, 0x0F])]
+    assert len(got) == len(reads) and all(sum(n[:15]) & 0xFF == n[15] and not any(n[7:15]) for n in got)
+    state = [(n[2], int.from_bytes(n[3:7], "little")) for n in got]
+    assert state[0] == (0, 0)                           # no verdict yet: unknown, not "worn"
+    assert state[1] == (1, six + 300)                   # first measurement (06:05) on the finger
+    assert state[3][0] == 2 and 0 <= 605 - (state[3][1] - six) < 60        # off at 605 s, the minute it happened
+    assert state[5][0] == 1 and 0 < state[5][1] - six - 750 < 60           # back on at 750 s, the next check found it
+    assert state[1] == state[2] and state[3] == state[4] and state[5] == state[6]   # repeated reads, same answer
+    stock = on_and_off(ringemu.IMAGE.read_bytes(), reads)
+    assert [n for n in stock.notified if n[0] == 0xA1] == [bytes([0xA1, 0xFF]) + bytes(13) + b"\xa0"] * len(reads)
+    log = lambda em: bytes(em.uc.mem_read(0x878000, 0x100))
+    assert log(e) == log(stock) and e.uc.mem_read(0x8780E1, 1)[0] == 60     # the hook only observes
+    assert [n for n in e.notified if n[0] != 0xA1] == [n for n in stock.notified if n[0] != 0xA1]
+
+
 def test_bluetooth_update_restores_stock_firmware(tmp_path):
     import patch_fw
     patched = tmp_path / "patched.bin"

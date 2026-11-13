@@ -445,4 +445,24 @@ object ColmiProtocol {
         if (n !in 1..4) return null
         return List(n) { i -> (0..2).sumOf { (value[3 + 3 * i + it].toInt() and 0xff) shl (8 * it) } }
     }
+
+    // A1 0F: wear state (patched firmware circaA, emu/patch_fw.py FW15b); older firmware answers A1 FF.
+    fun wearRequest(): ByteArray = buildPacket(byteArrayOf(CMD_RAW_STREAM, 0x0F))
+
+    /** [worn]: null = no verdict since the ring booted. [sinceMs]: the minute the state last changed; null when unknown. */
+    data class WearState(val worn: Boolean?, val sinceMs: Long?)
+
+    /**
+     * `A1 0F <state> <t0 t1 t2 t3>`: state 0 unknown, 1 worn, 2 not worn (the stock detector's own verdict); t = the
+     * ring's clock at the change, little-endian seconds since 2000-01-01 in the local time set-time wrote, stepping once
+     * a minute. Null for anything else (A1 FF from older firmware). A t before 2020 means the clock was not set yet: no time.
+     */
+    fun parseWearPacket(value: ByteArray): WearState? {
+        if (value.size < 16 || value[0] != CMD_RAW_STREAM || value[1] != 0x0F.toByte()) return null
+        val worn = when (value[2].toInt()) { 1 -> true; 2 -> false; else -> return WearState(null, null) }
+        val t = ByteBuffer.wrap(value, 3, 4).order(ByteOrder.LITTLE_ENDIAN).int.toLong() and 0xFFFFFFFFL
+        if (t < 631_152_000L) return WearState(worn, null)
+        val since = java.time.LocalDateTime.of(2000, 1, 1, 0, 0).plusSeconds(t - t % 60)
+        return WearState(worn, since.atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli())
+    }
 }

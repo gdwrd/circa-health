@@ -230,6 +230,19 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             conn.writeCommand(ColmiProtocol.sleepRequest())
             val sleepSessions = collectSleep(conn)
 
+            // ── Wear state (patched firmware; older firmware answers A1 FF, no answer is the same) ──
+            conn.writePacket(ColmiProtocol.wearRequest())
+            val wear = withTimeoutOrNull(3_000) {
+                var p: ByteArray
+                do p = conn.notifyV1.receive() while (p.size < 2 || p[0] != ColmiProtocol.CMD_RAW_STREAM || (p[1] != 0x0F.toByte() && p[1] != 0xFF.toByte()))
+                ColmiProtocol.parseWearPacket(p)
+            }
+            log(when {
+                wear == null -> "Ring: no wear state (firmware without it)"
+                wear.worn == null -> "Ring: wear state unknown (no measurement since the ring started)"
+                else -> "Ring: ${if (wear.worn) "worn" else "not worn"} since ${wear.sinceMs?.let { java.util.Date(it) } ?: "unknown time"}"
+            })
+
             log(
                 "Ring: read ${hrSamples.size} HR, ${hrvSamples.size} HRV, ${activitySamples.size} activity, " +
                     "${stressSamples.size} stress, ${spo2Samples.size} SpO2, ${sleepSessions.size} sleep sessions" +
@@ -239,7 +252,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             // ── Compute + push metrics ────────────────────────────────────
             val metrics = buildMetrics(
                 battery, hrSamples, hrvSamples,
-                activitySamples, stressSamples, spo2Samples, sleepSessions
+                activitySamples, stressSamples, spo2Samples, sleepSessions, wear
             )
 
             // Everything read is kept on the phone; every unsent row goes out, so a failed push is retried with no age limit.
@@ -442,7 +455,8 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         activitySamples: List<ActivitySample>,
         stressSamples: List<StressSample>,
         spo2Samples: List<Spo2Sample>,
-        sessions: List<SleepSession>
+        sessions: List<SleepSession>,
+        wear: ColmiProtocol.WearState?
     ): List<Metric> {
         val metrics = mutableListOf<Metric>()
         val labels  = mapOf("device" to "colmi_r02")
@@ -454,6 +468,11 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         if (battery != null) {
             metrics += Metric("ring_battery_pct",  labels, battery.level.toDouble(), nowMs)
             metrics += Metric("ring_charging",     labels, if (battery.charging) 1.0 else 0.0, nowMs)
+        }
+
+        // ── Wear: the state at the minute it last changed; the same sample each sync until it changes again ──
+        if (wear?.worn != null && wear.sinceMs != null) {
+            metrics += Metric("ring_worn", labels, if (wear.worn) 1.0 else 0.0, wear.sinceMs)
         }
 
         // ── Heart rate: raw 5-min samples (ring's native granularity) ─────

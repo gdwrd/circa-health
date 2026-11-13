@@ -64,6 +64,16 @@ class RingLabTest {
         assertEquals("circa-light-20261113-0905.csv", lightFile(java.io.File("nowhere"), java.time.LocalDateTime.of(2026, 11, 13, 9, 5)).name)
     }
 
+    @Test fun wearPacketFromPatchedFirmware() {
+        // captured from the emulated patched firmware (circaA), clock set to 2025-01-20 06:00
+        fun at(h: Int, m: Int) = java.time.LocalDateTime.of(2025, 1, 20, h, m).atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+        assertEquals(ColmiProtocol.WearState(null, null), ColmiProtocol.parseWearPacket(hex("a1 0f 00 00 00 00 00 00 00 00 00 00 00 00 00 b0")))
+        assertEquals(ColmiProtocol.WearState(true, at(6, 5)), ColmiProtocol.parseWearPacket(hex("a1 0f 01 0c a4 20 2f 00 00 00 00 00 00 00 00 b0")))
+        assertEquals(ColmiProtocol.WearState(false, at(6, 10)), ColmiProtocol.parseWearPacket(hex("a1 0f 02 38 a5 20 2f 00 00 00 00 00 00 00 00 de")))
+        assertNull(ColmiProtocol.parseWearPacket(hex("a1 ff 00 00 00 00 00 00 00 00 00 00 00 00 00 a0")))   // older firmware
+        assertArrayEquals(hex("a1 0f 00 00 00 00 00 00 00 00 00 00 00 00 00 b0"), ColmiProtocol.wearRequest())
+    }
+
     @Test fun motionFileNamesNeverOverwrite() {
         val dir = kotlin.io.path.createTempDirectory().toFile()
         val t = java.time.LocalDateTime.of(2026, 11, 13, 9, 5)
