@@ -54,6 +54,16 @@ class RingLabTest {
         assertNull(ColmiProtocol.parseTapPacket(hex("a1 ff 00 00 00 00 00 00 00 00 00 00 00 00 00 a0")))
     }
 
+    @Test fun lightPacketFromPatchedFirmware() {
+        // captured from the emulated patched firmware (circa9): four samples, 3 bytes little-endian each
+        assertEquals(listOf(0x0306C9, 0x03065B, 0x030601, 0x0305BB), ColmiProtocol.parseLightPacket(hex("a1 0c 0c c9 06 03 5b 06 03 01 06 03 bb 05 03 bc")))
+        assertEquals(listOf(0x030572), ColmiProtocol.parseLightPacket(hex("a1 0c 03 72 05 03 00 00 00 00 00 00 00 00 00 2a")))
+        assertNull(ColmiProtocol.parseLightPacket(hex("a1 05 06 c0 e0 00 00 00 00 00 00 00 00 00 00 00")))
+        assertArrayEquals(hex("a1 0a 00 00 00 00 00 00 00 00 00 00 00 00 00 ab"), ColmiProtocol.lightOnRequest())
+        assertArrayEquals(hex("a1 0b 00 00 00 00 00 00 00 00 00 00 00 00 00 ac"), ColmiProtocol.lightOffRequest())
+        assertEquals("circa-light-20261113-0905.csv", lightFile(java.io.File("nowhere"), java.time.LocalDateTime.of(2026, 11, 13, 9, 5)).name)
+    }
+
     @Test fun motionFileNamesNeverOverwrite() {
         val dir = kotlin.io.path.createTempDirectory().toFile()
         val t = java.time.LocalDateTime.of(2026, 11, 13, 9, 5)

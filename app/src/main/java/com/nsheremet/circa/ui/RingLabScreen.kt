@@ -40,7 +40,9 @@ import com.nsheremet.circa.motionFile
 import com.nsheremet.circa.Prefs.ringAddress
 import com.nsheremet.circa.RingInfo
 import com.nsheremet.circa.flashFirmware
+import com.nsheremet.circa.lightFile
 import com.nsheremet.circa.readRingInfo
+import com.nsheremet.circa.recordLight
 import com.nsheremet.circa.recordMotion
 import com.nsheremet.circa.ringAfterUpdate
 import kotlinx.coroutines.Dispatchers
@@ -50,7 +52,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.LocalDateTime
 
-/** Stock RY02 3.00.33 plus our patches (full-rate stream, motion-only with no gaps, double tap as A1 09), built by emu/patch_fw.py; reports itself as RY02_3.00.33_circa<n>. */
+/** Stock RY02 3.00.33 plus our patches (full-rate stream, motion-only with no gaps, double tap as A1 09, light samples as A1 0C), built by emu/patch_fw.py; reports itself as RY02_3.00.33_circa<n>. */
 private const val BUNDLED_PATCH = "RY02_3.00.33_fullaccel.bin"
 /** Colmi's own RY02 3.00.33 image, unchanged: the way back from any patch. */
 private const val BUNDLED_STOCK = "RY02_3.00.33_250117.bin"
@@ -65,8 +67,8 @@ internal fun RingLabScreen(onBack: () -> Unit) {
     val haptic = LocalHapticFeedback.current
     var label by remember { mutableStateOf("other") }
     val shareDir = File(ctx.cacheDir, "share")
-    // Labelled recordings only: the old circa-motion.csv has no dash after "motion".
-    fun recordings() = shareDir.listFiles { f -> f.name.startsWith("circa-motion-") && f.name.endsWith(".csv") }.orEmpty()
+    // Labelled motion and light recordings only: the old circa-motion.csv has no dash after "motion".
+    fun recordings() = shareDir.listFiles { f -> (f.name.startsWith("circa-motion-") || f.name.startsWith("circa-light-")) && f.name.endsWith(".csv") }.orEmpty()
 
     var recording by remember { mutableStateOf<Job?>(null) }
     var samples by remember { mutableIntStateOf(0) }
@@ -77,6 +79,9 @@ internal fun RingLabScreen(onBack: () -> Unit) {
     var startedAt by remember { mutableStateOf(0L) }
     var motionNote by remember { mutableStateOf("") }
     var hasRecording by remember { mutableStateOf(recordings().isNotEmpty()) }
+    var lightJob by remember { mutableStateOf<Job?>(null) }
+    var lightSamples by remember { mutableIntStateOf(0) }
+    var lightNote by remember { mutableStateOf("") }
 
     var file by remember { mutableStateOf<FirmwareFile?>(null) }
     var ringInfo by remember { mutableStateOf<RingInfo?>(null) }
@@ -85,8 +90,8 @@ internal fun RingLabScreen(onBack: () -> Unit) {
     var flashing by remember { mutableStateOf(false) }
     var flashNote by remember { mutableStateOf("") }
 
-    val busy = recording != null || flashing || checking
-    BackHandler { if (!flashing) { recording?.cancel(); onBack() } } // leaving mid-update would hide its result
+    val busy = recording != null || lightJob != null || flashing || checking
+    BackHandler { if (!flashing) { recording?.cancel(); lightJob?.cancel(); onBack() } } // leaving mid-update would hide its result
     val view = LocalView.current
     DisposableEffect(busy) { view.keepScreenOn = busy; onDispose { view.keepScreenOn = false } }
 
@@ -121,6 +126,24 @@ internal fun RingLabScreen(onBack: () -> Unit) {
                 recording = null
                 hasRecording = recordings().isNotEmpty()
                 motionNote = error ?: "Stopped: $samples samples saved"
+            }
+        }
+    }
+
+    fun toggleLight() {
+        lightJob?.let { it.cancel(); return }
+        lightSamples = 0; lightNote = "Connecting…"
+        val out = lightFile(shareDir, LocalDateTime.now())
+        lightJob = scope.launch {
+            var error: String? = null
+            try {
+                error = withContext(Dispatchers.IO) {
+                    recordLight(ctx, address!!, out) { n -> lightSamples = n; lightNote = "Recording" }
+                }
+            } finally {
+                lightJob = null
+                hasRecording = recordings().isNotEmpty()
+                lightNote = error ?: "Stopped: $lightSamples samples saved"
             }
         }
     }
@@ -163,7 +186,7 @@ internal fun RingLabScreen(onBack: () -> Unit) {
                     }
                 }
                 Hairline(Modifier.padding(start = AppSpace.l))
-                ButtonRow(if (recording != null) "Stop recording" else "Start recording", enabled = address != null && !flashing && !checking, onClick = ::toggleRecording)
+                ButtonRow(if (recording != null) "Stop recording" else "Start recording", enabled = address != null && lightJob == null && !flashing && !checking, onClick = ::toggleRecording)
                 Hairline(Modifier.padding(start = AppSpace.l))
                 ValueRow("Status", motionNote.ifEmpty { if (address == null) "No ring set up" else "Idle" })
                 Hairline(Modifier.padding(start = AppSpace.l))
@@ -178,7 +201,7 @@ internal fun RingLabScreen(onBack: () -> Unit) {
                 Hairline(Modifier.padding(start = AppSpace.l))
                 ValueRow("Latest (mg)", last?.let { "x ${it.x}   y ${it.y}   z ${it.z}" } ?: "–")
                 Hairline(Modifier.padding(start = AppSpace.l))
-                ButtonRow("Share recordings", enabled = hasRecording && recording == null) {
+                ButtonRow("Share recordings", enabled = hasRecording && recording == null && lightJob == null) {
                     val uris = recordings().sortedBy { it.name }.map { FileProvider.getUriForFile(ctx, ctx.packageName + ".share", it) }
                     if (uris.isEmpty()) return@ButtonRow
                     ctx.startActivity(Intent.createChooser(
@@ -189,6 +212,19 @@ internal fun RingLabScreen(onBack: () -> Unit) {
                         null,
                     ))
                 }
+            }
+        }
+        item {
+            Section(
+                "Light",
+                "Records the optical sensor's samples to a file shared with the motion recordings. " +
+                    "Runs a live heart rate measurement while recording, so the green light is on. Needs the patched firmware.",
+            ) {
+                ButtonRow(if (lightJob != null) "Stop recording" else "Start recording", enabled = address != null && recording == null && !flashing && !checking, onClick = ::toggleLight)
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ValueRow("Status", lightNote.ifEmpty { if (address == null) "No ring set up" else "Idle" })
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ValueRow("Samples", if (lightSamples == 0) "–" else "$lightSamples")
             }
         }
         item {

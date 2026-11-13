@@ -166,6 +166,54 @@ def test_wearing_the_patched_ring_sends_no_taps():
     assert interrupts <= 10 and taps == 0 and resets == 1
 
 
+def light(on_ms, off_ms=None, leave_ms=None):
+    """Patched over Bluetooth, live heart rate from 11.5 s, a1 0a at on_ms -> (emu, a1 packets with times, queue reads)."""
+    import patch_fw
+    ringemu.PULSE_BPM = 60
+    e = ringemu.Emu(quiet_mem=True, trace=True)
+    e.ota_start(3000, patch_fw.patch(ringemu.IMAGE.read_bytes()))
+    e.command(11500, bytes([0x69, 0x01]))
+    if on_ms: e.command(on_ms, bytes([0xA1, 0x0A]))
+    if off_ms: e.command(off_ms, bytes([0xA1, 0x0B]))
+    if leave_ms: e.hw["leave"] = {"at": leave_ms, "interval": None, "fire": e.ble_disconnect}
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(44000)
+    assert e.resets == 2 and e.ota["state"] == 5
+    tx = [(ev["t"], bytes.fromhex(ev["data"])) for ev in e.trace if ev["kind"] == "ble_tx" and ev["data"][:2] == "a1"]
+    reads = [(ev["t"], bytes.fromhex(ev["rx"])) for ev in e.trace if ev["kind"] == "bus" and ev["dev"] == ringemu.PPG and ev["tx"] == "41"]
+    return e, tx, reads
+
+
+def test_light_samples_arrive_in_order():
+    e, tx, reads = light(15000, 40000)
+    assert [n[1] for t, n in tx if n[1] != 0x0C] == [0x0A, 0x0B]           # both echoed, no a1 ff
+    light_tx = [(t, n) for t, n in tx if n[1] == 0x0C]
+    assert all(3 <= n[2] <= 12 and n[2] % 3 == 0 and not any(n[3 + n[2]:15]) for t, n in light_tx)
+    assert all(sum(n[:15]) & 0xFF == n[15] for t, n in tx)
+    sent = b"".join(n[3:3 + n[2]] for t, n in light_tx)
+    fed = b"".join(rx for t, rx in reads if 15000 < t < 40000)
+    assert len(sent) >= 3 * 20 * 10 and sent == fed                       # every queued sample, in order, only while on
+    assert light_tx[-1][0] < 40000 and any(t > 40000 for t, rx in reads)  # a1 0b stops them, the drain goes on
+    readings = [n[3] for n in e.notified if n[0] == 0x69 and n[3]]
+    assert readings and all(abs(r - 60) <= 2 for r in readings), readings  # the stock algorithm saw the same samples
+
+
+def test_light_mode_ends_when_the_phone_leaves():
+    import patch_fw
+    e, tx, reads = light(15000, leave_ms=20000)
+    assert any(n[1] == 0x0C and t < 20000 for t, n in tx)
+    assert any(t > 20500 for t, rx in reads), "no queue read after the phone left"
+    assert e.uc.mem_read(patch_fw.LIGHT, 1)[0] == 0
+
+
+def test_light_mode_off_keeps_stock_behaviour():
+    e, tx, reads = light(None)
+    assert reads and not any(n[1] == 0x0C for t, n in tx)
+    readings = [n[3] for n in e.notified if n[0] == 0x69 and n[3]]
+    assert readings and all(abs(r - 60) <= 2 for r in readings), readings
+
+
 def test_bluetooth_update_restores_stock_firmware(tmp_path):
     import patch_fw
     patched = tmp_path / "patched.bin"

@@ -226,6 +226,67 @@ suspend fun recordMotion(ctx: Context, address: String, out: File, label: String
     }
 }
 
+/** `circa-light-<yyyyMMdd-HHmm>.csv` in [dir], `-2`, `-3`… when taken, as [motionFile]. */
+fun lightFile(dir: File, time: LocalDateTime): File {
+    val base = "circa-light-" + time.format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmm"))
+    return generateSequence(1) { it + 1 }.map { File(dir, if (it == 1) "$base.csv" else "$base-$it.csv") }.first { !it.exists() }
+}
+
+/**
+ * Turns the light copy on (`A1 0A`), runs live heart rate the way Breathe does (runLiveHr's long mode: `69 01`, again
+ * after 30 s without a valid reading, `69 02` at the end) so the ring measures, and writes every `A1 0C` optical sample
+ * to [out] as CSV until cancelled. [onUpdate] gets the sample count. Returns null on a normal stop, else what went wrong.
+ */
+suspend fun recordLight(ctx: Context, address: String, out: File, onUpdate: (Int) -> Unit): String? {
+    val conn = ColmiConnection(ctx, address)
+    var started = false
+    var measuring = false
+    SyncWorker.liveHrActive = true
+    return try {
+        if (!conn.connect()) return "Could not connect to the ring"
+        out.parentFile?.mkdirs()
+        out.bufferedWriter().use { w ->
+            // n counts samples received; arrival is the phone's clock; value is the sensor's 3 bytes, little-endian, as sent
+            w.write("n,arrival_ms,value\n")
+            conn.writePacket(ColmiProtocol.lightOnRequest())
+            started = true
+            conn.writePacket(ColmiProtocol.liveHrStartRequest())
+            measuring = true
+            var lastLock = System.currentTimeMillis() // last start request or valid reading, as in runLiveHr
+            var n = 0
+            while (currentCoroutineContext().isActive) {
+                if (System.currentTimeMillis() - lastLock >= 30_000) {
+                    conn.writePacket(ColmiProtocol.liveHrStartRequest())
+                    lastLock = System.currentTimeMillis()
+                }
+                val p = withTimeoutOrNull(5_000) { conn.notifyV1.receive() } ?: continue
+                if (ColmiProtocol.parseLiveHrPacket(p)?.let { it.error == 0 && it.bpm > 0 } == true) lastLock = System.currentTimeMillis()
+                if (p.size >= 2 && p[0] == ColmiProtocol.CMD_RAW_STREAM && p[1] == 0xFF.toByte()) return "This firmware has no light samples: install the built-in patch"
+                val values = ColmiProtocol.parseLightPacket(p) ?: continue
+                val now = System.currentTimeMillis()
+                values.forEach { w.write("${n++},$now,$it\n") }
+                onUpdate(n)
+            }
+        }
+        null
+    } catch (t: kotlinx.coroutines.CancellationException) {
+        null // Stop pressed
+    } catch (t: ClosedReceiveChannelException) {
+        "Ring disconnected. Recording saved up to here."
+    } catch (t: Throwable) {
+        "Recording stopped: ${t.message ?: t::class.simpleName}"
+    } finally {
+        if (measuring) runCatching {
+            withContext(NonCancellable) { withTimeoutOrNull(2_000) { conn.writePacket(ColmiProtocol.liveHrStopRequest()) } }
+        }
+        if (started) runCatching {
+            withContext(NonCancellable) { withTimeoutOrNull(2_000) { conn.writePacket(ColmiProtocol.lightOffRequest()) } }
+        }
+        conn.disconnect()
+        SyncWorker.liveHrActive = false
+    }
+}
+
 /** Waits for the ring to restart after an update, then reads what it reports. */
 suspend fun ringAfterUpdate(ctx: Context, address: String): RingInfo? {
     delay(12_000)

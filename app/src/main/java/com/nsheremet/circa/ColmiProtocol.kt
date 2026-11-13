@@ -429,4 +429,20 @@ object ColmiProtocol {
     /** `A1 09 <count>`: a double tap on the ring (patched firmware, emu/patch_fw.py FW6); count goes 1, 2… per boot, wraps at 255. */
     fun parseTapPacket(value: ByteArray): Int? =
         if (value.size >= 16 && value[0] == CMD_RAW_STREAM && value[1] == 0x09.toByte()) value[2].toInt() and 0xff else null
+
+    // A1 0A / A1 0B: copy the optical sensor's samples to the phone on / off (patched firmware circa9, emu/patch_fw.py FW7a).
+    // Only a copy: it neither starts a measurement nor powers the sensor. Echoed; older firmware answers A1 FF.
+    fun lightOnRequest(): ByteArray = buildPacket(byteArrayOf(CMD_RAW_STREAM, 0x0A))
+    fun lightOffRequest(): ByteArray = buildPacket(byteArrayOf(CMD_RAW_STREAM, 0x0B))
+
+    /**
+     * `A1 0C nn <nn bytes>`: optical samples as the sensor's queue gave them, 3 bytes each, 1 to 4 a packet.
+     * Each value is the 3 bytes little-endian, uninterpreted (what the bits mean is the open question of FW7a).
+     */
+    fun parseLightPacket(value: ByteArray): List<Int>? {
+        if (value.size < 16 || value[0] != CMD_RAW_STREAM || value[1] != 0x0C.toByte()) return null
+        val n = (value[2].toInt() and 0xff) / 3
+        if (n !in 1..4) return null
+        return List(n) { i -> (0..2).sumOf { (value[3 + 3 * i + it].toInt() and 0xff) shl (8 * it) } }
+    }
 }

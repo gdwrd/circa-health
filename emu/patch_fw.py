@@ -1,5 +1,5 @@
 """Builds a patched RY02 3.00.33 update file: every accelerometer sample, a motion-only stream with no gaps,
-and a double tap on the ring reported to the phone.
+a double tap on the ring reported to the phone, and the optical sensor's samples.
 
 Stock firmware reads the accelerometer at 25 samples/s in batches but its raw stream (command a1 04)
 sends one sample per second.  Patches, applied in this order to the stock image, code appended to it:
@@ -24,6 +24,11 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        (never 0, so 0 everywhere = older firmware).  Its 18 bits go in the unused low 6 bits of the first sample's low
        bytes (10-bit values, left-justified): bits 0-5 in xl (packet byte 3), 6-11 in yl (byte 5), 12-17 in zl (byte 7).
        Wraps after 2^18 - 1 samples (about 2 h 55 min at 25 a second).  A gap is lost samples: seq - previous seq - samples.
+  FW7a a1 0a / a1 0b turn the light copy on / off (echoed); nothing else changes, the optical sensor is not touched.
+       While on, every read of the optical chip's queue (I2C 0x44 register 0x41, all through the read helper LIGHT_READ,
+       from the 320 ms drain 0x8302C0) is sent as it came off the bus:  a1 0c nn <nn bytes, 3 a sample, up to 4 samples>.
+       Samples flow only while the stock firmware measures (live heart rate 69 01 and its own schedule).  A queue read
+       with no phone connected clears the mode instead of sending, as FW11 does.
   Version: the firmware texts the ring reports end in _circa<VERSION> instead of _250117, in the file's wrapper too.
 
 Usage: python patch_fw.py [stock.bin] [patched.bin]      (needs: pip install keystone-engine)
@@ -51,15 +56,20 @@ START_SAMPLING = 0x20BA3F               # flag the motion interrupt sets; the ne
 READ_TICK = 0x82E63C                    # gsensor_read_timer_id callback; the motion interrupt calls it directly
 MOTION_ONLY = 0x10
 TAP_T, TAP_Q, TAP_LO, TAP_HI, TAP_RUN = 20, 15, 3, 8, 4     # 640 mg, 480 mg; 120..320 ms apart at 25 Hz
-VERSION = 8                             # ours: 1 = v4.1.0 (FW1); 2, 3 = v4.2.0, v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected
+VERSION = 9                             # ours: 1 = v4.1.0 (FW1); 2, 3 = v4.2.0, v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected
                                         # taps, never fired on the ring); 5 = taps found in the samples (v4.2.3, firm taps only); 6 = normal taps
-                                        # (v4.2.4); 7 = motion stream ends when the phone leaves (FW11); 8 = numbered samples (FW12)
+                                        # (v4.2.4); 7 = motion stream ends when the phone leaves (FW11); 8 = numbered samples (FW12);
+                                        # 9 = light samples (FW7a)
+LIGHT_READ = 0x830238                   # optical read helper (reg, buf, len) for I2C 0x44; its epilogue below
+LIGHT_HOOK = 0x830268                   # mov r0, r4 ; pop {r1-r7, pc}: r4 = 0 if read, r6 = len, r7 = buf, [sp] = register
+LIGHT_EPILOGUE = bytes.fromhex("2046febd")
 STOCK_TEXT = b"3.00.33_250117"          # in the wrapper, the device-information text and the version command's reply
 # Free RAM: .bss ends at 0x20DC30, the largest RAM-code overlay (table at 0x2083D8, loader 0x8249D8) at 0x20DCF8,
 # and update_ram_layout(0x7000, ...) starts the heap at 0x20EC00.  Nothing else lives in between.
 TAP_STATE = 0x20DCF8                    # 8 bytes: count, last xh yh zh, quiet samples, jolt run, since first tap + 1, spare
 SEQ = TAP_STATE + 8                     # FW12: 4 bytes, the last packet's seq (0 after boot)
 SEQ_MAX = 0x3FFFF
+LIGHT = SEQ + 4                         # FW7a: 1 byte (+3 spare), light copy on
 BSS_LEN = 0x824728                      # startup's .bss length literal (0x55DC), one reference (0x82445E)
 
 # Entered instead of the epilogue: sp is still the batch-read frame, r4 = bytes in this batch,
@@ -160,9 +170,19 @@ MOTION_CMD = f"""
     beq   start
     cmp   r0, #8
     beq   stop
+    cmp   r0, #0xa
+    beq   light
+    cmp   r0, #0xb
+    beq   light
     strb  r5, [r6]
     movs  r0, #0xa1
     bx    lr
+light:
+    ldr   r1, =0x{LIGHT:x}
+    movs  r2, #0xb
+    subs  r2, r2, r0
+    strb  r2, [r1]
+    b     reply
 start:
     movs  r1, #0x{MOTION_ONLY:x}
     strb  r1, [r6]
@@ -195,6 +215,67 @@ STILL_VETO = f"""
 stock:
     ldr   r3, =0x{STILL_CHECK | 1:x}
     bx    r3
+"""
+
+# Entered instead of LIGHT_READ's epilogue (FW7a): the helper's frame is still on the stack, r1-r7 are restored by the
+# pop, r4 (its result) must survive until the end.
+LIGHT_COPY = f"""
+    ldr   r0, =0x{LIGHT:x}
+    ldrb  r0, [r0]
+    cmp   r0, #0
+    beq   done
+    ldr   r0, [sp]
+    cmp   r0, #0x41
+    bne   done
+    cmp   r4, #0
+    bne   done
+    bl    0x{CONNECTED:x}
+    cmp   r0, #0
+    bne   send
+    ldr   r0, =0x{LIGHT:x}
+    movs  r1, #0
+    strb  r1, [r0]
+    b     done
+send:
+    movs  r5, #0
+loop:
+    cmp   r5, r6
+    bhs   done
+    sub   sp, #16
+    movs  r0, #0
+    str   r0, [sp, #0]
+    str   r0, [sp, #4]
+    str   r0, [sp, #8]
+    str   r0, [sp, #12]
+    mov   r1, sp
+    movs  r0, #0xa1
+    strb  r0, [r1, #0]
+    movs  r0, #0xc
+    strb  r0, [r1, #1]
+    subs  r2, r6, r5
+    cmp   r2, #12
+    bls   fits
+    movs  r2, #12
+fits:
+    strb  r2, [r1, #2]
+    adds  r0, r1, #3
+    adds  r1, r7, r5
+    bl    0x{MEMCPY:x}
+    mov   r1, sp
+    ldrb  r0, [r1, #2]
+    adds  r5, r5, r0
+    mov   r0, sp
+    movs  r1, #15
+    bl    0x{CHECKSUM:x}
+    mov   r1, sp
+    strb  r0, [r1, #15]
+    mov   r0, sp
+    bl    0x{QUEUE_PACKET:x}
+    add   sp, #16
+    b     loop
+done:
+    mov   r0, r4
+    pop   {{r1, r2, r3, r4, r5, r6, r7, pc}}
 """
 
 
@@ -347,9 +428,10 @@ def patch(stock: bytes) -> bytes:
     redirect(HOOK, EPILOGUE, FULL_ACCEL.replace("TAP_SCAN", hex(scan)))                       # FW1
     redirect(UNKNOWN_SUB, UNKNOWN_CODE, MOTION_CMD)                                           # FW4
     redirect(STILL_CALL, asm(f"bl 0x{STILL_CHECK:x}", STILL_CALL), STILL_VETO)                # FW4
+    redirect(LIGHT_HOOK, LIGHT_EPILOGUE, LIGHT_COPY)                                          # FW7a
     assert img[off(BSS_LEN):off(BSS_LEN) + 4] == struct.pack("<I", 0x55DC)
-    # FW6, FW12: the startup zero-fill runs on over TAP_STATE and SEQ; the overlay is copied in over its part afterwards
-    struct.pack_into("<I", img, off(BSS_LEN), SEQ + 4 - 0x208654)
+    # FW6, FW12, FW7a: the startup zero-fill runs on over TAP_STATE, SEQ and LIGHT; the overlay is copied in over its part afterwards
+    struct.pack_into("<I", img, off(BSS_LEN), LIGHT + 4 - 0x208654)
     struct.pack_into("<I", img, WRAP + 8, len(img) - WRAP - HDR)        # Realtek header: payload length
     # Clear the header's "not ready" flag (0x0981 -> 0x0901).  The stock firmware only clears it itself after the
     # ROM's integrity check passes, and a modified image is expected to fail that check; pre-cleared, the boot ROM
