@@ -40,8 +40,8 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        seen.  A change is recorded only when the verdict differs from the stored state.  The clock value is used, not
        minutes counted since the change, because it is one load at the hook and every read returns the same bytes;
        the phone turns it into a time with no conversion here.  Only observes: the detector stores what it would.
-  Version: the firmware texts the ring reports end in _circa<VERSION> instead of _250117, in the file's wrapper too
-  (one character: 0-9, then A = 10).
+  Version: the firmware texts the ring reports end in _ca<VERSION, 4 digits> (e.g. _ca0001) instead of _250117, in the
+  file's wrapper too.  Builds before ca0001 were tagged _circa<one character: 0-9, then A = 10>.
 
 Usage: python patch_fw.py [stock.bin] [patched.bin]      (needs: pip install keystone-engine)
 """
@@ -68,11 +68,12 @@ START_SAMPLING = 0x20BA3F               # flag the motion interrupt sets; the ne
 READ_TICK = 0x82E63C                    # gsensor_read_timer_id callback; the motion interrupt calls it directly
 MOTION_ONLY = 0x10
 TAP_T, TAP_Q, TAP_LO, TAP_HI, TAP_RUN = 20, 15, 3, 8, 4     # 640 mg, 480 mg; 120..320 ms apart at 25 Hz
-VERSION = 11                            # ours: 1 = v4.1.0 (FW1); 2, 3 = v4.2.0, v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected
-                                        # taps, never fired on the ring); 5 = taps found in the samples (v4.2.3, firm taps only); 6 = normal taps
-                                        # (v4.2.4); 7 = motion stream ends when the phone leaves (FW11); 8 = numbered samples (FW12);
-                                        # 9 = light samples (FW7a); 10 (tag circaA) = wear state (FW15b);
-                                        # 11 (circaB) = light samples wait for room in the send ring (FW7a)
+VERSION = 1                             # build number, tag ca0001.  Old scheme (tag circa<n>): 1 = v4.1.0 (FW1); 2, 3 = v4.2.0,
+                                        # v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected taps, never fired on the ring); 5 = taps found
+                                        # in the samples (v4.2.3, firm taps only); 6 = normal taps (v4.2.4); 7 = motion stream ends when
+                                        # the phone leaves (FW11); 8 = numbered samples (FW12); 9 = light samples (FW7a); 10 (circaA) =
+                                        # wear state (FW15b); 11 (circaB) = light samples wait for room in the send ring (FW7a).
+                                        # New scheme: 1 (ca0001) = what circaB was, only the tag differs
 LIGHT_READ = 0x830238                   # optical read helper (reg, buf, len) for I2C 0x44; its epilogue below
 LIGHT_HOOK = 0x830268                   # mov r0, r4 ; pop {r1-r7, pc}: r4 = 0 if read, r6 = len, r7 = buf, [sp] = register
 LIGHT_EPILOGUE = bytes.fromhex("2046febd")
@@ -485,8 +486,8 @@ def patch(stock: bytes) -> bytes:
         assert img[off(site):off(site) + 4] == expect, f"{site:#x} does not hold the expected code"
         img[off(site):off(site) + 4] = asm(f"bl 0x{append(code):x}", site)
 
-    text = b"3.00.33_circa" + b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"[VERSION:VERSION + 1]
-    assert len(text) == len(STOCK_TEXT) and img.count(STOCK_TEXT) == 3     # shortcut: one character, rename the tag after Z (35)
+    text = b"3.00.33_ca%04d" % VERSION
+    assert len(text) == len(STOCK_TEXT) and img.count(STOCK_TEXT) == 3     # 4 digits keep the stock text's length (up to 9999)
     img[:] = img.replace(STOCK_TEXT, text)
     scan = append(TAP_SCAN.replace("SEND_TAP", hex(append(SEND_TAP))))                        # FW6
     redirect(HOOK, EPILOGUE, FULL_ACCEL.replace("TAP_SCAN", hex(scan)))                       # FW1
