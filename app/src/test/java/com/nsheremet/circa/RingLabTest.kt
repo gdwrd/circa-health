@@ -68,7 +68,7 @@ class RingLabTest {
         val fw = FirmwareFile(java.io.File("src/main/assets/RY02_3.00.33_fullaccel.bin").readBytes())
         assertNull(fw.problem)
         assertTrue(fw.modified)
-        assertEquals("RY02_3.00.33_250117", fw.version) // must equal what the ring reports, or the updater refuses it
+        assertTrue(fw.version, fw.version.startsWith("RY02_3.00.33_circa")) // our version; the part before the last _ must match the ring's
         assertEquals("RY02_V3.0", fw.hardware)
     }
 

@@ -195,13 +195,13 @@ but blank only in the emulator, and the ROM's own flash use (boot patch, `ftl_sa
 
 ## Patched image
 
-`RY02_3.00.33_fullaccel.bin` (built by `emu/patch_fw.py`, 308 bytes added) adds these ring-to-phone packets:
+`RY02_3.00.33_fullaccel.bin` (built by `emu/patch_fw.py`, 316 bytes added) reports itself as `RY02_3.00.33_circa<n>` instead of `…_250117` (device information, version command, and the file's wrapper; `n` is `VERSION` in `patch_fw.py`: 1 = app v4.1.0, 2 = v4.2.0, which stopped answering on a worn ring, 3 = v4.2.1). It adds these ring-to-phone packets:
 
 | Packet | Patch | Meaning |
 |---|---|---|
 | `A1 05 nn <samples>` | FW1 | every accelerometer sample while a stream runs |
 | `A1 07` / `A1 08` | FW4 | echo of the motion-only stream start / stop commands |
-| `A1 09 <count>` | FW6 | a double tap; count 1, 2… since boot, wraps at 255. A phone sending `A1 09` still gets `A1 FF`. |
+| `A1 09 <count>` | FW6 | a double tap, sent by the next batch read (up to 0.8 s later); count 1, 2… since boot, wraps at 255. A phone sending `A1 09` still gets `A1 FF`. |
 
 Accelerometer registers FW6 changes (chip type `0x11`, the default; other chip types keep stock values):
 
@@ -209,5 +209,6 @@ Accelerometer registers FW6 changes (chip type `0x11`, the default; other chip t
 |---|---|---|---|
 | CLICK_CFG `0x38` | tap-wait | `0x15` (single click X/Y/Z) | `0x3F` (single and double click) |
 | TIME_WINDOW `0x3D` | tap-wait | never written | `0x0A` (400 ms at 25 Hz) |
-| CLICK_CFG `0x38` | sampling | `0x00` | `0x2A` (double click only) |
-| CTRL_REG3 `0x22` | sampling | `0x00` | `0x80` (click interrupt on the pin) |
+| CLICK_CFG `0x38` | sampling | `0x00` | `0x2A` (double click only, not on the interrupt pin) |
+| CLICK_THS `0x3A` | sampling | `0x05` left from tap-wait (0.16 g) | `0xB0` (latched, 1.5 g: a guess, not tuned on a ring) |
+| CLICK_SRC `0x39` | tap-wait setup, each batch read | never read | read (clears the latch; double-click bit sends `A1 09`) |

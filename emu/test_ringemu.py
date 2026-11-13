@@ -84,11 +84,37 @@ def test_double_tap_sends_one_packet_each():
         e.run(44000)
     assert e.resets == 2 and e.ota["state"] == 5
     tx = [(ev["t"], bytes.fromhex(ev["data"])) for ev in e.trace if ev["kind"] == "ble_tx" and ev["data"][:2] == "a1"]
-    assert [(t, n[2]) for t, n in tx if n[1] == 9] == [(30200, 1), (38250, 2)], tx
+    taps = [(t, n[2]) for t, n in tx if n[1] == 9]     # reported by the next batch read, at most 0.8 s later
+    assert [n for t, n in taps] == [1, 2] and 30200 <= taps[0][0] <= 31200 and 38250 <= taps[1][0] <= 39250, tx
     assert all(sum(n[:15]) & 0xFF == n[15] for t, n in tx)
     assert (25000, 0xFF) in [(t, n[1]) for t, n in tx]
     wakes = [ev["t"] for ev in e.trace if ev["kind"] == "bus" and ev["tx"] == "2e80" and ev["t"] > 11000]
     assert wakes == [12000, 20000, 30000, 38000]       # each first tap starts sampling once; second taps do not restart it
+
+
+def worn(image, taps=()):
+    """30 s on a moving finger with the phone connected -> (accelerometer interrupts, double-tap packets, resets)."""
+    e = ringemu.Emu(quiet_mem=True, trace=True, image=image)
+    e.command(2500, bytes([0x03]))
+    e.wear(3000)
+    for t in taps: e.tap(t)
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(33000)
+    return (sum(ev["kind"] == "irq" and ev.get("pin") == 22 for ev in e.trace),
+            sum(n[:2] == bytes([0xA1, 9]) for n in e.notified), e.resets)
+
+
+def test_wearing_the_ring_interrupts_stock_only_to_wake():
+    interrupts, taps, resets = worn(ringemu.IMAGE)
+    assert 0 < interrupts <= 10 and taps == 0 and resets == 1      # reset 1 is the first-boot config write
+
+
+def test_wearing_the_patched_ring_sends_only_real_double_taps():
+    # v4.2.0 (firmware version 2) kept double clicks on the interrupt pin at the wake threshold while sampling:
+    # about 8 interrupts and false taps a second here, and the real ring stopped answering on a finger.
+    interrupts, taps, resets = worn(ringemu.HERE / "firmware" / "RY02_3.00.33_fullaccel.bin", taps=(20000, 20200))
+    assert interrupts <= 10 and taps == 1 and resets == 1
 
 
 def test_bluetooth_update_restores_stock_firmware(tmp_path):

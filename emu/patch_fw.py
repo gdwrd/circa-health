@@ -12,10 +12,12 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        While the mode is 0x10 the firmware's "ring is still, back to tap-wait" decision is vetoed,
        so the 25 a second stream has no gaps.
   FW6  the accelerometer's own double-click detection is turned on next to the stock single click (CLICK_CFG 0x38:
-       0x15 -> 0x3f in tap-wait, 0x00 -> 0x2a and CTRL_REG3 0x22: 0x00 -> 0x80 while sampling, so the second tap
-       still interrupts; TIME_WINDOW 0x3d = 0x0a, 400 ms at 25 Hz).  On each motion interrupt the firmware's g-sensor
-       poll reads CLICK_SRC 0x39; when its double-click bit is set it sends  a1 09 <count>  (count from 1 per boot,
-       wraps at 255).  Only for the stock chip type 0x11; the stock wake-up and sampling go on unchanged.
+       0x15 -> 0x3f in tap-wait, TIME_WINDOW 0x3d = 0x0a, 400 ms at 25 Hz).  While sampling CLICK_CFG is 0x2a
+       instead of 0 and CLICK_THS 0x3a is 0xb0: latched, 1.5 g instead of the 0.16 g wake threshold, so ordinary
+       movement is not a click.  Clicks stay off the interrupt pin while sampling, as in stock; the batch read
+       (every 0.8 s, in the sensor task) reads CLICK_SRC 0x39 and, when its double-click bit is set, sends
+       a1 09 <count>  (count from 1 per boot, wraps at 255).  Only for the stock chip type 0x11.
+  Version: the firmware texts the ring reports end in _circa<VERSION> instead of _250117, in the file's wrapper too.
 
 Usage: python patch_fw.py [stock.bin] [patched.bin]      (needs: pip install keystone-engine)
 """
@@ -43,7 +45,9 @@ ACCEL_WRITE, ACCEL_READ = 0x82D548, 0x82D57A    # (reg, value) -> ok ; (reg) -> 
 TAP_WAIT_CFG = 0x82E292                 # bl ACCEL_WRITE with r0 = 0x38, r1 = 0x15: tap-wait CLICK_CFG, chip type 0x11
 SAMPLE_CFG = 0x82D94E                   # bl ACCEL_WRITE with r0 = 0x38, r1 = 0: sampling start (chip types 0x11, 0x28)
 CHIP_TYPE = 0x20BA20                    # 0x11 = the LIS3DH-style default; +2 is set by the motion interrupt
-IRQ_SEEN = 0x82E66E                     # g-sensor poll, interrupt seen: ldr r0, =CHIP_TYPE ; strb r6 (= 0), [r0, #2]
+SAMPLE_THS = 0xB0                       # CLICK_THS while sampling: latch | 48 * 31 mg.  Guess, not tuned on a ring
+VERSION = 3                             # ours: 1 = v4.1.0 (FW1), 2 = v4.2.0 (FW4, FW6; broke on a worn ring), 3 = taps polled
+STOCK_TEXT = b"3.00.33_250117"          # in the wrapper, the device-information text and the version command's reply
 # Free RAM: .bss ends at 0x20DC30, the largest RAM-code overlay (table at 0x2083D8, loader 0x8249D8) at 0x20DCF8,
 # and update_ram_layout(0x7000, ...) starts the heap at 0x20EC00.  Nothing else lives in between.
 TAP_COUNT = 0x20DCF8
@@ -52,6 +56,7 @@ BSS_LEN = 0x824728                      # startup's .bss length literal (0x55DC)
 # Entered instead of the epilogue: sp is still the batch-read frame, r4 = bytes in this batch,
 # the samples sit at sp+0x11.  r5-r7 are free because the epilogue restores them.
 FULL_ACCEL = f"""
+    bl    TAP_POLL
     ldr   r0, =0x{RAW_MODE:x}
     ldrb  r0, [r0]
     cmp   r0, #0
@@ -142,8 +147,12 @@ stock:
 
 
 # Replaces the tap-wait CLICK_CFG write: single and double click, and the double-click window.
+# Reads CLICK_SRC first so a click latched while sampling cannot hold the interrupt pin once clicks are routed to it.
 TAP_WAIT = f"""
     push  {{r4, lr}}
+    movs  r0, #0x39
+    bl    0x{ACCEL_READ:x}
+    movs  r0, #0x38
     movs  r1, #0x3f
     bl    0x{ACCEL_WRITE:x}
     mov   r4, r0
@@ -154,7 +163,7 @@ TAP_WAIT = f"""
     pop   {{r4, pc}}
 """
 
-# Replaces the sampling-start CLICK_CFG = 0 write: on chip type 0x11 keep double clicks on and routed to the pin.
+# Replaces the sampling-start CLICK_CFG = 0 write: on chip type 0x11 keep double clicks on, at the higher threshold.
 SAMPLE_CLICK = f"""
     push  {{r4, lr}}
     ldr   r4, =0x{CHIP_TYPE:x}
@@ -163,19 +172,18 @@ SAMPLE_CLICK = f"""
     bne   stock
     movs  r1, #0x2a
     bl    0x{ACCEL_WRITE:x}
-    movs  r0, #0x22
-    movs  r1, #0x80
+    movs  r0, #0x3a
+    movs  r1, #0x{SAMPLE_THS:x}
 stock:
     bl    0x{ACCEL_WRITE:x}
     pop   {{r4, pc}}
 """
 
-# Replaces the two displaced instructions (r6 = 0); the poll goes on with r0 = CHIP_TYPE as before.
-TAP_SRC = f"""
+# Called at the end of every batch read (sensor task): one a1 09 packet per latched double click.
+TAP_POLL = f"""
     push  {{r4, lr}}
-    ldr   r4, =0x{CHIP_TYPE:x}
-    strb  r6, [r4, #2]
-    ldrb  r0, [r4]
+    ldr   r0, =0x{CHIP_TYPE:x}
+    ldrb  r0, [r0]
     cmp   r0, #0x11
     bne   done
     movs  r0, #0x39
@@ -207,7 +215,6 @@ TAP_SRC = f"""
     bl    0x{QUEUE_PACKET:x}
     add   sp, #16
 done:
-    mov   r0, r4
     pop   {{r4, pc}}
 """
 
@@ -221,21 +228,27 @@ def patch(stock: bytes) -> bytes:
     img = bytearray(stock)
     off = lambda addr: addr - BASE + WRAP
 
-    def redirect(site: int, expect: bytes, code: str) -> None:
-        """Append code (word-aligned) and turn the 4 bytes at site into a call to it."""
-        assert img[off(site):off(site) + 4] == expect, f"{site:#x} does not hold the expected code"
+    def append(code: str) -> int:
+        """Append code (word-aligned); returns its address."""
         while len(img) % 4: img.append(0xFF)
         new_addr = BASE + len(img) - WRAP
         img.extend(asm(code, new_addr))
         while len(img) % 4: img.append(0xFF)
-        img[off(site):off(site) + 4] = asm(f"bl 0x{new_addr:x}", site)
+        return new_addr
 
-    redirect(HOOK, EPILOGUE, FULL_ACCEL)                                                      # FW1
+    def redirect(site: int, expect: bytes, code: str) -> None:
+        """Append code and turn the 4 bytes at site into a call to it."""
+        assert img[off(site):off(site) + 4] == expect, f"{site:#x} does not hold the expected code"
+        img[off(site):off(site) + 4] = asm(f"bl 0x{append(code):x}", site)
+
+    text = b"3.00.33_circa%d" % VERSION
+    assert len(text) == len(STOCK_TEXT) and img.count(STOCK_TEXT) == 3     # shortcut: one digit, rename the tag at version 10
+    img[:] = img.replace(STOCK_TEXT, text)
+    redirect(HOOK, EPILOGUE, FULL_ACCEL.replace("TAP_POLL", hex(append(TAP_POLL))))          # FW1, FW6
     redirect(UNKNOWN_SUB, UNKNOWN_CODE, MOTION_CMD)                                           # FW4
     redirect(STILL_CALL, asm(f"bl 0x{STILL_CHECK:x}", STILL_CALL), STILL_VETO)                # FW4
     redirect(TAP_WAIT_CFG, asm(f"bl 0x{ACCEL_WRITE:x}", TAP_WAIT_CFG), TAP_WAIT)              # FW6
     redirect(SAMPLE_CFG, asm(f"bl 0x{ACCEL_WRITE:x}", SAMPLE_CFG), SAMPLE_CLICK)              # FW6
-    redirect(IRQ_SEEN, bytes.fromhex("4d488670"), TAP_SRC)                                    # FW6
     assert img[off(BSS_LEN):off(BSS_LEN) + 4] == struct.pack("<I", 0x55DC)
     # FW6: the startup zero-fill runs on to TAP_COUNT + 4; the overlay is copied in over its part afterwards
     struct.pack_into("<I", img, off(BSS_LEN), TAP_COUNT + 4 - 0x208654)

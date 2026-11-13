@@ -96,8 +96,9 @@ suspend fun flashFirmware(ctx: Context, address: String, fw: FirmwareFile, onPro
         if (!conn.connect()) return "Could not connect to the ring"
         val info = ringInfo(conn)
         if (info.hardware != fw.hardware) return "This file is for ${fw.hardware}, the ring is ${info.hardware ?: "unknown"}"
-        // A patched image keeps the version text of the build it was cut from, and its patch only fits that build.
-        if (fw.modified && info.firmware != fw.version) return "This patch is for ${fw.version}, the ring runs ${info.firmware ?: "unknown"}"
+        // A patched image is RY02_3.00.33_circa<n>: it replaces the stock build of that name or another patch of it.
+        val base = fw.version.substringBeforeLast('_')
+        if (fw.modified && info.firmware?.substringBeforeLast('_') != base) return "This patch is for $base, the ring runs ${info.firmware ?: "unknown"}"
         val battery = info.battery ?: return "Could not read the ring's battery"
         if (battery.level < 30 && !battery.charging) return "Ring battery is ${battery.level}%: charge it to 30% first"
 

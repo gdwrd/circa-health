@@ -50,7 +50,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.LocalDateTime
 
-/** Stock RY02 3.00.33 plus 308 bytes of patches (full-rate stream, motion-only with no gaps, double tap as A1 09), built by emu/patch_fw.py. */
+/** Stock RY02 3.00.33 plus our patches (full-rate stream, motion-only with no gaps, double tap as A1 09), built by emu/patch_fw.py; reports itself as RY02_3.00.33_circa<n>. */
 private const val BUNDLED_PATCH = "RY02_3.00.33_fullaccel.bin"
 /** Colmi's own RY02 3.00.33 image, unchanged: the way back from any patch. */
 private const val BUNDLED_STOCK = "RY02_3.00.33_250117.bin"

@@ -133,7 +133,7 @@ class Emu:
         self.tasks, self.cur = [], None
         self.heap, self.free, self.sizes = HEAP, collections.defaultdict(list), {}
         self.queues, self.sems, self.timers = {}, {}, {}
-        self.hw = {k: h for k, h in self.hw.items() if h["interval"] is None}    # keep outside events, drop chip timers
+        self.hw = {k: h for k, h in self.hw.items() if h["interval"] is None or h.get("keep")}    # keep outside events, drop chip timers
         self.gpio_int, self.app_ram = 0, set()
         self.services, self.connected, self.subscribed = [], False, set()         # the phone's link drops
         self.rom_ram_init()
@@ -312,22 +312,33 @@ class Emu:
             return raw >> 8 if i % 2 else raw & 0xFF
         return v
 
+    def accel_regs(self):
+        return next((st["devs"][ACCEL] for st in self.bus.values() if ACCEL in st["devs"]), {})
+
+    def click(self, mg=4000):
+        """One jolt of mg.  Our model of a LIS3DH click detector, not the chip: a jolt above CLICK_THS (31 mg a step
+        at +-4 g) sets the single-click bit if CLICK_CFG enables single clicks.  Jolts within TIME_LATENCY of that
+        one are ignored; the next one up to TIME_WINDOW later also sets the double-click bit if double clicks are
+        enabled then (1 step = 1/25 s).  Either raises the interrupt pin when CTRL_REG3 routes clicks to it.
+        CLICK_SRC keeps its bits until it is read, latched or not."""
+        regs = self.accel_regs()
+        cfg, step = regs.get(0x38, 0), 1000 // ACCEL_HZ
+        gap = self.now - self.last_tap if self.last_tap is not None else None
+        if mg <= (regs.get(0x3A, 0) & 0x7F) * 4000 // 128 or gap is not None and gap < regs.get(0x3C, 0) * step: return
+        double = cfg & 0x2A and gap is not None and gap <= (regs.get(0x3C, 0) + regs.get(0x3D, 0)) * step
+        src = (0x50 if cfg & 0x15 else 0) | (0x60 if double else 0)     # IA | SCLICK, IA | DCLICK
+        self.last_tap, self.click_src = None if double else self.now, self.click_src | src
+        self.ev(f"tap: CLICK_SRC {self.click_src:#04x}", "irq")
+        if src and regs.get(0x22, 0) & 0x80: self.raise_pin(22)
+
     def tap(self, at_ms):
-        """Schedule one tap on the ring.  Our model of a LIS3DH click detector, not the chip: every tap sets the
-        single-click bit if CLICK_CFG enables single clicks; it also sets the double-click bit if double clicks are
-        enabled now and the previous tap was TIME_LATENCY to TIME_LATENCY + TIME_WINDOW earlier (1 step = 1/25 s).
-        Either raises the interrupt pin when CTRL_REG3 routes clicks to it."""
-        def fire():
-            regs = next((st["devs"][ACCEL] for st in self.bus.values() if ACCEL in st["devs"]), {})
-            cfg, step = regs.get(0x38, 0), 1000 // ACCEL_HZ
-            src = 0x50 if cfg & 0x15 else 0             # IA | SCLICK
-            gap = self.now - self.last_tap if self.last_tap is not None else -1
-            if cfg & 0x2A and regs.get(0x3C, 0) * step <= gap <= (regs.get(0x3C, 0) + regs.get(0x3D, 0)) * step:
-                src |= 0x60                             # IA | DCLICK
-            self.last_tap, self.click_src = self.now, self.click_src | src
-            self.ev(f"tap: CLICK_SRC {self.click_src:#04x}", "irq")
-            if src and regs.get(0x22, 0) & 0x80: self.raise_pin(22)
-        self.hw[f"tap{at_ms}"] = {"at": at_ms, "interval": None, "fire": fire}
+        """Schedule one tap on the ring."""
+        self.hw[f"tap{at_ms}"] = {"at": at_ms, "interval": None, "fire": self.click}
+
+    def wear(self, from_ms):
+        """The ring is on a moving finger from then on: the fake motion changes 250 mg between samples, which is
+        a jolt above the stock CLICK_THS of 5 (156 mg) on every sample."""
+        self.hw["wear"] = {"at": from_ms, "interval": 1000 // ACCEL_HZ, "fire": lambda: self.still or self.click(250), "keep": True}
 
     def ppg_read(self, st, v):
         """Fake pulse: every 24-bit light reading is a steady level with a 1% ripple at PULSE_BPM."""
