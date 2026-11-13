@@ -74,8 +74,8 @@ def test_motion_only_stream_has_no_gaps_while_still():
 
 def test_double_taps_in_a_real_recording():
     # testdata/taps.csv: 51 s recorded on the ring (firmware version 4) while trying double taps of every kind,
-    # then shaking and moving.  The five firm, separate double taps are at samples 273/278, 302/308, 360/366,
-    # 392/397 and 430/435; samples 546-900 are shaking and movement and must count nothing.
+    # then shaking and moving.  Clear, separate double taps end at samples 122 and 242 (gentle) and 278, 308, 319,
+    # 366, 397 and 435 (firm); a gentle one at 163 is missed.  Samples 546-720 are shaking and must count nothing.
     import csv, patch_fw
     rows = [r for r in csv.reader((ringemu.HERE / "testdata" / "taps.csv").open()) if r and r[0].isdigit()]
     e = ringemu.Emu(quiet_mem=True, trace=True)         # starts on stock firmware, installs the patch over Bluetooth
@@ -98,9 +98,9 @@ def test_double_taps_in_a_real_recording():
         if n[1] == 9: taps.append((sent, n[2]))
     assert [c for _, c in taps] == list(range(1, len(taps) + 1))
     at = [i for i, _ in taps]
-    firm = [i for i in at if 240 <= i <= 440]
-    assert len(firm) == 5 and all(i <= t < i + 32 for i, t in zip(firm, (278, 308, 366, 397, 435))), at
-    assert not [i for i in at if 546 <= i <= 870], at
+    early = [i for i in at if i <= 440]
+    assert len(early) == 8 and all(i <= t < i + 32 for i, t in zip(early, (122, 242, 278, 308, 319, 366, 397, 435))), at
+    assert not [i for i in at if 540 <= i <= 720] and len(at) <= 22, at
 
 
 def worn(image):

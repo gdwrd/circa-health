@@ -13,8 +13,8 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        so the 25 a second stream has no gaps.
   FW6  double taps are found in the samples themselves, at the end of every batch read (sensor task), so the
        accelerometer keeps its stock settings and any chip type works.  Per sample, jolt = |dx| + |dy| + |dz|
-       against the sample before, high bytes only (32 mg a step).  A tap is a jolt of TAP_T or more after two
-       samples below TAP_Q; a second tap TAP_LO..TAP_HI samples after the first sends  a1 09 <count>  (count
+       against the sample before, high bytes only (32 mg a step).  A tap is a jolt of TAP_T or more after a
+       sample below TAP_Q; a second tap TAP_LO..TAP_HI samples after the first sends  a1 09 <count>  (count
        from 1 per boot, wraps at 255).  More than TAP_RUN samples in a row at TAP_Q or more is movement and
        cancels.  The numbers come from a real recording (emu/testdata/taps.csv).  Only while the ring samples:
        the tap that wakes a resting ring is not in the samples.
@@ -43,9 +43,9 @@ STILL_CHECK = 0x82EA30
 START_SAMPLING = 0x20BA3F               # flag the motion interrupt sets; the next read tick starts sampling
 READ_TICK = 0x82E63C                    # gsensor_read_timer_id callback; the motion interrupt calls it directly
 MOTION_ONLY = 0x10
-TAP_T, TAP_Q, TAP_LO, TAP_HI, TAP_RUN = 40, 20, 3, 8, 4     # 1280 mg, 640 mg; 120..320 ms apart at 25 Hz
-VERSION = 5                             # ours: 1 = v4.1.0 (FW1); 2, 3 = v4.2.0, v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected
-                                        # taps, never fired on the ring); 5 = taps found in the samples
+TAP_T, TAP_Q, TAP_LO, TAP_HI, TAP_RUN = 20, 15, 3, 8, 4     # 640 mg, 480 mg; 120..320 ms apart at 25 Hz
+VERSION = 6                             # ours: 1 = v4.1.0 (FW1); 2, 3 = v4.2.0, v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected
+                                        # taps, never fired on the ring); 5 = taps found in the samples (v4.2.3, firm taps only); 6 = normal taps
 STOCK_TEXT = b"3.00.33_250117"          # in the wrapper, the device-information text and the version command's reply
 # Free RAM: .bss ends at 0x20DC30, the largest RAM-code overlay (table at 0x2083D8, loader 0x8249D8) at 0x20DCF8,
 # and update_ram_layout(0x7000, ...) starts the heap at 0x20EC00.  Nothing else lives in between.
@@ -201,7 +201,7 @@ tap:
     cmp   r7, #{TAP_T}
     blo   rest
     ldrb  r0, [r4, #4]
-    cmp   r0, #2
+    cmp   r0, #1
     blo   rest
     ldrb  r0, [r4, #6]
     movs  r1, #1
