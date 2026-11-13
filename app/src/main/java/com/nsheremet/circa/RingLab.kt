@@ -140,20 +140,22 @@ suspend fun flashFirmware(ctx: Context, address: String, fw: FirmwareFile, onPro
 }
 
 /**
- * Turns the ring's raw stream on and writes every `A1 05` motion sample to [out] as CSV until cancelled.
+ * Turns the ring's motion-only stream on (`A1 07`; on a ring that answers `A1 FF`, the raw stream `A1 04` instead)
+ * and writes every `A1 05` motion sample to [out] as CSV until cancelled.
  * [onUpdate] gets the sample count, the latest sample and how many stock 1-a-second packets came in.
  * Returns null on a normal stop, else what went wrong.
  */
 suspend fun recordMotion(ctx: Context, address: String, out: File, onUpdate: (Int, ColmiProtocol.MotionSample?, Int) -> Unit): String? {
     val conn = ColmiConnection(ctx, address)
     var started = false
+    var rawStream = false // true once the ring refused A1 07 and the A1 04 raw stream runs instead
     SyncWorker.liveHrActive = true
     return try {
         if (!conn.connect()) return "Could not connect to the ring"
         out.parentFile?.mkdirs()
         out.bufferedWriter().use { w ->
             w.write("n,arrival_ms,x_mg,y_mg,z_mg\n") // n counts samples (25 a second on the ring's clock); arrival is the phone's clock
-            conn.writePacket(ColmiProtocol.rawStreamStartRequest())
+            conn.writePacket(ColmiProtocol.motionOnlyStartRequest())
             started = true
             var n = 0
             var stock = 0
@@ -161,6 +163,10 @@ suspend fun recordMotion(ctx: Context, address: String, out: File, onUpdate: (In
                 val p = conn.notifyV1.receive()
                 val samples = ColmiProtocol.parseMotionPacket(p)
                 if (samples == null) {
+                    if (p.size >= 2 && p[0] == ColmiProtocol.CMD_RAW_STREAM && p[1] == 0xFF.toByte() && !rawStream) {
+                        rawStream = true
+                        conn.writePacket(ColmiProtocol.rawStreamStartRequest())
+                    }
                     if (p.size >= 2 && p[0] == ColmiProtocol.CMD_RAW_STREAM && p[1].toInt() == 3) onUpdate(n, null, ++stock)
                     continue
                 }
@@ -177,7 +183,9 @@ suspend fun recordMotion(ctx: Context, address: String, out: File, onUpdate: (In
     } finally {
         if (started) runCatching {
             // NonCancellable: Stop cancels this coroutine, and a cancelled coroutine cannot suspend to send the stop command.
-            withContext(NonCancellable) { withTimeoutOrNull(2_000) { conn.writePacket(ColmiProtocol.rawStreamStopRequest()) } }
+            withContext(NonCancellable) { withTimeoutOrNull(2_000) {
+                conn.writePacket(if (rawStream) ColmiProtocol.rawStreamStopRequest() else ColmiProtocol.motionOnlyStopRequest())
+            } }
         }
         conn.disconnect()
         SyncWorker.liveHrActive = false

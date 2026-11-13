@@ -1,10 +1,15 @@
-"""Builds a patched RY02 3.00.33 update file that streams every accelerometer sample.
+"""Builds a patched RY02 3.00.33 update file: every accelerometer sample, and a motion-only stream with no gaps.
 
 Stock firmware reads the accelerometer at 25 samples/s in batches but its raw stream (command a1 04)
-sends one sample per second.  The patch appends a small routine to the image and jumps to it at the
-end of the firmware's batch-read function.  While the raw stream is on, it sends each batch as
+sends one sample per second.  Patches, applied in this order to the stock image, code appended to it:
 
-    a1 05 nn  <nn bytes: xl xh yl yh zl zh per sample, 1 or 2 samples>  ...  checksum
+  FW1  jump to new code at the end of the firmware's batch-read function.  While the raw stream mode
+       byte is non-zero, it sends each batch as
+           a1 05 nn  <nn bytes: xl xh yl yh zl zh per sample, 1 or 2 samples>  ...  checksum
+  FW4  a1 07 sets the mode byte to 0x10 without the optical-sensor request and starts motion sampling
+       the way the motion interrupt does; a1 08 clears it.  Both answer with an echo (a1 07 / a1 08).
+       While the mode is 0x10 the firmware's "ring is still, back to tap-wait" decision is vetoed,
+       so the 25 a second stream has no gaps.
 
 Usage: python patch_fw.py [stock.bin] [patched.bin]      (needs: pip install keystone-engine)
 """
@@ -18,12 +23,20 @@ WRAP, HDR = 0x50, 0x400                 # Colmi update wrapper, then Realtek's 1
 BASE = 0x824000                         # address of the image header in flash
 HOOK = 0x82DE32                         # last two instructions of the batch-read function (its epilogue)
 EPILOGUE = bytes.fromhex("73b0f0bd")    # add sp, #0x1cc ; pop {r4-r7, pc}
-RAW_MODE = 0x2098B0                     # 0 = raw stream off; a1 04 sets it to 4
+RAW_MODE = 0x2098B0                     # 0 = raw stream off; a1 04 sets it to 4, a1 07 to MOTION_ONLY
 MEMCPY, CHECKSUM, QUEUE_PACKET = 0x3F848, 0x827714, 0x82A600    # ROM memcpy and two firmware functions
+UNKNOWN_SUB = 0x825D14                  # a1 handler, unknown sub-type: strb r5, [r6] ; movs r0, #0xa1
+UNKNOWN_CODE = bytes.fromhex("3570a120")
+REPLY = 0x825D20                        # a1 handler tail: checksum the 16-byte reply at sp, queue it, return
+STILL_CALL = 0x82E80A                   # bl STILL_CHECK: second half of the "still, back to tap-wait" decision
+STILL_CHECK = 0x82EA30
+START_SAMPLING = 0x20BA3F               # flag the motion interrupt sets; the next read tick starts sampling
+READ_TICK = 0x82E63C                    # gsensor_read_timer_id callback; the motion interrupt calls it directly
+MOTION_ONLY = 0x10
 
 # Entered instead of the epilogue: sp is still the batch-read frame, r4 = bytes in this batch,
 # the samples sit at sp+0x11.  r5-r7 are free because the epilogue restores them.
-CODE = f"""
+FULL_ACCEL = f"""
     ldr   r0, =0x{RAW_MODE:x}
     ldrb  r0, [r0]
     cmp   r0, #0
@@ -70,6 +83,48 @@ done:
     pop   {{r4, r5, r6, r7, pc}}
 """
 
+# Called from the handler's fall-through: r0 = sub-type, r5 = 0, r6 = &RAW_MODE, sp = zeroed reply buffer,
+# the handler's lr already pushed.  Other sub-types run the two displaced instructions and go on to a1 ff.
+MOTION_CMD = f"""
+    cmp   r0, #7
+    beq   start
+    cmp   r0, #8
+    beq   stop
+    strb  r5, [r6]
+    movs  r0, #0xa1
+    bx    lr
+start:
+    movs  r1, #0x{MOTION_ONLY:x}
+    strb  r1, [r6]
+    ldr   r1, =0x{START_SAMPLING:x}
+    movs  r2, #1
+    strb  r2, [r1]
+    movs  r0, #0
+    bl    0x{READ_TICK:x}
+    movs  r0, #7
+    b     reply
+stop:
+    strb  r5, [r6]
+reply:
+    mov   r1, sp
+    movs  r2, #0xa1
+    strb  r2, [r1, #0]
+    strb  r0, [r1, #1]
+    b     0x{REPLY:x}
+"""
+
+# Replaces STILL_CHECK at its one call: 0 means "not still", so sampling goes on.
+STILL_VETO = f"""
+    ldr   r0, =0x{RAW_MODE:x}
+    ldrb  r0, [r0]
+    cmp   r0, #0x{MOTION_ONLY:x}
+    bne   stock
+    movs  r0, #0
+    bx    lr
+stock:
+    b     0x{STILL_CHECK:x}
+"""
+
 
 def asm(src: str, addr: int) -> bytes:
     return bytes(Ks(KS_ARCH_ARM, KS_MODE_THUMB).asm(src, addr)[0])
@@ -79,12 +134,19 @@ def patch(stock: bytes) -> bytes:
     assert hashlib.sha256(stock).hexdigest().startswith(STOCK_SHA256), "not the stock RY02_3.00.33_250117.bin"
     img = bytearray(stock)
     off = lambda addr: addr - BASE + WRAP
-    assert img[off(HOOK):off(HOOK) + 4] == EPILOGUE, "hook site does not hold the expected epilogue"
-    while len(img) % 4: img.append(0xFF)
-    new_addr = BASE + len(img) - WRAP
-    img += asm(CODE, new_addr)
-    while len(img) % 4: img.append(0xFF)
-    img[off(HOOK):off(HOOK) + 4] = asm(f"bl 0x{new_addr:x}", HOOK)
+
+    def redirect(site: int, expect: bytes, code: str) -> None:
+        """Append code (word-aligned) and turn the 4 bytes at site into a call to it."""
+        assert img[off(site):off(site) + 4] == expect, f"{site:#x} does not hold the expected code"
+        while len(img) % 4: img.append(0xFF)
+        new_addr = BASE + len(img) - WRAP
+        img.extend(asm(code, new_addr))
+        while len(img) % 4: img.append(0xFF)
+        img[off(site):off(site) + 4] = asm(f"bl 0x{new_addr:x}", site)
+
+    redirect(HOOK, EPILOGUE, FULL_ACCEL)                                                      # FW1
+    redirect(UNKNOWN_SUB, UNKNOWN_CODE, MOTION_CMD)                                           # FW4
+    redirect(STILL_CALL, asm(f"bl 0x{STILL_CHECK:x}", STILL_CALL), STILL_VETO)                # FW4
     struct.pack_into("<I", img, WRAP + 8, len(img) - WRAP - HDR)        # Realtek header: payload length
     # Clear the header's "not ready" flag (0x0981 -> 0x0901).  The stock firmware only clears it itself after the
     # ROM's integrity check passes, and a modified image is expected to fail that check; pre-cleared, the boot ROM

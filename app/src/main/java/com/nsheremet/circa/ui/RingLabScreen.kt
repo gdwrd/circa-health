@@ -37,7 +37,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-/** Stock RY02 3.00.33 plus the 92-byte motion patch, built by emu/patch_fw.py. */
+/** Stock RY02 3.00.33 plus the 164-byte motion patches (full-rate stream, motion-only with no gaps), built by emu/patch_fw.py. */
 private const val BUNDLED_PATCH = "RY02_3.00.33_fullaccel.bin"
 /** Colmi's own RY02 3.00.33 image, unchanged: the way back from any patch. */
 private const val BUNDLED_STOCK = "RY02_3.00.33_250117.bin"

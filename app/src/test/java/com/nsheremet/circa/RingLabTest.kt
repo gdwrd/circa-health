@@ -29,6 +29,11 @@ class RingLabTest {
         assertNull(ColmiProtocol.parseMotionPacket(hex("a1 03 0a c0 1d 40 01 40 00 00 00 00 00 00 00 0c"))) // stock 1-a-second packet
     }
 
+    @Test fun motionOnlyRequests() {
+        assertArrayEquals(hex("a1 07 00 00 00 00 00 00 00 00 00 00 00 00 00 a8"), ColmiProtocol.motionOnlyStartRequest())
+        assertArrayEquals(hex("a1 08 00 00 00 00 00 00 00 00 00 00 00 00 00 a9"), ColmiProtocol.motionOnlyStopRequest())
+    }
+
     /** A minimal well-formed update file: wrapper, Realtek header with [flags], [payload] bytes of code. */
     private fun image(flags: Int, payload: Int = 64): ByteArray {
         val b = ByteArray(0x50 + 0x400 + payload) { (it * 7).toByte() }

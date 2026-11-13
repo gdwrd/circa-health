@@ -50,6 +50,28 @@ def test_bluetooth_update_installs_patched_firmware():
     assert sum(n[:2] == bytes([0xA1, 5]) for n in e.notified) > 20   # only the patched firmware sends these
 
 
+def test_motion_only_stream_has_no_gaps_while_still():
+    import patch_fw
+    e = ringemu.Emu(quiet_mem=True, trace=True)         # starts on stock firmware, installs the patch over Bluetooth
+    e.still = True                                      # and no motion interrupt is ever raised
+    e.ota_start(3000, patch_fw.patch(ringemu.IMAGE.read_bytes()))
+    e.command(11500, bytes([0xA1, 0x07]))
+    e.command(71500, bytes([0xA1, 0x08]))
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(80000)
+    assert e.resets == 2 and e.ota["state"] == 5
+    tx = [(ev["t"], bytes.fromhex(ev["data"])) for ev in e.trace if ev["kind"] == "ble_tx" and ev["data"][:2] == "a1"]
+    assert [n[1] for t, n in tx if n[1] != 5] == [7, 8]                     # both commands echoed, no a1 ff
+    times = [t for t, n in tx if n[1] == 5]
+    samples = sum(n[2] // 6 for t, n in tx if n[1] == 5)
+    assert times[0] < 13000 and times[-1] < 72000 and 60 * 24 <= samples <= 61 * 26, (times[:3], times[-3:], samples)
+    assert max(b - a for a, b in zip(times, times[1:])) <= 1000                # no gap while still
+    assert not any(ev["kind"] == "bus" and ev["dev"] == ringemu.PPG and ev["t"] >= 11500 for ev in e.trace)
+    stops = [ev["t"] for ev in e.trace if ev["text"].startswith("os_timer_stop(0x20ba28")]
+    assert stops and 71500 < stops[-1] < 80000                                 # back to tap-wait after a1 08
+
+
 def test_bluetooth_update_restores_stock_firmware(tmp_path):
     import patch_fw
     patched = tmp_path / "patched.bin"

@@ -399,6 +399,10 @@ object ColmiProtocol {
     // A1 05 is the stop that pairs with A1 04. A1 02 (the stop for A1 01 / 06) also ends the packets but leaves the
     // optical sensor powered, LEDs blinking; seen on the real ring 2026-11-13 and reproduced in emu/ringemu.py.
     fun rawStreamStopRequest(): ByteArray = buildPacket(byteArrayOf(CMD_RAW_STREAM, 0x05))
+    // A1 07 / A1 08: motion-only stream with no gaps (patched firmware, emu/patch_fw.py FW4): optical sensor off, no
+    // LEDs, sampling kept on while the ring is still. The ring echoes A1 07 / A1 08; stock and FW1 firmware answer A1 FF.
+    fun motionOnlyStartRequest(): ByteArray = buildPacket(byteArrayOf(CMD_RAW_STREAM, 0x07))
+    fun motionOnlyStopRequest(): ByteArray = buildPacket(byteArrayOf(CMD_RAW_STREAM, 0x08))
 
     /** One accelerometer sample in milli-g, in the sensor's own X / Y / Z order. */
     data class MotionSample(val x: Int, val y: Int, val z: Int)

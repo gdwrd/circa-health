@@ -103,6 +103,7 @@ class Emu:
         self.ftl, self.aon = {}, {}
         self.hw = {}                # hardware event sources: name -> {at, interval or None, fire}
         self.accel_drained = self.accel_k = 0
+        self.still = False          # True: the fake accelerometer lies flat and motionless
         self.ppg_drained = self.ppg_bytes = 0
         self.services, self.connected, self.subscribed, self.notified = [], False, set(), []
         self.ota, self.ota_writes, self.ota_chunk = None, 0, 200     # phone-side state of a firmware update in progress
@@ -289,7 +290,7 @@ class Emu:
         return {0x74: 0, 0x80: 0}.get(off)
 
     def accel_read(self, st, v):
-        """Fake motion: 1 g of gravity turning around the ring's axis, as if the ring spins on a finger."""
+        """Fake motion: 1 g of gravity turning around the ring's axis, as if the ring spins on a finger (or lying still)."""
         reg = st["ptr"] & 0x7F
         if reg == 0x2F:                                 # FIFO_SRC: samples waiting (max 31), bit 5 = empty
             n = min(31, (self.now - self.accel_drained) * ACCEL_HZ // 1000)
@@ -301,7 +302,8 @@ class Emu:
         if 0x28 <= reg <= 0x2D:
             i, k = reg - 0x28, self.accel_k
             if i == 5: self.accel_k += 1
-            mg = (1000 * math.cos(k * 0.25), 1000 * math.sin(k * 0.25), 60 * math.sin(k * 1.7))[i // 2]
+            mg = (0, 0, 1000) if self.still else (1000 * math.cos(k * 0.25), 1000 * math.sin(k * 0.25), 60 * math.sin(k * 1.7))
+            mg = mg[i // 2]
             raw = (int(mg / 8) << 6) & 0xFFFF           # 10-bit left-justified, 8 mg per step at +-4 g
             return raw >> 8 if i % 2 else raw & 0xFF
         return v
