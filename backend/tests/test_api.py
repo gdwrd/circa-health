@@ -233,11 +233,13 @@ def test_sleep_depth_naps_regularity_spo2_wear(tmp_path, monkeypatch) -> None:
     assert c["activity"]["inactive_hours"] == 100  # 1 inactive worn hour; counting ring-off hours would give 0
     monkeypatch.setattr(main, "_today", lambda: d)
     monkeypatch.setattr(main, "_vitals", lambda: {})
+    monkeypatch.setattr(main, "_off_since", lambda: None)
     with TestClient(app) as cl:
         s = cl.get(f"/sleep?date={d}", headers=H).json()
         assert s["naps"] == x["naps"] and len(s["hr"]) == 7 and s["hr_low"] == {"t": t0 + 600, "bpm": 52.0}
         assert s["sleep_extra"]["regularity"] == x["regularity"] and s["sleep_extra"]["spo2"] == x["spo2"] is not None
-        assert cl.get("/today", headers=H).json()["wear"] == {"worn_hours": 2, "awake_hours": 15}
+        assert s["off_gap"] is None  # no two HR 0 readings in a row inside the night
+        assert cl.get("/today", headers=H).json()["wear"] == {"worn_hours": 2, "awake_hours": 15, "off_since": None}
         assert cl.get("/trends?metric=bed_start&days=2", headers=H).json()["points"][-1]["value"] == 660
 
 
@@ -748,6 +750,43 @@ def test_vitals_drop_nonpositive() -> None:
     now = time.time()
     load({"biometric_hr_bpm": {now - 120: 61.0, now - 60: 0.0}})
     assert main._vitals()["hr"] == 61.0
+
+
+def test_off_since_ring_worn_zero_wins() -> None:
+    now = time.time() // 60 * 60
+    load({"biometric_hr_bpm": {now - 900: 62.0}, "ring_worn": {now - 1800: 1.0, now - 600: 0.0}})
+    assert main._off_since() == now - 600
+
+
+def test_off_since_hr_fallback_is_last_worn_reading() -> None:
+    now = time.time() // 60 * 60
+    load({"biometric_hr_bpm": {now - 1800: 64.0, now - 900: 0.0, now - 60: 0.0}})
+    assert main._off_since() == now - 1800
+    with TestClient(app) as cl:
+        assert cl.get("/today", headers=H).json()["wear"]["off_since"] == now - 1800
+
+
+def test_off_since_back_on_after_ring_worn_zero() -> None:
+    now = time.time() // 60 * 60
+    load({"ring_worn": {now - 1800: 0.0}, "biometric_hr_bpm": {now - 2400: 60.0, now - 300: 66.0}})
+    assert main._off_since() is None
+
+
+def test_off_since_no_data_is_none() -> None:
+    assert main._off_since() is None
+    load({"biometric_hr_bpm": {time.time() - 300: 0.0}})  # off with no worn reading in 24 h: no evidence of when
+    assert main._off_since() is None
+
+
+def test_off_gap_longest_hr_zero_run_or_ring_worn() -> None:
+    s = datetime(2026, 11, 12, 23, 0)
+    e, t = s + timedelta(hours=7), s.timestamp()
+    # one lone 0 at 0:00, a two-reading run 2:00-2:30 bounded by 1:45 and 2:45
+    load({"biometric_hr_bpm": {t + 3600: 55.0, t + 3900: 0.0, t + 4200: 54.0, t + 9900: 52.0,
+                               t + 10800: 0.0, t + 11700: 0.0, t + 12600: 53.0}})
+    assert main._off_gap(s, e) == {"start": t + 9900, "end": t + 12600}
+    load({"ring_worn": {t + 3600: 0.0, t + 4200: 1.0}})  # the ring's own verdict wins
+    assert main._off_gap(s, e) == {"start": t + 3600, "end": t + 4200}
 
 
 def test_phone_in_bed_row_keeps_its_id_across_rescores() -> None:

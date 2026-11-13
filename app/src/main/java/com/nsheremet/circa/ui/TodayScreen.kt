@@ -298,6 +298,7 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
             Column(Modifier.padding(start = AppSpace.xs)) {
                 Text(if (h in 5..11) "Good morning" else if (h in 12..17) "Good afternoon" else "Good evening", style = AppType.subhead, color = c.secondaryLabel)
                 Text(LocalDate.now().format(DateTimeFormatter.ofPattern("EEEE d MMMM", Locale.getDefault())), style = AppType.headline)
+                d["wear"].obj()?.get("off_since").num()?.let { Text("Ring off since ${clock(it)}", style = AppType.subhead, color = c.secondaryLabel) }
             }
         }
         val day = d["date"].str().orEmpty() // the server's day, never the phone's clock
@@ -406,17 +407,21 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
             val v = d["vitals"].obj()
             val tiles = listOf("Heart rate" to ("hr" to "bpm"), "HRV" to ("hrv" to "ms"), "SpO₂ · latest" to ("spo2" to "%"), "Ring battery" to ("battery" to "%"))
             var expanded by remember { mutableStateOf<String?>(null) }
+            // Ring off: hr / hrv / spo2 only come in (> 0) while worn, so their latest is from before off_since; battery stays fresh.
+            val ringOff = d["wear"].obj()?.get("off_since").num() != null
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
                 Text("Vitals", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
                 tiles.chunked(2).forEach { pair ->
                     Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
                         pair.forEach { (label, m) ->
-                            val x = v?.get(m.first).num()
+                            val off = ringOff && m.first != "battery"
+                            val x = v?.get(m.first).num()?.takeUnless { off }
                             InsetCard(Modifier.weight(1f).fillMaxHeight()) {
                                 Column(Modifier.fillMaxSize().clickable { expanded = if (expanded == m.first) null else m.first }.padding(AppSpace.l)) {
                                     Text(label, style = AppType.footnote, color = c.secondaryLabel)
                                     Row(verticalAlignment = Alignment.Bottom) {
-                                        Text(x?.roundToInt()?.toString() ?: "—", style = AppType.title)
+                                        if (off) Text("Ring off", style = AppType.title, color = c.secondaryLabel)
+                                        else Text(x?.roundToInt()?.toString() ?: "—", style = AppType.title)
                                         if (x != null) Text(" ${m.second}", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(bottom = 3.dp))
                                     }
                                     val line = if (m.first == "hr") hr else if (m.first == "hrv") hrv else emptyList()

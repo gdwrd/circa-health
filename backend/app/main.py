@@ -394,6 +394,34 @@ def _vitals() -> dict:
     return out
 
 
+def _off_since() -> float | None:
+    """Since when the ring is off (epoch s), over _vitals' 24 h; None while worn or with no evidence."""
+    now = datetime.now(samples.tz())
+    hr, rw = (samples.raw(k, now - timedelta(hours=24), now) for k in ("biometric_hr_bpm", "ring_worn"))
+    last_on = max([t for t, v in hr.items() if v > 0] + [t for t, v in rw.items() if v > 0], default=None)
+    off = max((t for t, v in rw.items() if v <= 0), default=None)
+    if off is not None and (last_on is None or off > last_on):
+        return off
+    if last_on is not None and hr and list(hr.values())[-1] <= 0 and list(hr)[-1] > last_on:
+        return last_on
+    return None
+
+
+def _off_gap(s: datetime, e: datetime) -> dict | None:
+    """Longest ring-off stretch inside a night: ring_worn rows when present, else a run of >= 2 HR 0 readings
+    bounded by the HR > 0 readings around it (or the night's edges)."""
+    rw = samples.raw("ring_worn", s, e)
+    best, a, k, on = None, None, 0, s.timestamp()
+    for t, v in [*(rw or samples.raw("biometric_hr_bpm", s, e)).items(), (e.timestamp(), 1.0)]:
+        if v > 0:
+            if a is not None and (rw or k >= 2) and (best is None or t - a > best["end"] - best["start"]):
+                best = {"start": a, "end": t}
+            a, k, on = None, 0, t
+        else:
+            a, k = (t if rw else on) if a is None else a, k + 1
+    return best
+
+
 def _day(day: str | None) -> date:
     try:
         d = date.fromisoformat(day) if day else _today()
@@ -486,7 +514,7 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
         "resilience": scoring.resilience([r["inputs"].get("stress_load") for r in rows],
                                          [r["readiness_score"] for r in rows]),
         "vitals": _vitals(),
-        "wear": row["c"].get("wear"),
+        "wear": {**(row["c"].get("wear") or {}), "off_since": _off_since() if d == _today() else None},
         "moments": _moments(d), "now": _now(d) if d == _today() else None,
         "because": {"today": _because(d), "yesterday": _because(d - timedelta(1))} if d == _today() else None,
         "signals": {**sig, "status": "learning" if sig["reason"] else "ok", "explain": notify.explain(_today())},
@@ -545,7 +573,8 @@ def sleep(day: str | None = Query(None, alias="date")) -> dict:
             "hr_low": hr[scoring.low_index([p["bpm"] for p in hr])] if hr else None,
             "debt": debt(d), "bedtime": notify.bedtime_window(_today()), "plan": notify.tonight(_today()),
             "jetlag": scoring.social_jetlag(mids),
-            "edited": db.sleep_override(d) is not None, "phone_min": round(n.get("phone_min", 0)) if n else 0}
+            "edited": db.sleep_override(d) is not None, "phone_min": round(n.get("phone_min", 0)) if n else 0,
+            "off_gap": _off_gap(s, e) if n else None}
 
 
 @api.patch("/sleep")
