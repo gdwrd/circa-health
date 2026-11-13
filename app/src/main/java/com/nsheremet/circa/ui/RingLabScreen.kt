@@ -50,7 +50,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.LocalDateTime
 
-/** Stock RY02 3.00.33 plus the 164-byte motion patches (full-rate stream, motion-only with no gaps), built by emu/patch_fw.py. */
+/** Stock RY02 3.00.33 plus 308 bytes of patches (full-rate stream, motion-only with no gaps, double tap as A1 09), built by emu/patch_fw.py. */
 private const val BUNDLED_PATCH = "RY02_3.00.33_fullaccel.bin"
 /** Colmi's own RY02 3.00.33 image, unchanged: the way back from any patch. */
 private const val BUNDLED_STOCK = "RY02_3.00.33_250117.bin"
@@ -71,6 +71,7 @@ internal fun RingLabScreen(onBack: () -> Unit) {
     var recording by remember { mutableStateOf<Job?>(null) }
     var samples by remember { mutableIntStateOf(0) }
     var stockPackets by remember { mutableIntStateOf(0) }
+    var doubleTaps by remember { mutableIntStateOf(0) }
     var last by remember { mutableStateOf<ColmiProtocol.MotionSample?>(null) }
     var startedAt by remember { mutableStateOf(0L) }
     var motionNote by remember { mutableStateOf("") }
@@ -98,15 +99,15 @@ internal fun RingLabScreen(onBack: () -> Unit) {
 
     fun toggleRecording() {
         recording?.let { it.cancel(); return }
-        samples = 0; stockPackets = 0; last = null; motionNote = "Connecting…"; startedAt = System.currentTimeMillis()
+        samples = 0; stockPackets = 0; doubleTaps = 0; last = null; motionNote = "Connecting…"; startedAt = System.currentTimeMillis()
         // shortcut: recordings live in cacheDir, the OS may clear them; move to filesDir if a week of files is ever lost
         val out = motionFile(shareDir, label, LocalDateTime.now())
         recording = scope.launch {
             var error: String? = null
             try {
                 error = withContext(Dispatchers.IO) {
-                    recordMotion(ctx, address!!, out, label) { n, s, stock ->
-                        samples = n; stockPackets = stock
+                    recordMotion(ctx, address!!, out, label) { n, s, stock, taps ->
+                        samples = n; stockPackets = stock; doubleTaps = taps
                         if (s != null) last = s
                         motionNote = when {
                             n > 0 -> "Recording"
@@ -167,6 +168,8 @@ internal fun RingLabScreen(onBack: () -> Unit) {
                 Hairline(Modifier.padding(start = AppSpace.l))
                 val seconds = ((System.currentTimeMillis() - startedAt) / 1000.0).coerceAtLeast(1.0)
                 ValueRow("Samples", if (samples == 0) "–" else "$samples" + if (recording != null) "  (${"%.0f".format(samples / seconds)} a second)" else "")
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ValueRow("Double taps", if (recording == null && doubleTaps == 0) "–" else "$doubleTaps")
                 Hairline(Modifier.padding(start = AppSpace.l))
                 ValueRow("Latest (mg)", last?.let { "x ${it.x}   y ${it.y}   z ${it.z}" } ?: "–")
                 Hairline(Modifier.padding(start = AppSpace.l))

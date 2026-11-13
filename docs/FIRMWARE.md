@@ -192,3 +192,22 @@ but blank only in the emulator, and the ROM's own flash use (boot patch, `ftl_sa
 | `0x87A000`..`0x87B000` | 4 KB | apparently free, but it sits inside the history area: likely a history type the day did not trigger. Do not use. |
 | `0x840000`..`0x84D000` | 52 KB | apparently free. Between the end of the stock app and the staging area; a larger patched app grows into it. |
 | `0x802000`..`0x824000` | 136 KB | apparently free in the emulator only. The ROM's own data (boot patch, image headers, `ftl_save` storage) is not modelled and could sit here; treat as taken until the ring shows otherwise. |
+
+## Patched image
+
+`RY02_3.00.33_fullaccel.bin` (built by `emu/patch_fw.py`, 308 bytes added) adds these ring-to-phone packets:
+
+| Packet | Patch | Meaning |
+|---|---|---|
+| `A1 05 nn <samples>` | FW1 | every accelerometer sample while a stream runs |
+| `A1 07` / `A1 08` | FW4 | echo of the motion-only stream start / stop commands |
+| `A1 09 <count>` | FW6 | a double tap; count 1, 2… since boot, wraps at 255. A phone sending `A1 09` still gets `A1 FF`. |
+
+Accelerometer registers FW6 changes (chip type `0x11`, the default; other chip types keep stock values):
+
+| Register | When | Stock | Patched |
+|---|---|---|---|
+| CLICK_CFG `0x38` | tap-wait | `0x15` (single click X/Y/Z) | `0x3F` (single and double click) |
+| TIME_WINDOW `0x3D` | tap-wait | never written | `0x0A` (400 ms at 25 Hz) |
+| CLICK_CFG `0x38` | sampling | `0x00` | `0x2A` (double click only) |
+| CTRL_REG3 `0x22` | sampling | `0x00` | `0x80` (click interrupt on the pin) |

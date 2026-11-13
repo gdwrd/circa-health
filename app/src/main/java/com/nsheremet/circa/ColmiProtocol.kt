@@ -419,4 +419,8 @@ object ColmiProtocol {
         fun mg(o: Int) = (((value[o + 1].toInt() shl 8) or (value[o].toInt() and 0xff)) shr 6) * 8
         return List(n) { i -> MotionSample(mg(3 + 6 * i), mg(5 + 6 * i), mg(7 + 6 * i)) }
     }
+
+    /** `A1 09 <count>`: a double tap on the ring (patched firmware, emu/patch_fw.py FW6); count goes 1, 2… per boot, wraps at 255. */
+    fun parseTapPacket(value: ByteArray): Int? =
+        if (value.size >= 16 && value[0] == CMD_RAW_STREAM && value[1] == 0x09.toByte()) value[2].toInt() and 0xff else null
 }

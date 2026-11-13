@@ -34,6 +34,12 @@ class RingLabTest {
         assertArrayEquals(hex("a1 08 00 00 00 00 00 00 00 00 00 00 00 00 00 a9"), ColmiProtocol.motionOnlyStopRequest())
     }
 
+    @Test fun tapPacketFromPatchedFirmware() {
+        assertEquals(2, ColmiProtocol.parseTapPacket(hex("a1 09 02 00 00 00 00 00 00 00 00 00 00 00 00 ac"))) // captured from the emulated patched firmware
+        assertNull(ColmiProtocol.parseTapPacket(hex("a1 05 06 c0 e0 00 00 00 00 00 00 00 00 00 00 00")))
+        assertNull(ColmiProtocol.parseTapPacket(hex("a1 ff 00 00 00 00 00 00 00 00 00 00 00 00 00 a0")))
+    }
+
     @Test fun motionFileNamesNeverOverwrite() {
         val dir = kotlin.io.path.createTempDirectory().toFile()
         val t = java.time.LocalDateTime.of(2026, 11, 13, 9, 5)

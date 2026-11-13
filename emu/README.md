@@ -5,7 +5,7 @@ Tools for the Colmi RY02 ring's firmware (Realtek RTL8762E, image `RY02_3.00.33_
 | File | What it does |
 |---|---|
 | `ringemu.py` | Runs the stock app image without the chip's ROM. ROM calls are Python stand-ins; sensors, the phone and interrupts are faked. |
-| `patch_fw.py` | Builds `firmware/RY02_3.00.33_fullaccel.bin`: stock plus the patch that streams every accelerometer sample. |
+| `patch_fw.py` | Builds `firmware/RY02_3.00.33_fullaccel.bin`: stock plus, in this order, FW1 (every accelerometer sample, `A1 05`), FW4 (motion-only stream with no gaps, `A1 07` / `A1 08`) and FW6 (double tap sent as `A1 09 <count>`). |
 | `viewer.html` | Replays a recorded run (`--trace trace.js`): spinning ring, chip-to-sensor diagram, event log. |
 | `test_ringemu.py` | End-to-end tests: heart rate, the patch, and installing the patch over the emulated Bluetooth update. |
 | `firmware/` | The stock image and the built patch. |

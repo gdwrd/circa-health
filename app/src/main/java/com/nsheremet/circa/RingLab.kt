@@ -153,10 +153,10 @@ fun motionFile(dir: File, label: String, time: LocalDateTime): File {
 /**
  * Turns the ring's motion-only stream on (`A1 07`; on a ring that answers `A1 FF`, the raw stream `A1 04` instead)
  * and writes every `A1 05` motion sample to [out] as CSV, after a `# label=` line, until cancelled.
- * [onUpdate] gets the sample count, the latest sample and how many stock 1-a-second packets came in.
+ * [onUpdate] gets the sample count, the latest sample, how many stock 1-a-second packets and how many double taps came in.
  * Returns null on a normal stop, else what went wrong.
  */
-suspend fun recordMotion(ctx: Context, address: String, out: File, label: String, onUpdate: (Int, ColmiProtocol.MotionSample?, Int) -> Unit): String? {
+suspend fun recordMotion(ctx: Context, address: String, out: File, label: String, onUpdate: (Int, ColmiProtocol.MotionSample?, Int, Int) -> Unit): String? {
     val conn = ColmiConnection(ctx, address)
     var started = false
     var rawStream = false // true once the ring refused A1 07 and the A1 04 raw stream runs instead
@@ -171,6 +171,7 @@ suspend fun recordMotion(ctx: Context, address: String, out: File, label: String
             started = true
             var n = 0
             var stock = 0
+            var taps = 0
             while (currentCoroutineContext().isActive) {
                 val p = conn.notifyV1.receive()
                 val samples = ColmiProtocol.parseMotionPacket(p)
@@ -179,12 +180,13 @@ suspend fun recordMotion(ctx: Context, address: String, out: File, label: String
                         rawStream = true
                         conn.writePacket(ColmiProtocol.rawStreamStartRequest())
                     }
-                    if (p.size >= 2 && p[0] == ColmiProtocol.CMD_RAW_STREAM && p[1].toInt() == 3) onUpdate(n, null, ++stock)
+                    if (p.size >= 2 && p[0] == ColmiProtocol.CMD_RAW_STREAM && p[1].toInt() == 3) onUpdate(n, null, ++stock, taps)
+                    if (ColmiProtocol.parseTapPacket(p) != null) onUpdate(n, null, stock, ++taps)
                     continue
                 }
                 val now = System.currentTimeMillis()
                 for (s in samples) w.write("${n++},$now,${s.x},${s.y},${s.z}\n")
-                onUpdate(n, samples.last(), stock)
+                onUpdate(n, samples.last(), stock, taps)
             }
         }
         null

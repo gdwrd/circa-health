@@ -104,6 +104,7 @@ class Emu:
         self.hw = {}                # hardware event sources: name -> {at, interval or None, fire}
         self.accel_drained = self.accel_k = 0
         self.still = False          # True: the fake accelerometer lies flat and motionless
+        self.click_src, self.last_tap = 0, None     # fake accelerometer's tap detector, see tap()
         self.ppg_drained = self.ppg_bytes = 0
         self.services, self.connected, self.subscribed, self.notified = [], False, set(), []
         self.ota, self.ota_writes, self.ota_chunk = None, 0, 200     # phone-side state of a firmware update in progress
@@ -292,6 +293,9 @@ class Emu:
     def accel_read(self, st, v):
         """Fake motion: 1 g of gravity turning around the ring's axis, as if the ring spins on a finger (or lying still)."""
         reg = st["ptr"] & 0x7F
+        if reg == 0x39:                                 # CLICK_SRC, cleared by reading it
+            v, self.click_src = self.click_src, 0
+            return v
         if reg == 0x2F:                                 # FIFO_SRC: samples waiting (max 31), bit 5 = empty
             n = min(31, (self.now - self.accel_drained) * ACCEL_HZ // 1000)
             self.accel_drained = self.now
@@ -307,6 +311,23 @@ class Emu:
             raw = (int(mg / 8) << 6) & 0xFFFF           # 10-bit left-justified, 8 mg per step at +-4 g
             return raw >> 8 if i % 2 else raw & 0xFF
         return v
+
+    def tap(self, at_ms):
+        """Schedule one tap on the ring.  Our model of a LIS3DH click detector, not the chip: every tap sets the
+        single-click bit if CLICK_CFG enables single clicks; it also sets the double-click bit if double clicks are
+        enabled now and the previous tap was TIME_LATENCY to TIME_LATENCY + TIME_WINDOW earlier (1 step = 1/25 s).
+        Either raises the interrupt pin when CTRL_REG3 routes clicks to it."""
+        def fire():
+            regs = next((st["devs"][ACCEL] for st in self.bus.values() if ACCEL in st["devs"]), {})
+            cfg, step = regs.get(0x38, 0), 1000 // ACCEL_HZ
+            src = 0x50 if cfg & 0x15 else 0             # IA | SCLICK
+            gap = self.now - self.last_tap if self.last_tap is not None else -1
+            if cfg & 0x2A and regs.get(0x3C, 0) * step <= gap <= (regs.get(0x3C, 0) + regs.get(0x3D, 0)) * step:
+                src |= 0x60                             # IA | DCLICK
+            self.last_tap, self.click_src = self.now, self.click_src | src
+            self.ev(f"tap: CLICK_SRC {self.click_src:#04x}", "irq")
+            if src and regs.get(0x22, 0) & 0x80: self.raise_pin(22)
+        self.hw[f"tap{at_ms}"] = {"at": at_ms, "interval": None, "fire": fire}
 
     def ppg_read(self, st, v):
         """Fake pulse: every 24-bit light reading is a steady level with a 1% ripple at PULSE_BPM."""
