@@ -506,7 +506,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 val v = when (seg.stage) { SLEEP_LIGHT -> 1.0; SLEEP_DEEP -> 2.0; SLEEP_REM -> 3.0; SLEEP_AWAKE -> 4.0; else -> continue }
                 metrics += Metric("biometric_sleep_stage", labels, v, seg.startMs)
             }
-            metrics += Metric("biometric_sleep_stage", labels, 0.0, s.endMs)
+            // No end marker: a sync during the night would leave one inside the session. biometric_sleep_end_ts ends the stages.
         }
 
         return metrics

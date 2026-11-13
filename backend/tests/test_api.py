@@ -477,9 +477,11 @@ def test_sleep_override_edit_rescore_delete(tmp_path, monkeypatch) -> None:
     data = {"biometric_sleep_end_ts": {t0: t0 + 440 * 60}, "biometric_sleep_total_min": {t0: 420.0},
             "biometric_sleep_awake_min": {t0: 20.0}, "biometric_sleep_rem_min": {t0: 90.0},
             "biometric_sleep_deep_min": {t0: 80.0}, "biometric_hr_bpm": {t0 + i * 300: 55.0 for i in range(80)}}
-    stages = {t0 + 300: 1.0, m - 900: 2.0, m + 6 * 3600: 3.0}  # a stage carries on the 5 min grid for up to 3 h
+    # a stage runs to the next point; the 0 inside the night is a stale end marker from a mid-night sync
+    stages = {t0 + 300: 1.0, m - 900: 2.0, m + 3600: 0.0, m + 6 * 3600: 3.0}
 
     load({**data, "biometric_sleep_stage": stages})
+    assert main._stage_segs(t0, m + 86400) == [(t0 + 300, m - 900, 1), (m - 900, m + 6 * 3600, 2), (m + 6 * 3600, t0 + 440 * 60, 3)]  # ends with the session, not the day
     monkeypatch.setattr(main, "_vitals", lambda: {})
     main._score_day(d)
     with TestClient(app) as c:

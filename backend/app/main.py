@@ -45,6 +45,25 @@ def _after_noon(ts: float) -> int:
     return (t.hour * 60 + t.minute - 720) % 1440
 
 
+def _stage_segs(start: float, end: float) -> list[tuple[float, float, int]]:
+    """Ring stages as (from, to, stage) clipped to [start, end), minute-exact.
+
+    A stage ends at the next stage point or at the end of its own ring session, so nothing carries into the day.
+    Points with value 0 (end markers of app versions up to 4.2.4) are ignored: a mid-night sync left them inside the night.
+    """
+    lo, hi = (datetime.fromtimestamp(x, samples.tz()) for x in (start - 86400, end))
+    ends = samples.raw("biometric_sleep_end_ts", lo, hi)
+    for t, total in samples.raw("biometric_sleep_total_min", lo, hi).items():  # as _sessions: no end_ts before app v1.1
+        ends.setdefault(t, t + total * 60)
+    pts = [(t, int(v)) for t, v in samples.raw("biometric_sleep_stage", lo, hi).items() if v > 0]
+    out = []
+    for (t, st), nxt in zip(pts, [p[0] for p in pts[1:]] + [end]):
+        a, b = max(t, start), min(nxt, end, max((e for s, e in ends.items() if s <= t < e), default=t))
+        if b > a:
+            out.append((a, b, st))
+    return out
+
+
 def _sessions(d: date) -> list[dict]:
     """Sessions ending on d, longest (main) first."""
     lo, hi = samples.midnight(d) - timedelta(hours=12), samples.midnight(d + timedelta(1))
@@ -64,8 +83,7 @@ def _sessions(d: date) -> list[dict]:
             kept.append(s | {"total_min": max(s["total_min"] - s["awake_min"], 0.0)})  # wire total is end - start, awake included
     if kept:  # screen-on time inside the night is awake; sleep starts when the phone is put down
         m = kept[0]
-        g = samples.grid("biometric_sleep_stage", *(datetime.fromtimestamp(m[k], samples.tz()) for k in ("start", "end")), 300, 10800)
-        ring_awake = [(t, t + 300) for t, v in g.items() if int(v) == 4 and m["start"] <= t < m["end"]]  # wire stage 4 = awake (5 is the raw ring byte, never on the wire)
+        ring_awake = [(a, b) for a, b, st in _stage_segs(m["start"], m["end"]) if st == 4]  # wire stage 4 = awake (5 is the raw ring byte, never on the wire)
         s, e, a, m["phone_min"] = scoring.clip_night(m["start"], m["end"], m["awake_min"], _screen_on(lo, hi), ring_awake)
         if (s, e, a) != (m["start"], m["end"], m["awake_min"]):
             total = max((e - s) / 60 - a, 0.0)
@@ -513,7 +531,11 @@ def sleep(day: str | None = Query(None, alias="date")) -> dict:
     hr: list[dict] = []
     if n:
         s, e = (datetime.fromtimestamp(n[k], samples.tz()) for k in ("start", "end"))
-        stages = [{"t": t, "stage": int(v)} for t, v in samples.grid("biometric_sleep_stage", s, e, 300, 10800).items() if n["start"] <= t < n["end"]]
+        segs = _stage_segs(n["start"], n["end"])
+        for i, (a, b, st) in enumerate(segs):
+            stages.append({"t": a, "stage": st})
+            if b < n["end"] and (i + 1 == len(segs) or segs[i + 1][0] > b):  # the ring session ended here: the chart stops
+                stages.append({"t": b, "stage": 0})
         hr = [{"t": t, "bpm": v} for t, v in samples.raw("biometric_hr_bpm", s, e).items() if v > 0]  # as _score_day
     mids = [(r["date"].weekday(), (i["bed_start"] + i["bed_end"]) / 2) for r in db.days(d - timedelta(27), d)
             if (i := r["inputs"]).get("bed_start") is not None]
