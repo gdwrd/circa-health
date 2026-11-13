@@ -28,7 +28,9 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        While on, every read of the optical chip's queue (I2C 0x44 register 0x41, all through the read helper LIGHT_READ,
        from the 320 ms drain 0x8302C0) is sent as it came off the bus:  a1 0c nn <nn bytes, 3 a sample, up to 4 samples>.
        Samples flow only while the stock firmware measures (live heart rate 69 01 and its own schedule).  A queue read
-       with no phone connected clears the mode instead of sending, as FW11 does.
+       with no phone connected clears the mode instead of sending, as FW11 does.  The rest of a read is dropped while
+       LIGHT_ROOM or more packets wait to go out: the stock send ring has no full check, and a link slower than the
+       samples (about 17 packets a second on the ring) would otherwise overwrite unsent packets, the 69 readings too.
   FW15b a1 0f answers the wear state and when it last changed:  a1 0f <state> <t0 t1 t2 t3> 00 .. checksum
        state 0 = unknown (no verdict since boot), 1 = worn, 2 = not worn; t = the firmware clock (word CLOCK, seconds
        since 2000-01-01 in the phone's local time as set-time 01 wrote it; it steps once a minute) at the change,
@@ -66,13 +68,17 @@ START_SAMPLING = 0x20BA3F               # flag the motion interrupt sets; the ne
 READ_TICK = 0x82E63C                    # gsensor_read_timer_id callback; the motion interrupt calls it directly
 MOTION_ONLY = 0x10
 TAP_T, TAP_Q, TAP_LO, TAP_HI, TAP_RUN = 20, 15, 3, 8, 4     # 640 mg, 480 mg; 120..320 ms apart at 25 Hz
-VERSION = 10                            # ours: 1 = v4.1.0 (FW1); 2, 3 = v4.2.0, v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected
+VERSION = 11                            # ours: 1 = v4.1.0 (FW1); 2, 3 = v4.2.0, v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected
                                         # taps, never fired on the ring); 5 = taps found in the samples (v4.2.3, firm taps only); 6 = normal taps
                                         # (v4.2.4); 7 = motion stream ends when the phone leaves (FW11); 8 = numbered samples (FW12);
-                                        # 9 = light samples (FW7a); 10 (tag circaA) = wear state (FW15b)
+                                        # 9 = light samples (FW7a); 10 (tag circaA) = wear state (FW15b);
+                                        # 11 (circaB) = light samples wait for room in the send ring (FW7a)
 LIGHT_READ = 0x830238                   # optical read helper (reg, buf, len) for I2C 0x44; its epilogue below
 LIGHT_HOOK = 0x830268                   # mov r0, r4 ; pop {r1-r7, pc}: r4 = 0 if read, r6 = len, r7 = buf, [sp] = register
 LIGHT_EPILOGUE = bytes.fromhex("2046febd")
+TX_RING = 0x209A32                      # QUEUE_PACKET's ring: u16 next to send, u16 next free, 128 slots; it never checks for room
+LIGHT_ROOM = 16                         # FW7a sends only while fewer packets than this wait (one read is about 6), so stock
+                                        # replies are never overwritten and wait at most this many packets
 STOCK_TEXT = b"3.00.33_250117"          # in the wrapper, the device-information text and the version command's reply
 # Free RAM: .bss ends at 0x20DC30, the largest RAM-code overlay (table at 0x2083D8, loader 0x8249D8) at 0x20DCF8,
 # and update_ram_layout(0x7000, ...) starts the heap at 0x20EC00.  Nothing else lives in between.
@@ -270,6 +276,14 @@ send:
     movs  r5, #0
 loop:
     cmp   r5, r6
+    bhs   done
+    ldr   r0, =0x{TX_RING:x}
+    ldrh  r1, [r0]
+    ldrh  r0, [r0, #2]
+    subs  r0, r0, r1
+    lsls  r0, r0, #25
+    lsrs  r0, r0, #25
+    cmp   r0, #{LIGHT_ROOM}
     bhs   done
     sub   sp, #16
     movs  r0, #0

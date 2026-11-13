@@ -3,7 +3,7 @@
 Run: python -m pytest -q -p no:faulthandler test_ringemu.py
 (unicorn trips a harmless, handled access violation on Windows that faulthandler would print.)
 """
-import contextlib, io
+import collections, contextlib, io, struct
 
 import ringemu
 
@@ -166,12 +166,29 @@ def test_wearing_the_patched_ring_sends_no_taps():
     assert interrupts <= 10 and taps == 0 and resets == 1
 
 
-def light(on_ms, off_ms=None, leave_ms=None):
-    """Patched over Bluetooth, live heart rate from 11.5 s, a1 0a at on_ms -> (emu, a1 packets with times, queue reads)."""
+def light(on_ms, off_ms=None, leave_ms=None, credits=None):
+    """Patched over Bluetooth, live heart rate from 11.5 s, a1 0a at on_ms -> (emu, a1 packets with times, queue reads).
+    credits: notifications the link takes per 500 ms from on_ms (default: all).  e.waiting: most packets ever waiting
+    in the firmware's send ring."""
     import patch_fw
     ringemu.PULSE_BPM = 60
     e = ringemu.Emu(quiet_mem=True, trace=True)
     e.ota_start(3000, patch_fw.patch(ringemu.IMAGE.read_bytes()))
+    stock_call, sent, e.waiting = e.rom_SystemCall_Stack, collections.Counter(), 0
+    def slow_link():                                    # the stack refuses a notify once this interval's credits are used
+        if credits and e.arg(0) == 0x3108 and e.now > on_ms and not e.services[e.arg(2) - 1]["uuid"].startswith(ringemu.OTA_UUID):
+            if sent[e.now // 500] >= credits:
+                e.uc.mem_write(e.arg(7), bytes(1))
+                return 0
+            sent[e.now // 500] += 1
+        return stock_call()
+    e.rom_SystemCall_Stack = slow_link
+    if credits:     # credits back each interval: the stack's "send data complete" makes the app callback 0x829970 call 0x82A5CE
+        e.hw["credits"] = {"at": on_ms, "interval": 500, "fire": lambda: e.spawn("ble:done", 0x82A5CE | 1), "keep": True}
+    def queued(uc, addr, size, _):                      # QUEUE_PACKET entry
+        r, w = struct.unpack("<HH", uc.mem_read(patch_fw.TX_RING, 4))
+        e.waiting = max(e.waiting, (w - r) % 128)
+    e.uc.hook_add(ringemu.UC_HOOK_CODE, queued, begin=patch_fw.QUEUE_PACKET, end=patch_fw.QUEUE_PACKET)
     e.command(11500, bytes([0x69, 0x01]))
     if on_ms: e.command(on_ms, bytes([0xA1, 0x0A]))
     if off_ms: e.command(off_ms, bytes([0xA1, 0x0B]))
@@ -205,6 +222,17 @@ def test_light_mode_ends_when_the_phone_leaves():
     assert any(n[1] == 0x0C and t < 20000 for t, n in tx)
     assert any(t > 20500 for t, rx in reads), "no queue read after the phone left"
     assert e.uc.mem_read(patch_fw.LIGHT, 1)[0] == 0
+
+
+def test_light_samples_leave_room_on_a_slow_link():
+    # circaA restarted the real ring about 30 s into a light recording (2026-11-13); not reproduced here.  What is: on a
+    # link slower than the samples, the copy filled the stock send ring (128 slots, no full check) and overwrote unsent
+    # packets, the stock 69 readings with them.
+    e, tx, reads = light(15000, credits=2)              # 4 notifications a second; light alone makes about 10
+    assert e.waiting < 127                              # the ring never wrapped onto unsent packets
+    assert sum(n[1] == 0x0C for t, n in tx) > 40
+    readings = [n[3] for n in e.notified if n[0] == 0x69 and n[3]]
+    assert readings and all(abs(r - 60) <= 2 for r in readings), readings
 
 
 def test_light_mode_off_keeps_stock_behaviour():
