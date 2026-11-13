@@ -72,6 +72,34 @@ def test_motion_only_stream_has_no_gaps_while_still():
     assert stops and 71500 < stops[-1] < 80000                                 # back to tap-wait after a1 08
 
 
+def dropped_link(mode):
+    """Patched over Bluetooth, still ring, a1 <mode> at 11.5 s, the phone leaves at 15 s -> (emu, timer stops)."""
+    import patch_fw
+    e = ringemu.Emu(quiet_mem=True, trace=True)
+    e.still = True
+    e.ota_start(3000, patch_fw.patch(ringemu.IMAGE.read_bytes()))
+    e.hw["motion"] = {"at": 11000, "interval": None, "fire": lambda: e.raise_pin(22)}
+    e.command(11500, bytes([0xA1, mode]))
+    e.hw["leave"] = {"at": 15000, "interval": None, "fire": e.ble_disconnect}
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(26000)
+    assert e.resets == 2 and e.ota["state"] == 5
+    assert any(ev["kind"] == "ble_tx" and ev["data"][:4] == "a105" and ev["t"] < 15000 for ev in e.trace)
+    return e, [ev["t"] for ev in e.trace if ev["text"].startswith("os_timer_stop(0x20ba28")]
+
+
+def test_motion_only_stream_ends_when_the_phone_leaves():
+    e, stops = dropped_link(0x07)
+    assert e.uc.mem_read(0x2098B0, 1)[0] == 0 and e.uc.mem_read(0x20BA3B, 1)[0] == 0    # mode cleared, tap-wait
+    assert stops and 15000 < stops[-1] < 25000, stops
+
+
+def test_raw_stream_mode_survives_the_phone_leaving():
+    e, stops = dropped_link(0x04)
+    assert e.uc.mem_read(0x2098B0, 1)[0] == 4
+
+
 def test_double_taps_in_a_real_recording():
     # testdata/taps.csv: 51 s recorded on the ring (firmware version 4) while trying double taps of every kind,
     # then shaking and moving.  Clear, separate double taps end at samples 122 and 242 (gentle) and 278, 308, 319,

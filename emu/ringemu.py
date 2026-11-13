@@ -756,6 +756,13 @@ class Emu:
         self.spawn("ble:write", svc["write"], (0, sid, 2, 1, len(data), buf, post),
                    on_exit=lambda: [self.free[self.sizes.pop(a)].append(a) for a in (buf, post) if a in self.sizes])
 
+    def ble_disconnect(self):
+        """The phone's link drops (walked out of range): conn 0 goes DISCONNECTED, cause remote user terminated."""
+        self.connected, self.subscribed = False, set()
+        self.ev("BLE phone disconnected", "ble_conn")
+        self.qsend(self.io_q, struct.pack("<HHBBH", 0, 2, 0, 0, 0x113))
+        self.qsend(self.evt_q, bytes([2]))
+
     # ---- phone side of a firmware update, as the public web flasher does it (sdk-ref/ota/ATC_RF03_Writer.html)
     def ota_send(self, kind, payload=b""):
         pkt = bytes([0xBC, kind]) + struct.pack("<HH", len(payload), crc16(payload)) + payload

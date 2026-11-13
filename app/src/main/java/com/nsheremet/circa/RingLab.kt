@@ -2,6 +2,7 @@ package com.nsheremet.circa
 
 import android.content.Context
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -193,6 +194,8 @@ suspend fun recordMotion(ctx: Context, address: String, out: File, label: String
         null
     } catch (t: kotlinx.coroutines.CancellationException) {
         null // Stop pressed
+    } catch (t: ClosedReceiveChannelException) {
+        "Ring disconnected. Recording saved up to here." // ColmiConnection closes notifyV1 when the link drops
     } catch (t: Throwable) {
         "Recording stopped: ${t.message ?: t::class.simpleName}"
     } finally {

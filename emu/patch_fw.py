@@ -18,6 +18,8 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        from 1 per boot, wraps at 255).  More than TAP_RUN samples in a row at TAP_Q or more is movement and
        cancels.  The numbers come from a real recording (emu/testdata/taps.csv).  Only while the ring samples:
        the tap that wakes a resting ring is not in the samples.
+  FW11 a batch read in mode 0x10 with no phone connected clears the mode instead of sending, as a1 08 would, so a
+       missed a1 08 (phone out of range, app killed) no longer keeps the ring sampling until a restart.  a1 04 is untouched.
   Version: the firmware texts the ring reports end in _circa<VERSION> instead of _250117, in the file's wrapper too.
 
 Usage: python patch_fw.py [stock.bin] [patched.bin]      (needs: pip install keystone-engine)
@@ -35,6 +37,7 @@ HOOK = 0x82DE32                         # last two instructions of the batch-rea
 EPILOGUE = bytes.fromhex("73b0f0bd")    # add sp, #0x1cc ; pop {r4-r7, pc}
 RAW_MODE = 0x2098B0                     # 0 = raw stream off; a1 04 sets it to 4, a1 07 to MOTION_ONLY
 MEMCPY, CHECKSUM, QUEUE_PACKET = 0x3F848, 0x827714, 0x82A600    # ROM memcpy and two firmware functions
+CONNECTED = 0x829B5E                    # QUEUE_PACKET's own test: 1 while link state byte 0x2099ED is 2 (connected)
 UNKNOWN_SUB = 0x825D14                  # a1 handler, unknown sub-type: strb r5, [r6] ; movs r0, #0xa1
 UNKNOWN_CODE = bytes.fromhex("3570a120")
 REPLY = 0x825D20                        # a1 handler tail: checksum the 16-byte reply at sp, queue it, return
@@ -44,8 +47,9 @@ START_SAMPLING = 0x20BA3F               # flag the motion interrupt sets; the ne
 READ_TICK = 0x82E63C                    # gsensor_read_timer_id callback; the motion interrupt calls it directly
 MOTION_ONLY = 0x10
 TAP_T, TAP_Q, TAP_LO, TAP_HI, TAP_RUN = 20, 15, 3, 8, 4     # 640 mg, 480 mg; 120..320 ms apart at 25 Hz
-VERSION = 6                             # ours: 1 = v4.1.0 (FW1); 2, 3 = v4.2.0, v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected
+VERSION = 7                             # ours: 1 = v4.1.0 (FW1); 2, 3 = v4.2.0, v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected
                                         # taps, never fired on the ring); 5 = taps found in the samples (v4.2.3, firm taps only); 6 = normal taps
+                                        # (v4.2.4); 7 = motion stream ends when the phone leaves (FW11)
 STOCK_TEXT = b"3.00.33_250117"          # in the wrapper, the device-information text and the version command's reply
 # Free RAM: .bss ends at 0x20DC30, the largest RAM-code overlay (table at 0x2083D8, loader 0x8249D8) at 0x20DCF8,
 # and update_ram_layout(0x7000, ...) starts the heap at 0x20EC00.  Nothing else lives in between.
@@ -63,6 +67,16 @@ FULL_ACCEL = f"""
     ldrb  r0, [r0]
     cmp   r0, #0
     beq   done
+    cmp   r0, #0x{MOTION_ONLY:x}
+    bne   send
+    bl    0x{CONNECTED:x}
+    cmp   r0, #0
+    bne   send
+    ldr   r0, =0x{RAW_MODE:x}
+    movs  r1, #0
+    strb  r1, [r0]
+    b     done
+send:
     add   r5, sp, #0x10
     adds  r5, #1
     movs  r6, #0
