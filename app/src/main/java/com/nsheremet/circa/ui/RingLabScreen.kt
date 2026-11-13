@@ -6,8 +6,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -19,12 +23,20 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.nsheremet.circa.ColmiProtocol
 import com.nsheremet.circa.FirmwareFile
+import com.nsheremet.circa.MOTION_LABELS
+import com.nsheremet.circa.motionFile
 import com.nsheremet.circa.Prefs.ringAddress
 import com.nsheremet.circa.RingInfo
 import com.nsheremet.circa.flashFirmware
@@ -36,6 +48,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.time.LocalDateTime
 
 /** Stock RY02 3.00.33 plus the 164-byte motion patches (full-rate stream, motion-only with no gaps), built by emu/patch_fw.py. */
 private const val BUNDLED_PATCH = "RY02_3.00.33_fullaccel.bin"
@@ -49,7 +62,11 @@ internal fun RingLabScreen(onBack: () -> Unit) {
     val scope = (ctx as ComponentActivity).lifecycleScope
     val c = AppTheme.colors
     val address = ctx.ringAddress
-    val motionFile = remember { File(File(ctx.cacheDir, "share"), "circa-motion.csv") }
+    val haptic = LocalHapticFeedback.current
+    var label by remember { mutableStateOf("other") }
+    val shareDir = File(ctx.cacheDir, "share")
+    // Labelled recordings only: the old circa-motion.csv has no dash after "motion".
+    fun recordings() = shareDir.listFiles { f -> f.name.startsWith("circa-motion-") && f.name.endsWith(".csv") }.orEmpty()
 
     var recording by remember { mutableStateOf<Job?>(null) }
     var samples by remember { mutableIntStateOf(0) }
@@ -57,7 +74,7 @@ internal fun RingLabScreen(onBack: () -> Unit) {
     var last by remember { mutableStateOf<ColmiProtocol.MotionSample?>(null) }
     var startedAt by remember { mutableStateOf(0L) }
     var motionNote by remember { mutableStateOf("") }
-    var hasRecording by remember { mutableStateOf(motionFile.exists()) }
+    var hasRecording by remember { mutableStateOf(recordings().isNotEmpty()) }
 
     var file by remember { mutableStateOf<FirmwareFile?>(null) }
     var ringInfo by remember { mutableStateOf<RingInfo?>(null) }
@@ -82,11 +99,13 @@ internal fun RingLabScreen(onBack: () -> Unit) {
     fun toggleRecording() {
         recording?.let { it.cancel(); return }
         samples = 0; stockPackets = 0; last = null; motionNote = "Connecting…"; startedAt = System.currentTimeMillis()
+        // shortcut: recordings live in cacheDir, the OS may clear them; move to filesDir if a week of files is ever lost
+        val out = motionFile(shareDir, label, LocalDateTime.now())
         recording = scope.launch {
             var error: String? = null
             try {
                 error = withContext(Dispatchers.IO) {
-                    recordMotion(ctx, address!!, motionFile) { n, s, stock ->
+                    recordMotion(ctx, address!!, out, label) { n, s, stock ->
                         samples = n; stockPackets = stock
                         if (s != null) last = s
                         motionNote = when {
@@ -98,7 +117,7 @@ internal fun RingLabScreen(onBack: () -> Unit) {
                 }
             } finally { // Stop cancels this coroutine, so nothing after withContext would run
                 recording = null
-                hasRecording = motionFile.exists() && samples > 0
+                hasRecording = recordings().isNotEmpty()
                 motionNote = error ?: "Stopped: $samples samples saved"
             }
         }
@@ -128,8 +147,20 @@ internal fun RingLabScreen(onBack: () -> Unit) {
             Section(
                 "Raw motion",
                 "Records every accelerometer sample (25 a second) to a file you can share. Needs the patched firmware; stock firmware sends one sample a second. " +
-                    "The ring only samples while it thinks it is moving, and streaming drains its battery fast.",
+                    "Firmware before the no-gaps patch only samples while the ring thinks it is moving. Streaming drains the ring's battery fast.",
             ) {
+                Row(Modifier.padding(horizontal = AppSpace.l, vertical = AppSpace.m), horizontalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
+                    MOTION_LABELS.forEach { k ->
+                        val on = k == label
+                        Text(
+                            k, style = AppType.footnote.copy(fontWeight = FontWeight.Medium), textAlign = TextAlign.Center, maxLines = 1,
+                            color = if (on) c.tint else if (recording == null) c.label else c.secondaryLabel,
+                            modifier = Modifier.weight(1f).clip(RoundedCornerShape(50)).background((if (on) c.tint else c.secondaryLabel).copy(alpha = 0.16f))
+                                .clickable(enabled = recording == null, role = Role.RadioButton) { haptic.tick(); label = k }.padding(vertical = 9.dp),
+                        )
+                    }
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
                 ButtonRow(if (recording != null) "Stop recording" else "Start recording", enabled = address != null && !flashing && !checking, onClick = ::toggleRecording)
                 Hairline(Modifier.padding(start = AppSpace.l))
                 ValueRow("Status", motionNote.ifEmpty { if (address == null) "No ring set up" else "Idle" })
@@ -139,11 +170,14 @@ internal fun RingLabScreen(onBack: () -> Unit) {
                 Hairline(Modifier.padding(start = AppSpace.l))
                 ValueRow("Latest (mg)", last?.let { "x ${it.x}   y ${it.y}   z ${it.z}" } ?: "–")
                 Hairline(Modifier.padding(start = AppSpace.l))
-                ButtonRow("Share recording", enabled = hasRecording && recording == null) {
-                    val uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".share", motionFile)
+                ButtonRow("Share recordings", enabled = hasRecording && recording == null) {
+                    val uris = recordings().sortedBy { it.name }.map { FileProvider.getUriForFile(ctx, ctx.packageName + ".share", it) }
+                    if (uris.isEmpty()) return@ButtonRow
                     ctx.startActivity(Intent.createChooser(
-                        Intent(Intent.ACTION_SEND).setType("text/csv").putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            .apply { clipData = ClipData.newRawUri(null, uri) }, // the grant travels with the chooser only through ClipData
+                        Intent(Intent.ACTION_SEND_MULTIPLE).setType("text/csv").putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
+                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            // the grant travels with the chooser only through ClipData
+                            .apply { clipData = ClipData.newRawUri(null, uris[0]).apply { uris.drop(1).forEach { addItem(ClipData.Item(it)) } } },
                         null,
                     ))
                 }

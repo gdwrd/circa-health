@@ -34,6 +34,18 @@ class RingLabTest {
         assertArrayEquals(hex("a1 08 00 00 00 00 00 00 00 00 00 00 00 00 00 a9"), ColmiProtocol.motionOnlyStopRequest())
     }
 
+    @Test fun motionFileNamesNeverOverwrite() {
+        val dir = kotlin.io.path.createTempDirectory().toFile()
+        val t = java.time.LocalDateTime.of(2026, 11, 13, 9, 5)
+        val first = motionFile(dir, "walk", t)
+        assertEquals("circa-motion-walk-20261113-0905.csv", first.name)
+        first.writeText("x")
+        assertEquals("circa-motion-walk-20261113-0905-2.csv", motionFile(dir, "walk", t).also { it.writeText("x") }.name)
+        assertEquals("circa-motion-walk-20261113-0905-3.csv", motionFile(dir, "walk", t).name)
+        assertEquals("circa-motion-run-20261113-0905.csv", motionFile(dir, "run", t).name)
+        dir.deleteRecursively()
+    }
+
     /** A minimal well-formed update file: wrapper, Realtek header with [flags], [payload] bytes of code. */
     private fun image(flags: Int, payload: Int = 64): ByteArray {
         val b = ByteArray(0x50 + 0x400 + payload) { (it * 7).toByte() }

@@ -8,6 +8,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 // Ring lab: full-rate motion recording and the firmware updater.
 // Both were worked out against the emulated firmware in emu/ (ringemu.py); see emu/patch_fw.py for the patch.
@@ -139,13 +141,22 @@ suspend fun flashFirmware(ctx: Context, address: String, fw: FirmwareFile, onPro
     }
 }
 
+/** What the wearer was doing during a recording; written into the file name and its first line. */
+val MOTION_LABELS = listOf("walk", "run", "ride", "desk", "sleep", "other")
+
+/** `circa-motion-<label>-<yyyyMMdd-HHmm>.csv` in [dir], with `-2`, `-3`… when that name is taken, so no recording is overwritten. */
+fun motionFile(dir: File, label: String, time: LocalDateTime): File {
+    val base = "circa-motion-$label-" + time.format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmm"))
+    return generateSequence(1) { it + 1 }.map { File(dir, if (it == 1) "$base.csv" else "$base-$it.csv") }.first { !it.exists() }
+}
+
 /**
  * Turns the ring's motion-only stream on (`A1 07`; on a ring that answers `A1 FF`, the raw stream `A1 04` instead)
- * and writes every `A1 05` motion sample to [out] as CSV until cancelled.
+ * and writes every `A1 05` motion sample to [out] as CSV, after a `# label=` line, until cancelled.
  * [onUpdate] gets the sample count, the latest sample and how many stock 1-a-second packets came in.
  * Returns null on a normal stop, else what went wrong.
  */
-suspend fun recordMotion(ctx: Context, address: String, out: File, onUpdate: (Int, ColmiProtocol.MotionSample?, Int) -> Unit): String? {
+suspend fun recordMotion(ctx: Context, address: String, out: File, label: String, onUpdate: (Int, ColmiProtocol.MotionSample?, Int) -> Unit): String? {
     val conn = ColmiConnection(ctx, address)
     var started = false
     var rawStream = false // true once the ring refused A1 07 and the A1 04 raw stream runs instead
@@ -154,6 +165,7 @@ suspend fun recordMotion(ctx: Context, address: String, out: File, onUpdate: (In
         if (!conn.connect()) return "Could not connect to the ring"
         out.parentFile?.mkdirs()
         out.bufferedWriter().use { w ->
+            w.write("# label=$label\n")
             w.write("n,arrival_ms,x_mg,y_mg,z_mg\n") // n counts samples (25 a second on the ring's clock); arrival is the phone's clock
             conn.writePacket(ColmiProtocol.motionOnlyStartRequest())
             started = true
