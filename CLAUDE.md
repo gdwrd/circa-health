@@ -9,7 +9,8 @@ Ring firmware work lives in `emu/` (emulator `ringemu.py`, patch builder `patch_
 - Ponytail applies: smallest complete change, code first, minimal prose. No abstractions, options or "for later" code.
 - One ledger item per session. After it lands, update `NEXTSTEPS.md` (summary line, next item promoted) so the user can `/clear`.
 - Read only the files the ledger item names plus `## Facts that still hold`. Do not grep the repo to "get context".
-- Never open: `app/build/**`, `.gradle/**`, `*.apk`, `*.jks`, `keystore.properties` (secrets; read by Gradle only), `infra/.env`.
+- Never open: `app/build/**`, `.gradle/**`, `*.apk`, `*.jks`, `keystore.properties` (secrets; read by Gradle only), `infra/.env`,
+  `*.bin` and `emu/sdk-ref/**` (firmware and SDK binaries: inspect with a Python one-off).
   Inspect an APK with `apksigner verify --print-certs`, never by unzipping it.
 - Secrets (`API_TOKEN`, keystore passwords) live in gitignored files only; never print or commit them.
 
