@@ -233,8 +233,8 @@ fun lightFile(dir: File, time: LocalDateTime): File {
 }
 
 /**
- * Turns the light copy on (`A1 0A`), runs live heart rate the way Breathe does (runLiveHr's long mode: `69 01`, again
- * after 30 s without a valid reading, `69 02` at the end) so the ring measures, and writes every `A1 0C` optical sample
+ * Runs live heart rate the way Breathe does (runLiveHr's long mode: `69 01`, again after 30 s without a valid reading,
+ * `69 02` at the end) so the ring measures, turns the light copy on (`A1 0A`) after each `69 01`, and writes every `A1 0C` optical sample
  * to [out] as CSV until cancelled. [onUpdate] gets the sample count. Returns null on a normal stop, else what went wrong.
  */
 suspend fun recordLight(ctx: Context, address: String, out: File, onUpdate: (Int) -> Unit): String? {
@@ -248,10 +248,11 @@ suspend fun recordLight(ctx: Context, address: String, out: File, onUpdate: (Int
         out.bufferedWriter().use { w ->
             // n counts samples received; arrival is the phone's clock; value is the sensor's 3 bytes, little-endian, as sent
             w.write("n,arrival_ms,value\n")
-            conn.writePacket(ColmiProtocol.lightOnRequest())
-            started = true
+            // 69 01 first: a measurement start clears the light copy, so A1 0A sent before it gives no samples
             conn.writePacket(ColmiProtocol.liveHrStartRequest())
             measuring = true
+            conn.writePacket(ColmiProtocol.lightOnRequest())
+            started = true
             var lastLock = System.currentTimeMillis() // last start request or valid reading, as in runLiveHr
             var n = 0
             while (currentCoroutineContext().isActive) {

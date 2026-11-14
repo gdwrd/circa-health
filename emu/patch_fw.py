@@ -45,6 +45,20 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        seen.  A change is recorded only when the verdict differs from the stored state.  The clock value is used, not
        minutes counted since the change, because it is one load at the hook and every read returns the same bytes;
        the phone turns it into a time with no conversion here.  Only observes: the detector stores what it would.
+  FW16a debug window.  a1 10 <addr 4 bytes LE> <len>  reads memory:  a1 10 <len> <len bytes> .. checksum, len 1..12 (16 bytes
+       less a1, 10, len and the checksum).  Only whole ranges inside ROM 0..ROM_END, RAM RAM_LO..RAM_HI or flash
+       FLASH_LO..FLASH_HI are read (byte loads, nothing else is touched); anything else, len 0 or len > 12 answers
+       a1 10 ff.  Crash record in CRASH (above the zero-filled patch RAM, so the startup leaves it alone): BOOT hooks main's
+       last call (os_sched_start) to count boots (BOOT_MAGIC valid: +1, else the block is wiped and the count starts at 1)
+       and to put FAULT_HOOK in the RAM vector table's HardFault slot, keeping the slot's old value to chain to.
+       FAULT_HOOK saves the stacked r0-r3, r12, lr, pc, xpsr (from PSP or MSP as EXC_RETURN says; zeros if that stack
+       pointer is outside RAM), then jumps to the old handler with lr and sp as it found them.  SystemInit stores
+       RESET_SEEN instead of the stock watchdog-reset callback (literal WDG_CB_LITERAL), so every WDG_SystemReset(mode,
+       reason) is recorded too (r0 = mode, r1 = reason, r2-r7 as called) before the stock callback runs.  The first event
+       after a clear wins: a record is written only while none is held.  Record (u32 LE, at REC): magic, kind (1 fault,
+       2 reset), boots then, task (pxCurrentTCB), 8 frame words, sp, lr on entry (EXC_RETURN / return into the ROM),
+       check = XOR of the 14 words before it.  a1 11 answers 6 packets  a1 11 <seq 0..5> <12 bytes>  of CRASH+4..CRASH+76:
+       boots, the stock HardFault handler, reset_reason_get() now, the record.  a1 11 01 wipes the record first.
   Version: the firmware texts the ring reports end in _ca<VERSION, 4 digits> (e.g. _ca0001) instead of _250117, in the
   file's wrapper too.  Builds before ca0001 were tagged _circa<one character: 0-9, then A = 10>.
 
@@ -52,7 +66,7 @@ Usage: python patch_fw.py [stock.bin] [patched.bin]      (needs: pip install key
 """
 import hashlib, struct, sys
 from pathlib import Path
-from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB
+from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_MCLASS
 from keystone import Ks, KS_ARCH_ARM, KS_MODE_THUMB
 
 HERE = Path(__file__).parent
@@ -73,13 +87,14 @@ START_SAMPLING = 0x20BA3F               # flag the motion interrupt sets; the ne
 READ_TICK = 0x82E63C                    # gsensor_read_timer_id callback; the motion interrupt calls it directly
 MOTION_ONLY = 0x10
 TAP_T, TAP_Q, TAP_LO, TAP_HI, TAP_RUN = 20, 15, 3, 8, 4     # 640 mg, 480 mg; 120..320 ms apart at 25 Hz
-VERSION = 2                             # build number, tag ca0002.  Old scheme (tag circa<n>): 1 = v4.1.0 (FW1); 2, 3 = v4.2.0,
+VERSION = 3                             # build number, tag ca0003.  Old scheme (tag circa<n>): 1 = v4.1.0 (FW1); 2, 3 = v4.2.0,
                                         # v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected taps, never fired on the ring); 5 = taps found
                                         # in the samples (v4.2.3, firm taps only); 6 = normal taps (v4.2.4); 7 = motion stream ends when
                                         # the phone leaves (FW11); 8 = numbered samples (FW12); 9 = light samples (FW7a); 10 (circaA) =
                                         # wear state (FW15b); 11 (circaB) = light samples wait for room in the send ring (FW7a).
                                         # New scheme: 1 (ca0001) = what circaB was, only the tag differs; 2 (ca0002) = the light
-                                        # copy ends with the measurement and sends only the drain's own reads (FW7a)
+                                        # copy ends with the measurement and sends only the drain's own reads (FW7a); 3 (ca0003) =
+                                        # debug window: memory read, crash record, boot counter (FW16a)
 LIGHT_READ = 0x830238                   # optical read helper (reg, buf, len) for I2C 0x44; its epilogue below
 LIGHT_HOOK = 0x830268                   # mov r0, r4 ; pop {r1-r7, pc}: r4 = 0 if read, r6 = len, r7 = buf, [sp] = register,
 LIGHT_EPILOGUE = bytes.fromhex("2046febd")   # [sp + 28] = the helper's return address (only the helper reaches here)
@@ -101,6 +116,21 @@ WEAR_HOOK = 0x832004                    # detector: strb r0, [r5, #1] (r0 = 0 no
 WEAR_BACK = 0x832010
 CLOCK = 0x2087B0                        # firmware clock, seconds since 2000-01-01 local; set by 01, +60 in the minute handler
 BSS_LEN = 0x824728                      # startup's .bss length literal (0x55DC), one reference (0x82445E)
+# FW16a.  Readable ranges (docs/FIRMWARE.md "Memory map"): ROM up to just past its last symbol (exit, 0x409B8), the SDK's 88 KB
+# of RAM (update_ram_layout(0x7000, 0x7400, 0) in SystemInit ends the heap there too), the SDK's 512 KB of flash.
+ROM_END = 0x40A00
+RAM_LO, RAM_HI = 0x200000, 0x216000
+FLASH_LO, FLASH_HI = 0x800000, 0x880000
+HARDFAULT_SLOT = 0x20000C               # RAM vector table (VTOR 0x200000, SDK AppUpdateVectorTable), entry 3
+SCHED_CALL = 0x8249AC                   # main(): bl os_sched_start, after all of the app's start-up
+OS_SCHED_START = 0x131C2
+WDG_CB_LITERAL = 0x8247B8               # SystemInit (0x82468A, its only load) stores this into app_cb_wdg_reset (0x201514)
+STOCK_WDG_CB = 0x8244FE                 # wdg_system_reset_app_cb: tail-calls user_wdg_cb if set
+CURRENT_TCB = 0x201340                  # pxCurrentTCB (ROM symbol table)
+RESET_REASON_GET = 0x12B70              # ROM; the stock print_reset_reason calls it at 0x824592
+CRASH = WEAR + 8                        # 76 bytes: boot magic, boots, stock HardFault handler, reset reason, record
+REC = CRASH + 16                        # 15 words, see FW16a
+BOOT_MAGIC, REC_MAGIC = 0x544F4F42, 0x48535243     # "BOOT", "CRSH"
 
 # Entered instead of the epilogue: sp is still the batch-read frame, r4 = bytes in this batch,
 # the samples sit at sp+0x11.  r5-r7 are free because the epilogue restores them.
@@ -206,9 +236,16 @@ MOTION_CMD = f"""
     beq   light
     cmp   r0, #0xf
     beq   wear
+    cmp   r0, #0x10
+    beq   debug
+    cmp   r0, #0x11
+    beq   debug
     strb  r5, [r6]
     movs  r0, #0xa1
     bx    lr
+debug:
+    ldr   r3, =DEBUG_CMD
+    bx    r3
 wear:
     ldr   r1, =0x{WEAR:x}
     mov   r3, sp
@@ -374,6 +411,231 @@ back:
 """
 
 
+# FW16a, from MOTION_CMD: r0 = sub-type 10 or 11, r7 = the request, sp = the zeroed reply buffer.  r4-r7 are restored by
+# the handler's pop; the handler's tail at REPLY checksums and queues the buffer at sp.
+DEBUG_CMD = f"""
+    mov   r4, sp
+    cmp   r0, #0x11
+    beq   crash
+    ldrb  r1, [r7, #2]
+    ldrb  r2, [r7, #3]
+    lsls  r2, r2, #8
+    orrs  r1, r2
+    ldrb  r2, [r7, #4]
+    lsls  r2, r2, #16
+    orrs  r1, r2
+    ldrb  r2, [r7, #5]
+    lsls  r2, r2, #24
+    orrs  r1, r2
+    ldrb  r2, [r7, #6]
+    subs  r3, r2, #1
+    cmp   r3, #11
+    bhi   refuse
+    adds  r3, r1, r2
+    bcs   refuse
+    ldr   r0, =0x{ROM_END:x}
+    cmp   r3, r0
+    bls   read
+    ldr   r0, =0x{RAM_LO:x}
+    cmp   r1, r0
+    blo   refuse
+    ldr   r0, =0x{RAM_HI:x}
+    cmp   r3, r0
+    bls   read
+    ldr   r0, =0x{FLASH_LO:x}
+    cmp   r1, r0
+    blo   refuse
+    ldr   r0, =0x{FLASH_HI:x}
+    cmp   r3, r0
+    bhi   refuse
+read:
+    strb  r2, [r4, #2]
+    adds  r4, #3
+copy:
+    subs  r2, #1
+    ldrb  r3, [r1, r2]
+    strb  r3, [r4, r2]
+    cmp   r2, #0
+    bne   copy
+    b     peeked
+refuse:
+    movs  r0, #0xff
+    strb  r0, [r4, #2]
+peeked:
+    mov   r1, sp
+    movs  r0, #0xa1
+    strb  r0, [r1, #0]
+    movs  r0, #0x10
+    strb  r0, [r1, #1]
+    b     reply
+crash:
+    ldrb  r1, [r7, #2]
+    cmp   r1, #1
+    bne   report
+    ldr   r1, =0x{REC:x}
+    movs  r2, #56
+    movs  r3, #0
+wipe:
+    str   r3, [r1, r2]
+    subs  r2, #4
+    bpl   wipe
+report:
+    bl    0x{RESET_REASON_GET:x}
+    ldr   r5, =0x{CRASH:x}
+    str   r0, [r5, #12]
+    adds  r5, #4
+    movs  r6, #0
+packet:
+    mov   r1, sp
+    movs  r0, #0xa1
+    strb  r0, [r1, #0]
+    movs  r0, #0x11
+    strb  r0, [r1, #1]
+    strb  r6, [r1, #2]
+    adds  r0, r1, #3
+    mov   r1, r5
+    movs  r2, #12
+    bl    0x{MEMCPY:x}
+    adds  r5, #12
+    cmp   r6, #5
+    beq   reply
+    mov   r0, sp
+    movs  r1, #15
+    bl    0x{CHECKSUM:x}
+    mov   r1, sp
+    strb  r0, [r1, #15]
+    mov   r0, sp
+    bl    0x{QUEUE_PACKET:x}
+    adds  r6, #1
+    b     packet
+reply:
+    ldr   r3, =0x{REPLY | 1:x}
+    bx    r3
+"""
+
+# FW16a record writer: r0 = kind, r1 = 8 frame words (0: store zeros), r2 = lr on entry, r3 = sp.  Writes only while REC
+# holds no record; the magic goes in before the check, so a record cut short by the reset fails its check.
+SAVE = f"""
+    push  {{r4, r5, r6, lr}}
+    ldr   r4, =0x{REC:x}
+    ldr   r5, [r4]
+    ldr   r6, =0x{REC_MAGIC:x}
+    cmp   r5, r6
+    beq   out
+    str   r0, [r4, #4]
+    str   r3, [r4, #48]
+    str   r2, [r4, #52]
+    ldr   r0, =0x{CURRENT_TCB:x}
+    ldr   r0, [r0]
+    str   r0, [r4, #12]
+    ldr   r0, =0x{CRASH:x}
+    ldr   r0, [r0, #4]
+    str   r0, [r4, #8]
+    movs  r3, #28
+copy:
+    movs  r0, #0
+    cmp   r1, #0
+    beq   put
+    ldr   r0, [r1, r3]
+put:
+    adds  r5, r4, r3
+    str   r0, [r5, #16]
+    subs  r3, #4
+    bpl   copy
+    str   r6, [r4]
+    movs  r0, #0
+    movs  r3, #52
+sum:
+    ldr   r5, [r4, r3]
+    eors  r0, r5
+    subs  r3, #4
+    bpl   sum
+    str   r0, [r4, #56]
+out:
+    pop   {{r4, r5, r6, pc}}
+"""
+
+# FW16a HardFault entry (handler mode, on MSP): r0-r3 and r12 are already stacked, r4-r11, lr and sp are left as found
+# for the stock handler.  The two .short lines are  mrs r1, psp  (keystone has no M-profile special registers).
+FAULT_HOOK = f"""
+    mov   r2, lr
+    mov   r1, sp
+    movs  r0, #4
+    tst   r2, r0
+    beq   main_stack
+    .short 0xf3ef, 0x8109
+main_stack:
+    mov   r3, r1
+    ldr   r0, =0x{RAM_LO:x}
+    cmp   r1, r0
+    blo   lost
+    ldr   r0, =0x{RAM_HI - 32:x}
+    cmp   r1, r0
+    bls   kept
+lost:
+    movs  r1, #0
+kept:
+    push  {{r2}}
+    movs  r0, #1
+    bl    SAVE
+    pop   {{r0}}
+    mov   lr, r0
+    ldr   r0, =0x{CRASH:x}
+    ldr   r0, [r0, #8]
+    bx    r0
+"""
+
+# FW16a watchdog-reset callback (r0 = mode, r1 = reason), called by the ROM's WDG_SystemReset before the chip resets.
+RESET_SEEN = f"""
+    push  {{r0, r1, r2, r3, r4, r5, r6, r7, lr}}
+    mov   r2, lr
+    mov   r1, sp
+    add   r3, sp, #36
+    movs  r0, #2
+    bl    SAVE
+    pop   {{r0, r1, r2, r3, r4, r5, r6, r7}}
+    pop   {{r2}}
+    mov   lr, r2
+    ldr   r2, =0x{STOCK_WDG_CB | 1:x}
+    bx    r2
+"""
+
+# FW16a, replaces main's bl os_sched_start (lr = main's return): boot counter, HardFault slot, then the stock call.  A slot
+# that already holds FAULT_HOOK (RAM kept and not re-filled by the ROM) keeps the saved handler, so the hook never chains
+# to itself.
+BOOT = f"""
+    ldr   r0, =0x{CRASH:x}
+    ldr   r1, [r0]
+    ldr   r2, =0x{BOOT_MAGIC:x}
+    cmp   r1, r2
+    beq   known
+    str   r2, [r0]
+    movs  r1, #0
+    str   r1, [r0, #4]
+    mov   r3, r0
+    adds  r3, #16
+    movs  r2, #56
+wipe:
+    str   r1, [r3, r2]
+    subs  r2, #4
+    bpl   wipe
+known:
+    ldr   r1, [r0, #4]
+    adds  r1, #1
+    str   r1, [r0, #4]
+    ldr   r1, =0x{HARDFAULT_SLOT:x}
+    ldr   r2, [r1]
+    ldr   r3, =FAULT_HOOK
+    cmp   r2, r3
+    beq   start
+    str   r2, [r0, #8]
+    str   r3, [r1]
+start:
+    ldr   r3, =0x{OS_SCHED_START | 1:x}
+    bx    r3
+"""
+
+
 # r0 = samples (xl xh yl yh zl zh each), r1 = bytes.  See FW6 in the docstring; state bytes at TAP_STATE.
 TAP_SCAN = f"""
     push  {{r4, r5, r6, r7, lr}}
@@ -490,11 +752,13 @@ SEND_TAP = f"""
 
 def asm(src: str, addr: int) -> bytes:
     code = bytes(Ks(KS_ARCH_ARM, KS_MODE_THUMB).asm(src, addr)[0])
-    # The chip is a Cortex-M0+: bl is its only 32-bit instruction we may emit.  A far "b" assembles to b.w, which
+    # The chip is a Cortex-M0+: bl and mrs are the only 32-bit instructions we may emit.  A far "b" assembles to b.w, which
     # faults on the ring (versions 2 and 3 did).  Checks the instructions only, not the literal pool after them.
     count = sum(1 for line in src.splitlines() if line.strip() and not line.strip().endswith(":"))
-    for ins in list(Cs(CS_ARCH_ARM, CS_MODE_THUMB).disasm(code, addr))[:count]:
-        assert ins.size == 2 or ins.mnemonic == "bl", f"not a Cortex-M0+ instruction: {ins.mnemonic} {ins.op_str}"
+    ins = list(Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_MCLASS).disasm(code, addr))[:count]
+    assert len(ins) == count, "code did not disassemble"
+    for i in ins:
+        assert i.size == 2 or i.mnemonic in ("bl", "mrs"), f"not a Cortex-M0+ instruction: {i.mnemonic} {i.op_str}"
     return code
 
 
@@ -521,11 +785,17 @@ def patch(stock: bytes) -> bytes:
     img[:] = img.replace(STOCK_TEXT, text)
     scan = append(TAP_SCAN.replace("SEND_TAP", hex(append(SEND_TAP))))                        # FW6
     redirect(HOOK, EPILOGUE, FULL_ACCEL.replace("TAP_SCAN", hex(scan)))                       # FW1
-    redirect(UNKNOWN_SUB, UNKNOWN_CODE, MOTION_CMD)                                           # FW4
+    redirect(UNKNOWN_SUB, UNKNOWN_CODE, MOTION_CMD.replace("DEBUG_CMD", hex(append(DEBUG_CMD) | 1)))   # FW4, FW16a
     redirect(STILL_CALL, asm(f"bl 0x{STILL_CHECK:x}", STILL_CALL), STILL_VETO)                # FW4
     redirect(LIGHT_HOOK, LIGHT_EPILOGUE, LIGHT_COPY)                                          # FW7a
     redirect(STOP_HOOK, STOP_CODE, LIGHT_STOP)                                                # FW7a
     redirect(WEAR_HOOK, asm(f"strb r0, [r5, #1]\nb 0x{WEAR_BACK:x}", WEAR_HOOK), WEAR_SEEN)   # FW15b
+    save = hex(append(SAVE))                                                                  # FW16a
+    fault = append(FAULT_HOOK.replace("SAVE", save))
+    redirect(SCHED_CALL, asm(f"bl 0x{OS_SCHED_START:x}", SCHED_CALL), BOOT.replace("FAULT_HOOK", hex(fault | 1)))
+    assert img[off(WDG_CB_LITERAL):off(WDG_CB_LITERAL) + 4] == struct.pack("<I", STOCK_WDG_CB | 1)
+    struct.pack_into("<I", img, off(WDG_CB_LITERAL), append(RESET_SEEN.replace("SAVE", save)) | 1)
+    assert CRASH >= WEAR + 8 and REC + 60 <= 0x20EC00      # outside the zero-fill below, below the heap
     assert img[off(BSS_LEN):off(BSS_LEN) + 4] == struct.pack("<I", 0x55DC)
     # FW6, FW12, FW7a, FW15b: the startup zero-fill runs on over TAP_STATE, SEQ, LIGHT and WEAR; the overlay is copied in over its part afterwards
     struct.pack_into("<I", img, off(BSS_LEN), WEAR + 8 - 0x208654)

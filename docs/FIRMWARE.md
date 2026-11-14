@@ -203,6 +203,76 @@ but blank only in the emulator, and the ROM's own flash use (boot patch, `ftl_sa
 | `A1 07` / `A1 08` | FW4 | echo of the motion-only stream start / stop commands |
 | `A1 09 <count>` | FW6 | a double tap, sent by the batch read that holds it (up to 0.8 s later); count 1, 2… since boot, wraps at 255. A phone sending `A1 09` still gets `A1 FF`. |
 | `A1 0A` / `A1 0B`, `A1 0C nn <samples>` | FW7a | light copy on / off (echoed); while on, each read of the optical queue by the 320 ms drain (3 bytes a sample, up to 4). From ca0002 the copy turns itself off when the stock firmware stops the drain timer (every measurement end, e.g. live HR 30.5 s after `69 01`), so the phone sends `A1 0A` again with each `69 01`. On ca0001 a stock stop with the copy still on and the link up killed the real ring about 8 s later (cause not found). |
+| `A1 0F <state> <t 4>` | FW15b | wear state and the clock at its last change |
+| `A1 10 <len> <bytes>`, `A1 10 FF` | FW16a | answer to `A1 10 <addr 4 LE> <len>`: `len` (1..12) bytes from memory. `FF` = refused: the range is not wholly inside one of the readable ranges below, or len is 0 or above 12. Read only, byte loads. |
+| `A1 11 <seq> <12 bytes>` × 6 | FW16a | answer to `A1 11` (and `A1 11 01`, which wipes the record first): seq 0..5 carry the 72 bytes of the crash block from `+4` (table below). Decode with `emu/ringprobe.py crash`. |
+
+Patch sub-types in use: 05, 07..0C, 0F, 10, 11; 0D / 0E are kept for FW8c; free from 12.
+
+## Memory map, faults and resets (FW16a)
+
+Found by reading the stock image and `emu/sdk-ref` (Python one-offs), not on the ring. "Sure" = the image itself depends on it.
+
+| Range | What | `A1 10` | How sure |
+|---|---|---|---|
+| `0x000000`..`0x040A00` | ROM: code the app calls by address (`memcpy` `0x3F848`, `os_sched_start` `0x131C2`; the startup calls `exit` at `0x409B8`, the last ROM symbol). Its vector table is at 0. | read | Sure up to the last symbol. The ROM's real end is not known: past `0x040A00` is refused until a dump shows where it ends. |
+| `0x200000`..`0x207400` | ROM-reserved RAM (SDK: 29 KB): RAM vector table at `0x200000` (VTOR), ROM data (`pxCurrentTCB` `0x201340`, `app_cb_wdg_reset` `0x201514`), the main stack (initial MSP `0x203800`, from the app's vector table) | read | Sure (SDK `mem_config.h`, the app's own table and writes) |
+| `0x207400`..`0x207C00` | upper-stack RAM (SDK: 2 KB) | read | SDK |
+| `0x207C00`..`0x20EC00` | app RAM, 28 KB (`update_ram_layout(0x7000, 0x7400, 0)` in SystemInit `0x824696`): `.data` from `0x207C00`, `.bss` `0x208654`..`0x20DC30`, RAM-code overlay to `0x20DCF8`, patch RAM, crash block | read | Sure |
+| `0x20EC00`..`0x216000` | heap, 29 KB (task stacks live here) | read | Sure (same call; 88 KB of RAM in all per the SDK) |
+| `0x800000`..`0x880000` | flash, 512 KB, read through the cache (XIP) | read | Likely: the SDK's `FLASH_SIZE`, and the firmware's own history writes reach `0x87D000`. A larger chip would only be refused. |
+| `0x40000000`.. | peripherals | refused | Many registers change state when read (FIFOs, read-to-clear flags). |
+| `0xE000E000`.. | Cortex-M0+ system control space | refused | Readable in principle (word access only); left out to keep the reader to byte loads. |
+
+Patch RAM: `0x20DCF8`..`0x20DD10` (TAP_STATE, SEQ, LIGHT, WEAR) is zeroed at every start by the extended `.bss` fill
+(length literal `0x824728`). The crash block `0x20DD10`..`0x20DD5C` is above it and nothing in the image writes there
+except FW16a:
+
+| Offset | Bytes | Content |
+|---|---|---|
+| `+0` | 4 | boot magic `0x544F4F42` ("BOOT"); wrong = the block is wiped and the counter starts again |
+| `+4` | 4 | boot counter: +1 at each start (main's call to `os_sched_start`, `0x8249AC`) |
+| `+8` | 4 | the HardFault slot's value before the hook took it (the stock handler the hook chains to) |
+| `+12` | 4 | `reset_reason_get()` (ROM `0x12B70`), read when `A1 11` is answered |
+| `+16` | 60 | record, 15 words: magic `0x48535243` ("CRSH", 0 = none), kind (1 HardFault, 2 `WDG_SystemReset`), boot counter at the time, `pxCurrentTCB`, 8 frame words, sp, lr on entry, check = XOR of the 14 words before it |
+
+Frame words: kind 1 = the stacked r0, r1, r2, r3, r12, lr, pc, xpsr (zeros if the stack pointer was outside RAM), sp =
+the frame's address, lr on entry = EXC_RETURN (`0xFFFFFFFD`: a task on PSP). Kind 2 = r0 mode, r1 reason, then r2..r7 as
+called, sp = sp at the call, lr on entry = the return address into the ROM's `WDG_SystemReset`. The first event after a
+clear (or after a cold start) is kept; later ones are not written until `A1 11 01`.
+
+How faults and resets work on this image:
+
+- **Vector table** in RAM at `0x200000`. `pre_main`'s `AppUpdateVectorTable` (SDK; a RAM overlay here) copies the
+  app's table from flash `0x83EC80` (initial SP `0x203800`, reset `0x824401`, slot 16 `0x82B7C5`). The app's NMI and
+  HardFault entries are its `Default_Handler` `0x833358`, which logs "Error! Please implement your ISR Handler" and
+  loops forever (`b .`); the SDK copies it only where the ROM left `ROM_Default_Handler` (`0x47E7`). So slot 3 holds
+  either the ROM's HardFault handler or that endless loop: not known which. `A1 11` reports it (`+8`).
+- **Cause registers:** ARMv6-M has no fault status registers (no CFSR, HFSR, MMFAR, BFAR), so a HardFault's cause is only
+  what pc, lr and xpsr say. The ROM has its own fault code (`hardfault_dump` `0x7DF1`, hook pointer
+  `patch_HardFaultRecord_TryToSave` `0x20182C`, an SDK option to write a fault record to flash); whether it is on here is
+  not known.
+- **Software reset:** `WDG_SystemReset(mode, reason)` (ROM `0x29D`; the app calls it at `0x824B78`, `0x824B9E`, `0x828D48`,
+  `0x829E2A`, `0x82AB98`). Per the SDK the ROM first calls `app_cb_wdg_reset` (`0x201514`), which SystemInit sets to the
+  app's `0x8244FE` (literal `0x8247B8`, loaded only at `0x82468A`); FW16a points that literal at its own callback.
+  Reasons seen in the emulator: `0xD0` (first-boot config rewrite), `0xD3` (`08`, end of an update), mode 1.
+- **Watchdog:** `print_reset_reason` (`0x82450A`, in `pre_main`) reads the watchdog's latched pc/lr/psr from AON words
+  `0x1C0`..`0x1D6` (through `btaon_fast_read_safe`; not memory-mapped, so `A1 10` cannot read them), calls
+  `reset_reason_get` when the latched lr is 0, then fires the watchdog once itself (`WDG_Config` / `Enable` / `Disable`)
+  and restores `WDG_CTL` (`0x40006000`). That self-test overwrites the latched values, so after the start they say
+  nothing about the last reset. A watchdog timeout (a hang) leaves no record here.
+- **What survives a reset:** the startup (MSP `0x203800`, `.data` copy, `.bss` fill to `0x20DD10`, overlays below
+  `0x20DCF8`) does not touch the crash block. Whether the ROM clears RAM at a reset, or a reset drops RAM power, is not
+  known (no ROM dump); the emulator assumes the app's RAM keeps its bytes. On the ring the boot counter answers it: if it
+  goes up after `08`, the block survives a software reset.
+
+Hook safety (why ca0003 cannot stop the ring from starting): the boot hook runs after all of the app's start-up, uses
+r0-r3 only, no stack, and tail-jumps to `os_sched_start` with main's lr; it writes only the crash block and slot 3. The
+startup and the vector table in flash are unchanged; the reset callback is one literal the stock SystemInit stores. The
+fault hook keeps lr, sp and r4-r11 for the stock handler (r0-r3 are already stacked), and never chains to itself (the
+boot hook skips a slot that already holds it). Residual risks: the hook code is in flash, so a fault while the flash is
+unreadable (during an erase or write) would lock the core up instead of reaching a ROM handler; and the chained handler
+sees live r0-r3 changed (stacked copies intact).
 
 FW6 leaves the accelerometer's registers as stock (versions 2 to 4 changed its click settings; on the ring the chip never reported a double click). Double taps are found in the samples at the end of each batch read: per sample, jolt = |dx| + |dy| + |dz| against the sample before, high bytes only (32 mg a step). A tap is a jolt of 640 mg or more after a sample below 480 mg; a second tap 3 to 8 samples (120 to 320 ms) after the first is a double tap. More than 4 samples in a row at 480 mg or more is movement and cancels. The numbers come from `emu/testdata/taps.csv`, a real recording: 22 double taps in it (2 of its 3 gentle ones, the firm ones, the rhythmic tapping), none while shaking, one while moving. Version 5 used 1280 mg and 640 mg and needed hard taps. Only while the ring samples: the tap that wakes a resting ring is not in the samples.
 

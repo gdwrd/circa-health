@@ -31,6 +31,8 @@ APP_GLOBALS = 0x207C00                      # below this, RAM belongs to the ROM
 HEAP, HEAP_END = 0x220000, 0x240000         # our own heap, outside the chip's real 88K of RAM
 EXIT = 0xFFFF0                              # fake return address: "this call chain is done"
 DELAY_US, DELAY_MS = 0xFFF00, 0xFFF10       # fake ROM addresses for RAM function pointers
+ROM_HARDFAULT = 0xFFF20                     # fake ROM HardFault handler, in RAM vector slot 3 (0x20000C) from boot
+RAM_END = 0x216000                          # the chip's 88 KB of RAM end here (SDK mem_config.h)
 UNTIL, SLICE = 0xFFFFFFF0, 2_000_000
 FOREVER = 0xFFFFFFFF
 BLOCK = object()
@@ -71,7 +73,7 @@ class Emu:
         self.syms = {}
         for n, v in re.findall(r"(\w+)\s*=\s*(0x[0-9a-fA-F]+)", (SDK / "rom_symbol_gcc.axf").read_text()):
             self.syms.setdefault(int(v, 16) & ~1, n)
-        self.syms.update({DELAY_US: "platform_delay_us", DELAY_MS: "platform_delay_ms"})
+        self.syms.update({DELAY_US: "platform_delay_us", DELAY_MS: "platform_delay_ms", ROM_HARDFAULT: "HardFault_Handler"})
         self.ram_syms = sorted(a for a in self.syms if 0x200000 <= a < 0x300000)
         bases = {}
         for n, v in re.findall(r"#define\s+(\w+?)(?:_REG)?_BASE\s+0x(4\w{7})UL", (SDK / "rtl876x.h").read_text()):
@@ -126,13 +128,15 @@ class Emu:
         self.w32(self.sym("platform_delay_us"), DELAY_US | 1)
         self.w32(self.sym("platform_delay_ms"), DELAY_MS | 1)
         self.preset(0x2002DC, bytes([1]))   # OTP->stack_en bit; SystemInit returns at once without it
+        self.preset(0x20000C, struct.pack("<I", ROM_HARDFAULT | 1))    # the ROM's vector table copy: its HardFault handler
 
     def reset(self):
-        """Chip reset: RAM, peripherals and tasks are lost; flash, saved settings and the sensors' state stay."""
+        """Chip reset: the ROM's RAM, peripherals and tasks are lost; flash, saved settings and the sensors' state stay.
+        Assumption, not known for the chip: the app's RAM (APP_GLOBALS..RAM_END) keeps its bytes through a reset."""
         self.resets += 1
         self.ev(f"CHIP RESET #{self.resets}", "reset")
         self.rom_boot_copy()
-        for base, size in ((0x200000, 0x40000), (0x40000000, 0x100000), (0xE0000000, 0x100000)):
+        for base, size in ((0x200000, APP_GLOBALS - 0x200000), (RAM_END, 0x240000 - RAM_END), (0x40000000, 0x100000), (0xE0000000, 0x100000)):
             self.uc.mem_write(base, bytes(size))
         self.tasks, self.cur = [], None
         self.heap, self.free, self.sizes = HEAP, collections.defaultdict(list), {}
@@ -426,7 +430,9 @@ class Emu:
                 self.uc.emu_start(self.r(UC_ARM_REG_PC) | 1, UNTIL, count=SLICE)
             except UcError as e:
                 self.ev(f"CRASH {e}: pc={self.r(UC_ARM_REG_PC):#x} lr={self.r(UC_ARM_REG_LR):#x} sp={self.r(UC_ARM_REG_SP):#x}")
-                return
+                if not self.cur or self.cur.name == "HardFault": return     # a fault in the fault handler: lockup
+                self.hardfault()
+                continue
             if not self.romcall:
                 spins += 1
                 if spins == 3:
@@ -435,6 +441,23 @@ class Emu:
                 continue
             spins = 0
             self.dispatch(self.r(UC_ARM_REG_PC))
+
+    def hardfault(self):
+        """Exception entry as on a Cortex-M0+ for a task (thread mode, PSP): r0-r3, r12, lr, pc, xpsr stacked below the
+        task's sp, the handler from RAM vector slot 3 runs on its own stack with lr = EXC_RETURN 0xFFFFFFFD."""
+        frame = self.r(UC_ARM_REG_SP) - 32
+        regs = [self.r(r) for r in REGS[:4]] + [self.r(UC_ARM_REG_R12), self.r(UC_ARM_REG_LR), self.r(UC_ARM_REG_PC), 1 << 24]
+        self.uc.mem_write(frame, struct.pack("<8I", *regs))
+        self.uc.reg_write(UC_ARM_REG_PSP, frame)
+        self.tasks.remove(self.cur)
+        self.cur = None
+        self.spawn("HardFault", self.r32(0x20000C), stack=0x400)
+        self.tasks[-1].ctx[UC_ARM_REG_LR] = 0xFFFFFFFD
+
+    def rom_HardFault_Handler(self):
+        """Model: the stock fault handling ends in a chip reset (the real ring restarts); the ROM's handler is not available."""
+        self.reset()
+        return BLOCK
 
     def dispatch(self, pc):
         lr = self.r(UC_ARM_REG_LR)
@@ -699,8 +722,13 @@ class Emu:
         self.uc.mem_write(self.arg(0) + 2, struct.pack("<H", flags & ~0x80))     # clear "not ready"
 
     def rom_WDG_SystemReset(self):
-        self.reset()
-        return BLOCK
+        """As the SDK documents it (system_rtl876x.c): the app's callback in app_cb_wdg_reset gets (mode, reason) first."""
+        cb = self.r32(self.sym("app_cb_wdg_reset"))
+        if not cb:
+            self.reset()
+            return BLOCK
+        self.spawn("wdg_cb", cb, (self.arg(0), self.arg(1)), on_exit=self.reset)
+        return self.block(FOREVER)
 
     def rom_ftl_save(self):
         off, n = self.arg(1), self.arg(2)

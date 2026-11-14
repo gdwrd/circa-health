@@ -254,6 +254,62 @@ def test_light_mode_off_keeps_stock_behaviour():
     assert readings and all(abs(r - 60) <= 2 for r in readings), readings
 
 
+def test_memory_read_answers_rom_ram_and_flash_and_refuses_the_rest():
+    import patch_fw
+    img = patch_fw.patch(ringemu.IMAGE.read_bytes())
+    asks = [(0x824400, 12), (0x200040, 4), (0x20000C, 4), (0x0, 4),          # flash, RAM (vector slots 16 and 3), ROM
+            (0x880000, 1), (0x215FFC, 8), (0x40000000, 4), (0xE000ED00, 4), (0xFFFFFFFC, 8), (0x824400, 0), (0x824400, 13)]
+    e = ringemu.Emu(quiet_mem=True, trace=True)
+    e.ota_start(3000, img)
+    for i, (a, n) in enumerate(asks): e.command(12000 + 200 * i, bytes([0xA1, 0x10]) + struct.pack("<IB", a, n))
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(16000)
+    assert e.resets == 2 and e.ota["state"] == 5 and not any(ev["text"].startswith("CRASH") for ev in e.trace)
+    got = [n for n in e.notified if n[:2] == bytes([0xA1, 0x10])]
+    assert len(got) == len(asks) and all(sum(n[:15]) & 0xFF == n[15] for n in got)
+    assert got[0][2:15] == bytes([12]) + img[0x450:0x45C]                     # the image's bytes
+    assert got[1][2:7] == bytes([4]) + struct.pack("<I", 0x82B7C5)          # RAM: the app's handler in slot 16
+    hook = struct.unpack("<I", got[2][3:7])[0]                               # slot 3 holds the fault hook (appended code)
+    assert got[2][2] == 4 and hook == e.r32(0x20000C) and len(ringemu.IMAGE.read_bytes()) < hook - 0x824000 + 0x50 < len(img)
+    assert got[3][2:7] == bytes([4]) + bytes.fromhex("70477047")           # the emulator's ROM filler
+    assert all(n[2] == 0xFF and not any(n[3:15]) for n in got[4:])          # refused: past flash and RAM, peripherals, wrap, len 0 and 13
+
+
+def test_crash_record_survives_the_restart():
+    import patch_fw, ringprobe
+    e = ringemu.Emu(quiet_mem=True, trace=True)
+    e.ota_start(3000, patch_fw.patch(ringemu.IMAGE.read_bytes()))
+    def crash():                                        # a task jumps to where nothing is; its stack in the chip's RAM
+        e.uc.mem_write(patch_fw.CURRENT_TCB, struct.pack("<I", 0x20F000))
+        e.spawn("crash", 0x10000000, (0x11, 0x22, 0x33, 0x44))
+        e.tasks[-1].ctx[ringemu.UC_ARM_REG_SP] = 0x215F00
+    e.command(12000, bytes([0xA1, 0x11]))
+    e.hw["crash"] = {"at": 13000, "interval": None, "fire": crash}
+    e.command(20000, bytes([0xA1, 0x11]))
+    e.command(21000, bytes([0xA1, 0x11, 0x01]))
+    e.command(22000, bytes([0x08]))                     # stock: restarts the ring through WDG_SystemReset
+    e.command(30000, bytes([0xA1, 0x11]))
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(32000)
+    assert e.resets == 4 and e.ota["state"] == 5        # update, the fault, 08
+    got = [n for n in e.notified if n[:2] == bytes([0xA1, 0x11])]
+    assert [n[2] for n in got] == list(range(6)) * 4 and all(sum(n[:15]) & 0xFF == n[15] for n in got)
+    reads = [b"".join(n[3:15] for n in got[i:i + 6]) for i in range(0, 24, 6)]
+    first, fault, cleared, reset = [struct.unpack("<18I", d) for d in reads]
+    assert first[0] == 1 and first[1] == ringemu.ROM_HARDFAULT | 1 and first[3] == 0     # boot 1, chains to the stock handler, no record
+    w = fault[3:]
+    assert fault[0] == 2 and w[:4] == (patch_fw.REC_MAGIC, 1, 1, 0x20F000)                # boot 2; a HardFault in boot 1
+    assert w[4:8] == (0x11, 0x22, 0x33, 0x44) and w[10:12] == (0x10000000, 1 << 24) and w[12:14] == (0x215F00 - 32, 0xFFFFFFFD)
+    assert "check ok" in ringprobe.decode(reads[1])
+    assert cleared[0] == 2 and not any(cleared[3:]) and "no record" in ringprobe.decode(reads[2])
+    wdg = next(ev["text"] for ev in e.trace if ev["text"].startswith("WDG_SystemReset(") and ev["t"] >= 22000)
+    w = reset[3:]
+    assert reset[0] == 3 and w[:3] == (patch_fw.REC_MAGIC, 2, 2)                          # a reset in boot 2
+    assert [w[4], w[5]] == [int(x, 16) for x in wdg[16:-1].split(", ")[:2]] and "check ok" in ringprobe.decode(reads[3])
+
+
 def on_and_off(image, reads, off_ms=605000, on_ms=750000):
     """Image installed over Bluetooth, clock set to 06:00 at 12 s, HR log every 5 min, minute ticks, a1 0f at reads;
     a calibrated ring (four offsets of 100) on the finger, taken off at off_ms, back on at on_ms.  The optical chip's
