@@ -322,6 +322,44 @@ def test_light_mode_off_keeps_stock_behaviour():
     assert readings and all(abs(r - 60) <= 2 for r in readings), readings
 
 
+@needs_rom
+@pytest.mark.parametrize("patched, site, fault", [(False, 0x83A400, (0x83A482, 0x0, 0xF20)),          # ring: pc 0x83A482
+                                                  (False, 0x83A090, (0x83A26E, 0x20C194, 0x1080)),     # ring: r5 0x1080
+                                                  (True, 0x83A400, None), (True, 0x83A090, None)])
+def test_measurement_stop_inside_the_ppg_batch(tmp_path, patched, site, fault):
+    # FW17.  The live-HR stop (hub, priority 2) preempts qc_app (priority 1) half way through the PPG batch and sets the
+    # work-area pointer 0x20850C to 0; the algorithm reloads it and stores into ROM: HardFault (r4 = the pointer).  Here
+    # qc_app is held inside the last batch before the stop until the stop is due.  Stock faults; the patch runs the
+    # batch with the scheduler suspended, so the stop comes right after it: no fault, the measurement still ends.
+    import patch_fw, sweep
+    ringemu.PULSE_BPM = 60
+    img = tmp_path / "fw.bin"
+    img.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()) if patched else ringemu.IMAGE.read_bytes())
+    e = ringemu.Emu(quiet_mem=True, trace=True, image=img, kernel="real")
+    stop = 3000 + 30490                                     # 69 01 + 30.5 s: the live-HR stop (seen at 33,493 ms)
+    held = sweep.hold_batch(e, lambda now: (site, stop + 20 - now) if stop - 330 <= now < stop else None)
+    got, clears, enter = [], [], e.exc_enter
+    def exc_enter(n):
+        if n == 3: got.append(tuple(e.r(r) for r in (ringemu.UC_ARM_REG_PC, ringemu.UC_ARM_REG_R4, ringemu.UC_ARM_REG_R5)))
+        return enter(n)
+    e.exc_enter = exc_enter
+    e.uc.hook_add(ringemu.UC_HOOK_MEM_WRITE, lambda uc, acc, a, size, v, _: clears.append((e.now, v)),
+                  begin=patch_fw.WORK_PTR, end=patch_fw.WORK_PTR)
+    e.command(3000, bytes([0x69, 0x01]))
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(40000)
+    assert len(held) == 1 and held[0][1] >= stop                             # one batch, held across the stop instant
+    if fault:
+        assert got[:1] == [fault], [tuple(map(hex, g)) for g in got]
+        assert e.resets == 2                                                 # the ROM handler spins, the watchdog resets
+    else:
+        assert not got and e.resets == 1, [ev["text"] for ev in e.trace if ev["kind"] in ("fault", "reset")]
+        assert clears[-1][1] == 0 and clears[-1][0] >= held[0][1]            # the stop ran, after the batch
+        readings = [n[3] for n in e.notified if n[0] == 0x69 and n[3]]
+        assert readings and all(abs(r - 60) <= 2 for r in readings), readings
+
+
 def test_memory_read_answers_rom_ram_and_flash_and_refuses_the_rest():
     import patch_fw
     img = patch_fw.patch(ringemu.IMAGE.read_bytes())

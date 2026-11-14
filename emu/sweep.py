@@ -13,6 +13,9 @@ hangs, faults, dropped queue posts, timer-pool growth, no answer.
   python sweep.py --stack real --hold 500 4000
                                         once per run the lower stack masks interrupts 0.5..4 s at a connection event
                                         (what its code can do: docs/FIRMWARE.md "Lower stack")
+  python sweep.py --batch-hold 0 100 --image old.bin
+                                        every PPG batch holds qc_app 0..100 ms at an algorithm site while the rest runs
+                                        (FW17: the stop landing mid-batch); --image runs an older build instead
 """
 import argparse, collections, contextlib, io, os, random, struct, sys, tempfile, time
 from pathlib import Path
@@ -58,9 +61,41 @@ def queue_fill(e):
     return st
 
 
-def run(seed, image, verbose=False, ring_heap=False, stack="model", hold=None):
+# FW17: idempotent instructions in the PPG algorithm 0x839DC4 (re-run safely): its first load of the work-area pointer, the
+# loop right after r5 = 0x1080, the 110-step loop before the reload at 0x83A474.
+HOLD_SITES = (0x839E2C, 0x83A090, 0x83A400)
+
+
+def hold_batch(e, pick):
+    """Real kernel: qc_app is held at one site of the PPG algorithm, in 0.1 ms steps, while interrupts, the timer task and
+    higher tasks run: the preemption by Bluetooth work that the emulator's timing does not cost.  pick(now) -> (site, ms)
+    or None, asked at every batch entry (patch_fw.BATCH).  Returns the list of (start, end) holds."""
+    st, held = {"site": None}, []
+    def batch(uc, a, s, _):
+        p = pick(e.now)
+        st.update(site=p[0], ms=p[1], until=None) if p else st.update(site=None)
+    def site(uc, a, s, _):
+        if a != st["site"] or e.cstr(e.r32(0x201340) + 0x34) != "qc_app": return
+        if st["until"] is None:
+            st["until"] = e.now + st["ms"]
+            held.append([e.now, e.now])
+        if e.now < st["until"]:
+            e.cyc += ringemu.CPU_HZ // 10000
+            held[-1][1] = e.now
+            uc.reg_write(ringemu.UC_ARM_REG_PC, a | 1)
+            uc.emu_stop()
+        else: st["site"] = None
+    e.uc.hook_add(ringemu.UC_HOOK_CODE, batch, begin=patch_fw.BATCH, end=patch_fw.BATCH)
+    for a in HOLD_SITES: e.uc.hook_add(ringemu.UC_HOOK_CODE, site, begin=a, end=a)
+    return held
+
+
+def run(seed, image, verbose=False, ring_heap=False, stack="model", hold=None, batch_hold=None):
     rnd = random.Random(seed)
     e = ringemu.Emu(quiet_mem=True, trace=True, image=image, kernel="real", stack=stack)
+    if batch_hold:      # its own generator: the scenario's draws stay as without it
+        hr = random.Random(seed + 1_000_003)
+        hold_batch(e, lambda now: (hr.choice(HOLD_SITES), hr.randint(*batch_hold)))
     e.flash_erase_ms = rnd.randint(20, 300)
     dirty = rnd.random() < 0.5
     if dirty: e.uc.mem_write(0x878000, bytes(0x1000))             # every log slot "different": the write erases
@@ -168,13 +203,16 @@ def main():
     ap.add_argument("--stack", default="model", choices=("model", "real"), help="real: the upper stack from firmware/flash_ring.bin")
     ap.add_argument("--hold", type=int, nargs=2, metavar=("LO", "HI"),
                     help="real stack: once per run, the lower stack masks interrupts LO..HI ms at a connection event")
+    ap.add_argument("--batch-hold", type=int, nargs=2, metavar=("LO", "HI"),
+                    help="every PPG batch holds qc_app LO..HI ms at a random algorithm site while others run (FW17)")
+    ap.add_argument("--image", type=Path, help="an update file to run instead of the current patch (e.g. an older build)")
     a = ap.parse_args()
-    img = Path(tempfile.mkdtemp()) / "patched.bin"
-    img.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()))
+    img = a.image or Path(tempfile.mkdtemp()) / "patched.bin"
+    if not a.image: img.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()))
     seeds = [a.only] if a.only is not None else range(a.seed, a.seed + a.runs)
     found = 0
     for s in seeds:
-        info, bad = run(s, img, verbose=a.only is not None, ring_heap=a.ring_heap, stack=a.stack, hold=a.hold)
+        info, bad = run(s, img, verbose=a.only is not None, ring_heap=a.ring_heap, stack=a.stack, hold=a.hold, batch_hold=a.batch_hold)
         print(("FOUND " if bad else "ok    ") + info, flush=True)
         for b in bad: print("      ", b, flush=True)
         found += bool(bad)

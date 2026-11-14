@@ -866,6 +866,92 @@ from the code and the SDK, not tested with a known value); the M0+ lockup case; 
 Latch pc `0x83FD2A` = a HardFault whose word was 0 (lr is then EXC_RETURN). Any other pc is not a HardFault: decode it as in FW16e (`0x8D38` assert, `0x12B08` software reset,
 a loop address for a hang).
 
+## The measurement-stop fault (FW17, ca0007)
+
+From the stock image (Python one-offs, capstone) and the real-kernel emulator. **Code** = read in the disassembly;
+**run** = seen in the emulator; **inferred** = not shown.
+
+**The ring's words (ca0006, three restarts, one word each):** stacked pc `0x83A482` (`strb r2, [r5, #8]`), r5
+`0x1080`, stacked lr `0x83C3DF`. The earlier reading "r4 = `0x160`" combined words from different restarts. Each word
+fits a store through a work-area pointer of 0, at three different sites (below).
+
+**The structure (code).** G = `0x208500` (literal at `0x83A648`); G+0xC = `0x20850C` is the PPG algorithm's work
+area pointer. Exactly two writers: `0x83BB0E` in the start `0x83BB00` sets it to the static `.bss` block `0x20C194`
+(about 4 KB, ending past `0x20D1A4`) and initialises it; `0x83BA2A` in `0x83BA20` sets it to 0. Nothing frees it and
+no other code writes it (also run: a write watch over a whole measurement sees only these two and the startup zero fill).
+`0x83BA20` is called only from the stop `0x8321A8` (`0x8321D0`, `0x8321E0`).
+
+**Who runs what (code + run).** The 320 ms drain `0x8302C0` → `0x830A00` → `0x830898` → `bl 0x83BCA8` at `0x830922`, all
+in `qc_app` (priority 1). `0x83BCA8(samples, n, a, b, c)` checks G+0xC ≠ 0 **once**, then calls the algorithm
+`0x839DC4` (`push {r0-r7, lr}`, about 7 KB, to `0x83BA16`) per sample; the algorithm reloads G+0xC at about 15 places
+(`0x839E2C`, `0x839FCA`, `0x83A20C`, `0x83A24E`..`0x83A28C`, `0x83A344`, `0x83A474`, …, and in its callee `0x83C0B0`
+at `0x83C0B8`, `0x83C204`) and stores through it. Its whole call closure is arithmetic: `__aeabi_memclr4`, divides
+(`0x836ADA`), soft float, sums, the switch helper; no OS call. The stop `0x8321A8` runs in `hub` (priority 2: the live
+HR timer's end, 30.5 s after `69 01`, and the scheduled measurement's end), in `Tmr Svc` (priority 6, `0x82746E` from a
+timer callback) or in `qc_app` itself (`0x826F62`, `0x830CEC`); never from an interrupt.
+
+**The race (code; reproduced: run).** `hub` or `Tmr Svc` preempts `qc_app` in the middle of a batch, the stop clears
+G+0xC, `qc_app` resumes, reloads 0 and stores into ROM (`0x0..`), which faults (bus error). Where it faults depends on
+where the batch was preempted:
+
+| Preempted in | Faults at | Registers | Ring word |
+|---|---|---|---|
+| the 110-step loop `0x83A352..0x83A42E` (after the reload at `0x83A344`) | `0x83A482` (reload `0x83A474`) | r4 0, r5 `0xF20` | pc `0x83A482` (run) |
+| `0x83A090..0x83A256` (r5 = the constant `0x1080` from `0x83A08C`) | `0x83A26E` (reload `0x83A266`) | r4 the old `0x20C194`, r5 `0x1080` | r5 `0x1080` (run) |
+| `0x83C0B0`, leaving through `0x83C456` right after its divide `bl 0x836ADA` at `0x83C3DA` | `0x839FDE` (reload `0x839FCA`) | lr still `0x83C3DF` | lr `0x83C3DF` (code; that path needs a detected pulse peak, which the emulator's synthetic signal does not reach) |
+| before the algorithm's first reload | `0x839E30` | r4 0 | (run) |
+
+So the restart is a stock race: it needs no patch code. The stock reads through the NULL pointer elsewhere
+(`0x83BA34`, `0x839504` after every stop) only read the ROM and do not fault.
+
+**How rare in stock, and why the light copy makes it likely (inferred).** In the emulator a batch takes 0.75 ms (at
+most 1.8 ms) every 320 ms, and the live-HR stop is phase-locked to the drain (both timers start together): it lands
+about 60 ms after a batch starts, with or without the light copy, so the plain emulator never overlaps them. On the
+ring the batch must be late or long by tens of ms. `qc_app` is the lowest-priority app task; every bit of
+higher-priority work delays and stretches its batch. The light copy itself never waits: it copies, enqueues with
+`0x82A600` and returns, and the app task's `os_delay(20)` on a refusal blocks the app task, not `qc_app`. But each
+drain read makes up to 16 notifications, and sending them runs the app task (2), `UpperStackTask` (5) and the
+controller's `low_stack_task` (6) right inside the drain and during the batch, plus the completions and retries under
+back-pressure. The emulator does not cost that work (one cycle per instruction, the controller in Python), which is
+why it never showed the overlap. So the copy raises the odds per stop from "almost never" to the observed "about
+every second Light run". The stop cannot run inside the copy itself: there is no wait in it. Stock without the copy
+can hit the same fault whenever other work (a busy link, a sync, the scheduled measurement's flash write) delays a
+batch onto a stop instant. Rare, rate unknown.
+
+**Fix (ca0007).** `bl 0x83BCA8` at `0x830922` → `BATCH_LOCK`: copy the caller's fifth argument, `os_sched_suspend()`,
+the same batch call, `os_sched_resume()`. The stock app uses this pair (`0x833452` / `0x8334AC`). While it holds, no
+task can run, so no stop can clear the pointer mid-batch. A stop that falls due waits for the batch (≈ 1 ms in the
+emulator) and runs right after; the next batch's own entry check then sees 0 and skips (stock path). Interrupts stay
+on: ISRs post as before (TIM5's kick message is taken when the batch ends). Nothing in the batch can block, so
+suspending is legal. Cost: 32 bytes of `qc_app` stack (2,976 free), and higher-priority tasks wait at most one batch,
+far less than the stock flash erase's 20..300 ms with interrupts off. The fault hook (FW16g), `A1 10`..`A1 13` stay;
+`FAULT_SPIN` is unchanged (`0x83FD28`; the new code is appended after it).
+
+**Light samples.** Unchanged in content and order: the copy is not touched. When the link keeps up, every read goes
+out as before. Under back-pressure, as before: the rest of a read is dropped while 16 or more packets wait in the
+stock send ring. While a batch runs (≈ 1 ms) queued packets wait for it; nothing is lost because of it.
+
+**Emulator changes.** ROM (`0..0x100000`) is now write-protected in every mode. Before, a store into ROM went through
+silently, which is why no earlier sweep could show this fault. `test_measurement_stop_inside_the_ppg_batch`: real
+kernel, `69 01`, `qc_app` held inside the last batch before the stop (re-entering one idempotent instruction in 0.1 ms
+steps while ticks, the timer task and `hub` run). Stock faults at `0x83A482` (r4 0, r5 `0xF20`) / `0x83A26E` (r5
+`0x1080`) and restarts via the watchdog; ca0006 the same; ca0007 does not fault, the stop runs after the batch, the
+readings are right. `sweep.py --batch-hold LO HI` holds every batch LO..HI ms at one of three algorithm sites:
+200 seeds each (0..199), `--batch-hold 0 100`, the restart scenario as before (light copy on, link 6..8 notifications
+per 500 ms with stalls): **ca0006 54 of 200 runs fault** (pc `0x83A482` ×21, `0x83A26E` ×19, `0x839E30` ×12,
+`0x83A368` ×2; each spins in the hook, the watchdog resets 4 s later, `03` goes unanswered); **ca0007 0 of 200**, all
+answering `03`, watchdog kick gap within 3 s. The hold is a stress model, not the ring's timing: the rate before is
+the share of runs whose hold outlasted the ~60 ms to the stop, not a prediction for the ring.
+
+**Not verified.** On the ring. The ring's real batch timing and the cost of Bluetooth work there; the
+lr `0x83C3DF` path in the emulator; that the encrypted ROM patch's hook behind `os_sched_suspend` (`0x201594`, if
+set) behaves as the ROM's `vTaskSuspendAll` (the stock app relies on it at `0x833452`).
+
+**How to confirm on the ring (ca0007).** Light runs as before (`69 01` + `A1 0A`), ten or more. No restart means
+fixed (ca0006: about every second run). If one still restarts: `ringprobe.py crash`, then `fault-select 13` (r4) and
+`0` (pc) on the next ones. A pc outside `0x839DC4..0x83C460` is a different fault. To see the pointer:
+`ringprobe.py peek 0x20850c 4` reads `94 c1 20 00` during a measurement and `00 00 00 00` after its stop.
+
 ## Lower stack in the ROM (FW16d part 4)
 
 From the ROM dump, the readable half of the patch RAM (`emu/firmware/patch_ram.partial`, `0x203800..0x205420`) and

@@ -8,7 +8,7 @@ Tools for the Colmi RY02 ring's firmware (Realtek RTL8762E, image `RY02_3.00.33_
 | `patch_fw.py` | Builds `firmware/RY02_3.00.33_fullaccel.bin`: stock plus, in this order, FW1 (every accelerometer sample, `A1 05`), FW4 (motion-only stream with no gaps, `A1 07` / `A1 08`) and FW6 (double tap sent as `A1 09 <count>`). |
 | `viewer.html` | Replays a recorded run (`--trace trace.js`): spinning ring, chip-to-sensor diagram, event log. |
 | `test_ringemu.py` | End-to-end tests: heart rate, the patch, installing the patch over the emulated Bluetooth update, the exception layer and the real kernel. |
-| `sweep.py` | Seeded sweep of the light-stream restart scenario under the real kernel (`python sweep.py --runs 300`, `--only SEED`; `--stack real` runs the ring's own Bluetooth upper stack). |
+| `sweep.py` | Seeded sweep of the light-stream restart scenario under the real kernel (`python sweep.py --runs 300`, `--only SEED`; `--stack real` runs the ring's own Bluetooth upper stack; `--batch-hold LO HI` holds every PPG batch so the measurement stop can land inside it, FW17; `--image` runs an older build). |
 | `rombootprobe.py` | Runs the ROM's own reset handler through the Bluetooth lower stack's init to `os_sched_start`; `--hci` then sends the upper stack's HCI init through the ROM's real `hci_if` and lower stack, `--spin` runs its hardware polls with the hardware held busy. |
 | `ringprobe.py` | Talks to the real ring from a PC (`bleak`): timed command plans, and on ca0003 or later `peek` / `dump` memory (`A1 10`) and `crash` (`A1 11`, boot counter and crash record); on ca0004 `aon` (`A1 12`) and the watchdog latch in `crash`; on ca0005 also the watchdog experiment's counters (FW16f, never flashed); on ca0006 `fault-select` (`A1 13`) and a HardFault's chosen word in `crash` (FW16g). `python ringprobe.py -h`. |
 | `firmware/` | The stock image and the built patch. |
@@ -98,6 +98,9 @@ kernels, these run from the dump: the heap (`os_mem_*`, `pvPortMalloc`, `vPortFr
 `vAssertHandler` (asserts spin with interrupts off) and the HardFault handler `0x101`/`0x45BA`. In `model` the ROM's
 `.data` is replaced by presets, one of them now known wrong: `0x2003C2` = 2 (a HardFault resets); the ring and the
 ROM default say `0x28` (it spins until the watchdog); `real` uses the ROM default.
+
+The ROM range (`0..0x100000`) is read-only in every mode: a store there faults as on the ring (FW17: the measurement-stop
+fault is a store through a pointer of 0; before, such stores went through silently).
 
 The app's RAM keeps its bytes across a reset here; on the ring RAM loses power for a moment at every reset.
 

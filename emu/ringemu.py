@@ -21,7 +21,7 @@ Add --quiet-mem to hide raw register lines, --trace trace.js to record the run f
 import argparse, bisect, collections, hashlib, json, math, os, re, struct, sys
 from pathlib import Path
 from unicorn import Uc, UcError, UC_ARCH_ARM, UC_MODE_THUMB, UC_HOOK_CODE, UC_HOOK_BLOCK, UC_HOOK_INTR, \
-    UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_MEM_WRITE
+    UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_MEM_WRITE, UC_PROT_READ, UC_PROT_EXEC
 from unicorn.arm_const import *
 
 HERE = Path(__file__).parent
@@ -171,6 +171,7 @@ class Emu:
         uc.mem_map(0, 0x100000)
         uc.mem_write(0, b"\x70\x47" * 0x80000)             # ROM = all "bx lr"; calls are intercepted anyway
         if self.rom: uc.mem_write(0, self.rom)               # past the dump's end it stays "bx lr", and stops (on_rom)
+        uc.mem_protect(0, 0x100000, UC_PROT_READ | UC_PROT_EXEC)    # a store into ROM faults, as on the ring (FW17)
         uc.mem_map(0x200000, 0x40000)
         uc.mem_map(BUF_RAM, 0x10000)
         uc.mem_map(0x800000, 0x80000)

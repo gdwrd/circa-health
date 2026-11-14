@@ -35,7 +35,7 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        can produce (at most 189), are sent.  The copy turns itself off when the stock firmware stops the drain timer
        (STOP_HOOK, every measurement end, e.g. live heart rate 30.5 s after 69 01), so a1 0a must follow each 69 01:
        on the real ring (ca0001) a stock stop with the copy still on and the link up killed the ring about 8 s later
-       (cause not found; the emulator runs clean); a copy turned off before the stop never did.
+       (cause: FW17, a stock race the copy makes likely); a copy turned off before the stop never did.
   FW15b a1 0f answers the wear state and when it last changed:  a1 0f <state> <t0 t1 t2 t3> 00 .. checksum
        state 0 = unknown (no verdict since boot), 1 = worn, 2 = not worn; t = the firmware clock (word CLOCK, seconds
        since 2000-01-01 in the phone's local time as set-time 01 wrote it; it steps once a minute) at the change,
@@ -82,6 +82,14 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        is not in RAM.  No push, no call: the hook cannot fault, whatever frame it is handed.  a1 13 <n> sets the selector and
        answers a1 13 <n>; a1 13 ff reads it back (a1 13 alone sets 0: packets are zero-padded).  FAULT_SEL is in the
        zero-filled patch RAM: back to 0 after every restart, set it again after each one.
+  FW17 the measurement-stop fault (the ring's restart, ca0001..ca0006).  qc_app (priority 1) runs the PPG batch
+       BATCH(samples, n, ..) from the 320 ms drain; it checks the work-area pointer WORK_PTR (0x20C194 while measuring) once,
+       then the algorithm 0x839DC4 reloads it at every step.  The stop (0x8321A8 -> 0x83BA20, in hub or Tmr Svc, both
+       above qc_app) sets it to 0; landing mid-batch, the algorithm stores through 0 into ROM: HardFault (ring: pc
+       0x83A482, r5 0x1080, lr 0x83C3DF, three such faults).  A stock race; the light copy only makes it likely.  Fix:
+       the call at BATCH_CALL runs the batch between os_sched_suspend and os_sched_resume (the pair the stock app uses at
+       0x833452): no task runs mid-batch, a stop that falls due runs right after it.  The batch only computes (no OS call);
+       interrupts stay on.  Light samples are untouched.
   Version: the firmware texts the ring reports end in _ca<VERSION, 4 digits> (e.g. _ca0001) instead of _250117, in the
   file's wrapper too.  Builds before ca0001 were tagged _circa<one character: 0-9, then A = 10>.
 
@@ -110,7 +118,7 @@ START_SAMPLING = 0x20BA3F               # flag the motion interrupt sets; the ne
 READ_TICK = 0x82E63C                    # gsensor_read_timer_id callback; the motion interrupt calls it directly
 MOTION_ONLY = 0x10
 TAP_T, TAP_Q, TAP_LO, TAP_HI, TAP_RUN = 20, 15, 3, 8, 4     # 640 mg, 480 mg; 120..320 ms apart at 25 Hz
-VERSION = 6                             # build number, tag ca0006.  Old scheme (tag circa<n>): 1 = v4.1.0 (FW1); 2, 3 = v4.2.0,
+VERSION = 7                             # build number, tag ca0007.  Old scheme (tag circa<n>): 1 = v4.1.0 (FW1); 2, 3 = v4.2.0,
                                         # v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected taps, never fired on the ring); 5 = taps found
                                         # in the samples (v4.2.3, firm taps only); 6 = normal taps (v4.2.4); 7 = motion stream ends when
                                         # the phone leaves (FW11); 8 = numbered samples (FW12); 9 = light samples (FW7a); 10 (circaA) =
@@ -120,7 +128,8 @@ VERSION = 6                             # build number, tag ca0006.  Old scheme 
                                         # debug window: memory read, crash record, boot counter (FW16a); 4 (ca0004) = AON read
                                         # a1 12, ROM readable to 0x43F4C (FW16e); 5 (ca0005) = watchdog experiment:
                                         # bounded stand-in kick in the TIM5 handler, counters in a1 11 (FW16f; never
-                                        # flashed); 6 (ca0006) = FW16f removed, the HardFault's word in the latch (FW16g)
+                                        # flashed); 6 (ca0006) = FW16f removed, the HardFault's word in the latch (FW16g);
+                                        # 7 (ca0007) = the PPG batch runs with the scheduler suspended (FW17)
 LIGHT_READ = 0x830238                   # optical read helper (reg, buf, len) for I2C 0x44; its epilogue below
 LIGHT_HOOK = 0x830268                   # mov r0, r4 ; pop {r1-r7, pc}: r4 = 0 if read, r6 = len, r7 = buf, [sp] = register,
 LIGHT_EPILOGUE = bytes.fromhex("2046febd")   # [sp + 28] = the helper's return address (only the helper reaches here)
@@ -166,6 +175,13 @@ AON_READ, AON_END = 0x32F94, 0x1E0
 # the second spin, for a word of 0 (lr = EXC_RETURN there).  Latch lr markers:
 FAULT_SPIN = 0x83FD28
 BAD_FRAME, UNREADABLE = 0xBADF0000, 0xDEAD0000      # frame not in RAM; stacked pc's bytes not readable (| pc & 0xFFFF)
+# FW17.  qc_app's drain processing 0x830898 calls the PPG batch 0x83BCA8(samples, n, a, b, [sp] = c) here; the batch checks
+# the work-area pointer WORK_PTR once, then runs the algorithm 0x839DC4 per sample, which reloads it many times.  The stop
+# (0x8321A8 -> 0x83BA20, in hub / Tmr Svc, both above qc_app) sets it to 0.  The stock app calls the same osif pair at
+# 0x833452 / 0x8334AC.
+BATCH_CALL, BATCH = 0x830922, 0x83BCA8
+WORK_PTR = 0x20850C                     # 0x20C194 (static) from start 0x83BB00 to stop 0x83BA20, else 0
+OS_SCHED_SUSPEND, OS_SCHED_RESUME = 0x131FE, 0x1321C
 
 # Entered instead of the epilogue: sp is still the batch-read frame, r4 = bytes in this batch,
 # the samples sit at sp+0x11.  r5-r7 are free because the epilogue restores them.
@@ -427,6 +443,27 @@ LIGHT_STOP = f"""
     strb  r0, [r1]
     ldr   r0, =0x20BD68
     bx    lr
+"""
+
+
+# Replaces bl BATCH at BATCH_CALL (FW17): the same call with the scheduler suspended, so no task can run the stop (and
+# clear WORK_PTR) while the algorithm is half way through a batch; a stop that falls due meanwhile runs right after.
+# The batch only computes (memset, divides, soft float: no OS call, nothing that blocks).  Its fifth argument is the
+# caller's [sp]: copied to the new [sp].  The caller overwrites r0 at once (0x830926), so the result is not kept.
+BATCH_LOCK = f"""
+    push  {{r0, r1, r2, r3, r4, lr}}
+    ldr   r4, [sp, #24]
+    sub   sp, #8
+    str   r4, [sp]
+    bl    0x{OS_SCHED_SUSPEND:x}
+    ldr   r0, [sp, #8]
+    ldr   r1, [sp, #12]
+    ldr   r2, [sp, #16]
+    ldr   r3, [sp, #20]
+    bl    0x{BATCH:x}
+    bl    0x{OS_SCHED_RESUME:x}
+    add   sp, #24
+    pop   {{r4, pc}}
 """
 
 
@@ -1047,6 +1084,7 @@ def patch(stock: bytes) -> bytes:
     redirect(SCHED_CALL, asm(f"bl 0x{OS_SCHED_START:x}", SCHED_CALL), BOOT.replace("FAULT_HOOK", hex(spin + 4 | 1)))
     assert img[off(WDG_CB_LITERAL):off(WDG_CB_LITERAL) + 4] == struct.pack("<I", STOCK_WDG_CB | 1)
     struct.pack_into("<I", img, off(WDG_CB_LITERAL), append(RESET_SEEN.replace("SAVE", save)) | 1)
+    redirect(BATCH_CALL, asm(f"bl 0x{BATCH:x}", BATCH_CALL), BATCH_LOCK)    # FW17, after FAULT_HOOK: FAULT_SPIN stays put
     assert CRASH >= WEAR + 8 and REC + 60 <= 0x20EC00 and FAULT_SEL < WEAR    # outside / inside the zero-fill below, below the heap
     assert img[off(BSS_LEN):off(BSS_LEN) + 4] == struct.pack("<I", 0x55DC)
     # FW6, FW12, FW7a, FW15b, FW16g: the startup zero-fill runs on over TAP_STATE, SEQ, LIGHT, FAULT_SEL and WEAR; the overlay is copied in over its part afterwards
