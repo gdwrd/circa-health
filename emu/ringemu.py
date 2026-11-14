@@ -1,8 +1,10 @@
-"""Runs the Colmi RY02 app image (Realtek RTL8762E) without the chip's ROM.
+"""Runs the Colmi RY02 app image (Realtek RTL8762E), with the chip's ROM where it can.
 
-The real ROM never executes: every ROM function the app calls is replaced by a
-Python stand-in looked up by name in the SDK symbol table, and every peripheral
-register access is logged.  Sensors, the phone and interrupts are faked.
+Without firmware/rom_rtl8762.bin (or with RINGEMU_NO_ROM=1) the ROM never executes: every ROM function the app
+calls is replaced by a Python stand-in looked up by name in the SDK symbol table.  With the dump, the functions in
+ROM_REAL (heap, libc helpers, reset and fault paths) run from it; the kernel, Bluetooth, flash, logging and the
+hardware stay stand-ins (see README).  Every peripheral register access is logged.  Sensors, the phone and
+interrupts are faked.
 
   python ringemu.py --ms 5000                      boot only
   python ringemu.py --ms 9000 --pin 3000:22        accelerometer interrupt at 3 s: motion sampling starts
@@ -13,7 +15,7 @@ register access is logged.  Sensors, the phone and interrupts are faked.
   python ringemu.py --image FILE ...               boot another update file directly
 Add --quiet-mem to hide raw register lines, --trace trace.js to record the run for viewer.html.
 """
-import argparse, bisect, collections, hashlib, json, math, re, struct, sys
+import argparse, bisect, collections, hashlib, json, math, os, re, struct, sys
 from pathlib import Path
 from unicorn import Uc, UcError, UC_ARCH_ARM, UC_MODE_THUMB, UC_HOOK_CODE, \
     UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_MEM_WRITE
@@ -32,7 +34,25 @@ HEAP, HEAP_END = 0x220000, 0x240000         # our own heap, outside the chip's r
 EXIT = 0xFFFF0                              # fake return address: "this call chain is done"
 DELAY_US, DELAY_MS = 0xFFF00, 0xFFF10       # fake ROM addresses for RAM function pointers
 ROM_HARDFAULT = 0xFFF20                     # fake ROM HardFault handler, in RAM vector slot 3 (0x20000C) from boot
+CALL_RET = 0xFFF30                          # fake return address of Emu.call
 RAM_END = 0x216000                          # the chip's 88 KB of RAM end here (SDK mem_config.h)
+# The ROM dump (FW16b, untracked: Realtek's code).  Optional: without it everything below ROM_REAL is a stand-in.
+ROM_FILE = None if os.environ.get("RINGEMU_NO_ROM") else HERE / "firmware" / "rom_rtl8762.bin"
+BUF_RAM = 0x280000                          # the chip's buffer RAM; the ROM's second heap (type 1) is at 0x280790..0x284000
+# ROM functions that run from the dump.  Everything they call that is not listed (kernel, logging, AON, watchdog,
+# flash) is still a stand-in; unnamed ROM helpers reached from these run for real.
+ROM_REAL = {"__aeabi_memcpy", "__aeabi_memcpy4", "__aeabi_memcpy8", "__rt_memcpy", "memcpy", "__aeabi_memset", "_memset_w",
+            "_memset", "__aeabi_memclr", "__rt_memclr", "__aeabi_memclr4", "__aeabi_memclr8", "__rt_memclr_w", "memcmp",
+            "strlen", "os_mem_alloc_intern", "os_mem_zalloc_intern", "os_mem_aligned_alloc_intern", "os_mem_free",
+            "os_mem_aligned_free", "os_mem_peek", "pvPortMalloc", "pvPortMalloc_auto_type", "vPortFree",
+            "xPortGetFreeHeapSize", "xPortGetMinimumEverFreeHeapSize", "update_ram_layout", "reset_reason_get",
+            "WDG_SystemReset", "vAssertHandler"}
+# Endless loops in the ROM, where the chip waits for its watchdog: name -> address
+ROM_SPINS = {"wdg_reset_spin": 0x12B08,     # end of WDG_SystemReset: watchdog armed with a tiny timeout, reset follows
+             "assert_spin": 0x8D38,         # vAssertHandler with asserts on: interrupts off, waits forever
+             "hardfault_spin": 0x4782}      # HardFault handler when its reset bit (0x2003C2 bit 1) is clear
+WDG_TIMEOUT_MS = 4000   # assumption: the SDK's default ROM watchdog (4 s, reset all); whether it runs on the ring is not known
+HEAP_WORDS = 0x2014D8   # xFreeBytesRemaining[2], xMinimumEverFreeBytesRemaining[2], xHeapTotalSize[2]; [0] data, [1] buffer
 UNTIL, SLICE = 0xFFFFFFF0, 2_000_000
 FOREVER = 0xFFFFFFFF
 BLOCK = object()
@@ -56,7 +76,8 @@ REGS = [UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3, UC_ARM_REG_R
 QUIET = {"__aeabi_memcpy", "__aeabi_memcpy4", "__aeabi_memclr", "__aeabi_memclr4", "__aeabi_memset",
          "memcmp", "strlen", "os_mutex_take", "os_mutex_give", "trace_string", "trace_bdaddr",
          "os_mem_alloc_intern", "os_mem_zalloc_intern", "os_mem_free", "log_buffer", "log_direct",
-         "platform_delay_us", "WDG_Restart", "btaon_fast_read_safe", "btaon_fast_write_safe", "btaon_fast_write"}
+         "platform_delay_us", "WDG_Restart", "btaon_fast_read_safe", "btaon_fast_write_safe", "btaon_fast_write",
+         "vTaskSuspendAll", "xTaskResumeAll", "btaon_fast_read_safe_8b", "btaon_fast_write_8b", "btaon_fast_write_safe_8b"}
 # guess: SDK default flash map; this ring's real map is unknown apart from the app address
 FLASH_BANKS = {0: (0x801000, 0x1000), 1: (0x802000, 0x55000), 3: (0x85B000, 0x25000), 6: (0x857000, 0x4000)}
 
@@ -67,13 +88,21 @@ class Task:
 
 
 class Emu:
-    def __init__(self, quiet_mem=False, trace=False, image=IMAGE):
+    def __init__(self, quiet_mem=False, trace=False, image=IMAGE, rom=ROM_FILE):
         self.quiet_mem = quiet_mem
+        self.rom = Path(rom).read_bytes() if rom and Path(rom).exists() else None
         self.trace = [] if trace else None
         self.syms = {}
         for n, v in re.findall(r"(\w+)\s*=\s*(0x[0-9a-fA-F]+)", (SDK / "rom_symbol_gcc.axf").read_text()):
             self.syms.setdefault(int(v, 16) & ~1, n)
-        self.syms.update({DELAY_US: "platform_delay_us", DELAY_MS: "platform_delay_ms", ROM_HARDFAULT: "HardFault_Handler"})
+        real = {int(v, 16) & ~1 for n, v in re.findall(r"(\w+)\s*=\s*(0x[0-9a-fA-F]+)", (SDK / "rom_symbol_gcc.axf").read_text()) if n in ROM_REAL}
+        self.syms.update({DELAY_US: "platform_delay_us", DELAY_MS: "platform_delay_ms", ROM_HARDFAULT: "HardFault_Handler", CALL_RET: "call_ret"})
+        if self.rom:
+            self.syms.update({a: n for n, a in ROM_SPINS.items()})
+            # ROM addresses where execution stops for a stand-in: every named entry not in ROM_REAL, and the spins
+            self.stops = {a for a in self.syms if a < len(self.rom) and a not in real}
+        self.hardfault_vec = 0x101 if self.rom else ROM_HARDFAULT | 1      # what the ROM leaves in vector slot 3
+        self.hung = None            # set while the chip spins with interrupts off (assert, fault): only the watchdog runs
         self.ram_syms = sorted(a for a in self.syms if 0x200000 <= a < 0x300000)
         bases = {}
         for n, v in re.findall(r"#define\s+(\w+?)(?:_REG)?_BASE\s+0x(4\w{7})UL", (SDK / "rtl876x.h").read_text()):
@@ -86,7 +115,9 @@ class Emu:
         uc.ctl_set_cpu_model(UC_CPU_ARM_CORTEX_M0)
         uc.mem_map(0, 0x100000)
         uc.mem_write(0, b"\x70\x47" * 0x80000)             # ROM = all "bx lr"; calls are intercepted anyway
+        if self.rom: uc.mem_write(0, self.rom)               # past the dump's end it stays "bx lr", and stops (on_rom)
         uc.mem_map(0x200000, 0x40000)
+        uc.mem_map(BUF_RAM, 0x10000)
         uc.mem_map(0x800000, 0x80000)
         uc.mem_write(0x800000, b"\xff" * 0x80000)
         uc.mem_write(APP_BASE, Path(image).read_bytes()[OTA_HDR:])
@@ -128,16 +159,32 @@ class Emu:
         self.w32(self.sym("platform_delay_us"), DELAY_US | 1)
         self.w32(self.sym("platform_delay_ms"), DELAY_MS | 1)
         self.preset(0x2002DC, bytes([1]))   # OTP->stack_en bit; SystemInit returns at once without it
-        self.preset(0x20000C, struct.pack("<I", ROM_HARDFAULT | 1))    # the ROM's vector table copy: its HardFault handler
+        self.preset(0x20000C, struct.pack("<I", self.hardfault_vec))    # the ROM's vector table copy: its HardFault handler
+        if not self.rom: return
+        # The ROM's .data image (0x2000E8..0x2011C8, from ROM 0x42E6C) lies past the dump, so its config defaults are
+        # unknown; these are the ones the real ROM code here depends on.  Its .bss (0x2011C8..0x203154) is zero.
+        self.app_ram.update(range(0x2011C8, 0x203158))  # and the reset-reason word, read on purpose at every boot
+        self.preset(0x200380, struct.pack("<I", APP_GLOBALS))   # OTP heap base; update_ram_layout adds 0x7000: heap 0x20EC00
+        self.preset(0x20038C, struct.pack("<I", 0x3870))        # buffer heap size: the ring's xHeapTotalSize[1] is 0x3868
+        self.preset(0x2003C2, bytes([2]))   # assumption: a HardFault resets (WDG_SystemReset(3, 5)) instead of spinning
+        self.call(0x12B2D)                  # boot: reset reason from the magic at 0x203154 and AON register 0x15
+        self.call(0x12B55)                  # boot: magic and reason 1 back in place for the next reset
 
-    def reset(self):
+    def reset(self, mode=None):
         """Chip reset: the ROM's RAM, peripherals and tasks are lost; flash, saved settings and the sensors' state stay.
-        Assumption, not known for the chip: the app's RAM (APP_GLOBALS..RAM_END) keeps its bytes through a reset."""
+        Assumption, not known for the chip: the app's RAM (APP_GLOBALS..RAM_END) keeps its bytes through a reset.
+        With the ROM: the reset-reason word 0x203154 survives (the ring shows it does); mode 3 (the watchdog's
+        "reset all", per the SDK's names) also clears the always-on registers, other modes keep them."""
         self.resets += 1
-        self.ev(f"CHIP RESET #{self.resets}", "reset")
+        self.ev(f"CHIP RESET #{self.resets}" + (f" (watchdog mode {mode})" if mode is not None else ""), "reset")
         self.rom_boot_copy()
-        for base, size in ((0x200000, APP_GLOBALS - 0x200000), (RAM_END, 0x240000 - RAM_END), (0x40000000, 0x100000), (0xE0000000, 0x100000)):
+        magic = bytes(self.uc.mem_read(0x203154, 4))
+        for base, size in ((0x200000, APP_GLOBALS - 0x200000), (RAM_END, 0x240000 - RAM_END), (BUF_RAM, 0x10000),
+                           (0x40000000, 0x100000), (0xE0000000, 0x100000)):
             self.uc.mem_write(base, bytes(size))
+        if self.rom: self.uc.mem_write(0x203154, magic)
+        if mode == 3: self.aon.clear()
+        self.hung = None
         self.tasks, self.cur = [], None
         self.heap, self.free, self.sizes = HEAP, collections.defaultdict(list), {}
         self.queues, self.sems, self.timers = {}, {}, {}
@@ -212,10 +259,10 @@ class Emu:
         self.handles += 0x10
         return self.handles
 
-    def spawn(self, name, pc, args=(), stack=0x2000, on_exit=None):
+    def spawn(self, name, pc, args=(), stack=0x2000, on_exit=None, base=None):
         ctx = dict.fromkeys(REGS, 0)
         ctx.update(zip(REGS, args[:4]))
-        base = self.alloc(stack)
+        base = base or self.alloc(stack)
         top = base + stack - 4 * len(args[4:])           # arguments past the fourth go on the stack
         self.uc.mem_write(top, struct.pack(f"<{len(args[4:])}I", *args[4:]))
         ctx.update({UC_ARM_REG_SP: top, UC_ARM_REG_LR: EXIT | 1, UC_ARM_REG_PC: pc & ~1})
@@ -224,8 +271,44 @@ class Emu:
 
     # ---- hooks
     def on_rom(self, uc, addr, size, _):
+        if self.rom and addr < len(self.rom) and addr not in self.stops:
+            if addr in (0x29C, 0x208): self.ev(f"{self.syms[addr]}({', '.join(f'{self.arg(i):#x}' for i in range(4))})", "rom", name=self.syms[addr])
+            if addr == 0x11124 and not self.r32(0x2016C8):     # set = auto-type's first try; the buffer heap is next
+                self.ev(f"HEAP: allocation failed, type {self.arg(0)}, {self.arg(1)} bytes, {self.arg(2)} free", "heap")
+            return                                      # real ROM code runs
         self.romcall = True
         uc.emu_stop()
+
+    def call(self, addr, *args):
+        """Run a real ROM function to its return, from Python, between slices; stand-ins it reaches run as usual."""
+        saved = {reg: self.r(reg) for reg in REGS}
+        for reg, v in zip(REGS, args): self.uc.reg_write(reg, v)
+        self.uc.reg_write(UC_ARM_REG_SP, HEAP_END - 0x100)   # scratch stack at the top of the emulator's own heap
+        self.uc.reg_write(UC_ARM_REG_LR, CALL_RET | 1)
+        pc = addr
+        while pc != CALL_RET:
+            self.uc.emu_start(pc | 1, UNTIL, count=SLICE)
+            pc = self.r(UC_ARM_REG_PC)
+            if pc != CALL_RET:
+                assert self.dispatch(pc) is not BLOCK, f"Emu.call({addr:#x}) reached a blocking stand-in"
+                pc = self.r(UC_ARM_REG_PC)
+        ret = self.r(UC_ARM_REG_R0)
+        for reg, v in saved.items(): self.uc.reg_write(reg, v)
+        return ret
+
+    def rom_wdg_reset_spin(self):
+        self.reset(mode=self.r(UC_ARM_REG_R6))         # r6: the mode WDG_SystemReset was called with
+        return BLOCK
+
+    def hang(self, why):
+        """Interrupts off, the CPU spinning: nothing runs and the phone hears nothing until the watchdog resets the chip."""
+        self.ev(f"HANG ({why}): interrupts off, chip silent; watchdog reset in {WDG_TIMEOUT_MS} ms (assumed)", "reset")
+        self.hung = why
+        self.hw["wdg"] = {"at": self.now + WDG_TIMEOUT_MS, "interval": None, "fire": lambda: self.reset(mode=3)}
+        return self.block(FOREVER)
+
+    def rom_assert_spin(self): return self.hang("ROM assert")
+    def rom_hardfault_spin(self): return self.hang("HardFault")
 
     def on_mmio(self, uc, access, addr, size, value, _):
         i = bisect.bisect_right(self.periph, (addr, "~")) - 1
@@ -464,7 +547,7 @@ class Emu:
         if pc == EXIT:
             t, self.cur = self.cur, None
             self.tasks.remove(t)
-            self.free[self.sizes.pop(t.stack)].append(t.stack)
+            if t.stack in self.sizes: self.free[self.sizes.pop(t.stack)].append(t.stack)
             if t.on_exit: t.on_exit()
             return
         name = self.syms.get(pc, f"rom_{pc:x}")
@@ -476,21 +559,21 @@ class Emu:
         if ret is BLOCK:
             if self.cur: self.cur.ctx = {reg: self.r(reg) for reg in REGS} | {UC_ARM_REG_PC: lr & ~1}
             self.cur = None
-            return
+            return BLOCK
         if ret is not None: self.uc.reg_write(UC_ARM_REG_R0, int(ret) & 0xFFFFFFFF)
         self.uc.reg_write(UC_ARM_REG_PC, lr & ~1)
 
     def schedule(self, limit_ms):
         # shortcut: round-robin with no priorities or preemption; add them if task ordering starts to matter
         while True:
-            ready = [t for t in self.tasks if t.wait is None]
+            ready = [t for t in self.tasks if t.wait is None and not self.hung]
             if ready:
                 self.cur = t = ready[0]
                 self.tasks.remove(t); self.tasks.append(t)
                 for reg, v in t.ctx.items(): self.uc.reg_write(reg, v)
                 return True
-            due = [tm["at"] for tm in self.timers.values() if tm["at"] is not None]
-            due += [t.wait["at"] for t in self.tasks if t.wait.get("at") is not None]
+            due = [tm["at"] for tm in self.timers.values() if tm["at"] is not None and not self.hung]
+            due += [t.wait["at"] for t in self.tasks if t.wait and t.wait.get("at") is not None]
             due += [h["at"] for h in self.hw.values()]
             if not due:
                 self.ev("idle: every task is waiting and no timer is armed")
@@ -498,7 +581,7 @@ class Emu:
             self.now = max(self.now, min(due))
             if self.now > limit_ms: return False
             for h, tm in self.timers.items():
-                if tm["at"] is not None and tm["at"] <= self.now:
+                if tm["at"] is not None and tm["at"] <= self.now and not self.hung:
                     tm["at"] = self.now + tm["interval"] if tm["reload"] else None
                     self.spawn("tmr:" + tm["name"], tm["cb"], (h,), stack=0x1000)
             for name, h in list(self.hw.items()):
@@ -565,10 +648,22 @@ class Emu:
     rom_trace_bdaddr = rom_trace_string
 
     # ---- tasks, queues, semaphores, timers
+    def chip_alloc(self, size):
+        """With the ROM: a kernel object's memory from the real heap, as xTaskCreate / xQueueGenericCreate take it
+        (pvPortMalloc_auto_type: data heap, else buffer heap).  The kernel itself is still modelled."""
+        if not self.rom: return 0
+        a = self.call(self.sym("pvPortMalloc_auto_type"), size)
+        assert a, f"chip heap: no room for a {size}-byte kernel object"
+        return a
+
     def rom_os_task_create(self):
-        name, h = self.cstr(self.arg(1)), self.handle()
+        name, h, size = self.cstr(self.arg(1)), self.handle(), self.arg(4)
         self.w32(self.arg(0), h)
-        self.spawn(name or f"task{h:x}", self.arg(2), (self.arg(3),), stack=max(self.arg(4), 0x1000))
+        if self.rom:        # real sizes: the stack (bytes, whole words), then the 0x58-byte TCB
+            stack = self.chip_alloc(size & ~3)
+            self.chip_alloc(0x58)
+            self.spawn(name or f"task{h:x}", self.arg(2), (self.arg(3),), stack=size & ~3, base=stack)
+        else: self.spawn(name or f"task{h:x}", self.arg(2), (self.arg(3),), stack=max(size, 0x1000))
         return 1
 
     def rom_os_sched_start(self):
@@ -586,6 +681,7 @@ class Emu:
 
     def rom_os_msg_queue_create_intern(self):
         h = self.handle()
+        self.chip_alloc(0x50 + self.arg(1) * self.arg(2))     # Queue_t, then the items
         self.queues[h] = {"size": self.arg(2), "items": collections.deque()}
         self.w32(self.arg(0), h)
         return 1
@@ -611,6 +707,7 @@ class Emu:
 
     def rom_os_sem_create(self):
         h = self.handle()
+        self.chip_alloc(0x50)                           # a queue with no item storage
         self.sems[h] = self.arg(1)
         self.w32(self.arg(0), h)
         return 1
@@ -633,6 +730,7 @@ class Emu:
 
     # shortcut: tasks never preempt each other here, so a mutex can never be contended
     def rom_os_mutex_create(self):
+        self.chip_alloc(0x50)
         self.w32(self.arg(0), self.handle())
         return 1
     def rom_os_mutex_take(self): return 1
@@ -745,6 +843,12 @@ class Emu:
     def rom_btaon_fast_read_safe(self): return self.aon.get(self.arg(0), 0)
     def rom_btaon_fast_write_safe(self): self.aon[self.arg(0)] = self.arg(1)
     rom_btaon_fast_write = rom_btaon_fast_write_safe
+    def rom_btaon_fast_read_safe_8b(self): return self.aon.get(self.arg(0), 0) & 0xFF
+    def rom_btaon_fast_write_8b(self): self.aon[self.arg(0)] = self.arg(1) & 0xFF
+    rom_btaon_fast_write_safe_8b = rom_btaon_fast_write_8b
+    # the modelled kernel never preempts, so the real heap code's scheduler lock has nothing to do
+    def rom_vTaskSuspendAll(self): pass
+    def rom_xTaskResumeAll(self): return 0
     def rom_platform_random(self): return 0x1234 % (self.arg(0) or 1)
     def rom_SystemCall_Stack(self):
         """Bluetooth host gate. Only service registration is understood; every other call just returns success."""

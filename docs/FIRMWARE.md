@@ -274,6 +274,95 @@ boot hook skips a slot that already holds it). Residual risks: the hook code is 
 unreadable (during an erase or write) would lock the core up instead of reaching a ROM handler; and the chained handler
 sees live r0-r3 changed (stacked copies intact).
 
+## The ROM (FW16d)
+
+From the dump `emu/firmware/rom_rtl8762.bin` (FW16b; untracked) and Python one-offs (capstone, unicorn). Addresses are
+ROM unless they start `0x20` (RAM) or `0x8` (flash).
+
+**Dump vs. SDK symbols.** The symbol table (`rom_symbol_gcc.axf`) has 427 names: 369 code, 58 RAM. All 369 code
+symbols lie inside the dump (the last is `exit` 0x409B9), all odd (Thumb), 286 start with `push`, none on blank
+bytes. But the ROM does go on past 0x40A00: its `.data` initial values are copied from 0x42E6C..0x43F4C (0x10E0 bytes
+to RAM 0x2000E8), and the assert/log strings it passes are at 0x41xxx..0x42xxx. So the next dump should run to at
+least 0x44000. Until then the ROM's config defaults and RAM function pointers are unknown, and a full ROM boot cannot
+run (it calls through the pointer at 0x2000F0, which is zero without them).
+
+**RTOS.** FreeRTOS in ROM (`vTaskSwitchContext`, `xQueueGenericSend`, `xTimerCreate`, `pvPortMalloc`; Cortex-M0 port,
+`pxCurrentTCB` 0x201340), wrapped by Realtek's `os_*` / osif layer (0x13xxx). Every wrapper first calls an optional
+"patch" pointer in RAM (0x2015xx..0x20182C: for example `os_mem_alloc` 0x201614, `pvPortMalloc` 0x20173C, the HardFault
+dump 0x201694, the fault record 0x20182C, `WDG_SystemReset` 0x201574). They sit in the ROM's `.bss`, so they are zero
+unless the flash patch image sets them. That image is not dumped; read them with `A1 10` on the ring.
+Task = stack (`os_task_create` bytes, whole words) + 0x58-byte TCB; queue = 0x50 + items; semaphore / mutex = 0x50.
+Timers come from a fixed pool (free list 0x201480, counts `uxTimerCreateCount` 0x201474 / `uxTimerDeleteCount`
+0x201476; size from the ROM config). When the pool is empty, `xTimerCreate` logs and returns NULL; there is no assert.
+
+**Heap (FreeRTOS heap_4, one per RAM type).** `pvPortMalloc(type, size)` 0x113A2: header 8, 8-byte align, split if
+more than 16 bytes are left; block size in bits 0..27, bit 31 allocated, bits 28..30 the type. Words per type t:
+
+| Address | Meaning |
+|---|---|
+| `0x2014CC` | xBlockAllocatedBit (0x80000000) |
+| `0x2014D0 + 4t` | pxEnd[t] (0 = heap not started; first use starts it, 0x112FA, and clears it) |
+| `0x2014D8 + 4t` | xFreeBytesRemaining[t] |
+| `0x2014E0 + 4t` | xMinimumEverFreeBytesRemaining[t] |
+| `0x2014E8 + 4t` | total of heap t |
+| `0x2014F0 + 8t` | xStart[t] (next, size) |
+
+Type 0 (data) is `[0x200380] + [0x200384]` .. `+[0x200388]` = 0x20EC00 + 0x7400 (from the app's
+`update_ram_layout(0x7000, 0x7400, 0)`): total 0x73F8. Type 1 (buffer) is 0x280790 + `[0x20038C]`: on the ring, total
+0x3868, so it ends at 0x284000. So the ring's idle read `0x210, 0xE60, 0x1C0, 0xE60, 0x73F8, 0x3868` means: data heap
+528 free, 448 lowest ever, 29,688 total; buffer heap 3,680 free, 3,680 lowest ever, 14,440 total. The earlier reading
+was right; both totals match the computed layout.
+`os_mem_alloc(RAM_TYPE_DATA_ON = 0)` (0x13EBE) calls `pvPortMalloc_auto_type`: the data heap first, then the buffer
+heap. So the app's data allocations, task stacks and queues fail only when both are full. Type 1 asks only the buffer
+heap. A final failure calls 0x11124: log, then `vAssertHandler(file, 0x18D)`.
+
+**Asserts.** `vAssertHandler` 0x208 → 0x8CE0: when `0x200378` bit 5 is set, it disables interrupts, logs, dumps memory
+and spins at 0x8D38. Otherwise it returns and the caller goes on. The stock SystemInit sets the bit (`0x200378 |= 0x26`
+at 0x8246BE), so on this ring an assert (a full heap, a NULL timer handle, a queue misuse) hangs the chip with
+interrupts off. The phone sees silence, then a supervision timeout. Only a watchdog can restart it.
+
+**HardFault.** Vector 0x101: picks PSP or MSP from EXC_RETURN, pushes r4-r11 below MSP, jumps to 0x45BA with r3 = 1.
+0x45BA: patch hook 0x201694 if set; copies the frame; `LOGUARTDriverInit`; 0x7E5C saves a record to flash bank 8 only
+if flash exists and config `0x2003C7` bit 7 is set (the stock app does not set it; the ROM default is unknown). If
+logging is up, it logs "HardFault Err", then `hardfault_dump`, `os_task_status_dump`, `dump_raw_memory_all`. Then: if
+`0x2003C2` bit 1 is set, `WDG_SystemReset(3, 5)`; otherwise it spins at 0x4782 (watchdog only). The stock app does not
+touch that bit, so which of the two the ring does is unknown. Read byte 0x2003C2 with `A1 10`.
+
+**Software reset and the reset reason.** `WDG_SystemReset(mode, reason)` 0x29C → 0x129FC: patch hook 0x201574; if
+`0x20039B` bit 7 (set by the stock app at 0x8333E6) it calls `app_cb_wdg_reset` 0x201514 (FW16a's hook). Then it stores
+the reason in RAM byte 0x203157. For mode 1 or 2 it also writes `AON[0x15] = reason` (`btaon_fast_write_safe_8b`).
+Then `cpsid i`, optional log and dump (`0x20039A` bits 0 and 1; the app clears bit 0), an optional flash log of
+(time, pc) (`0x20039A` bit 2), and finally `WDG_Config(1, 0, mode)`, `WDG_Enable`, spin at 0x12B08: the watchdog does
+the reset. Mode names per the SDK: 1 all but AON, 3 all (the HardFault path uses 3).
+At boot (0x4E36): 0x12B2C sets `0x201510` (what `reset_reason_get` 0x12B70 returns). It is 0 if the RAM word at
+0x203154 lacks the magic 0x726574 in its low 3 bytes (RAM was lost: power-on). Otherwise it is `AON[0x15]`, or, if that
+is 0, RAM byte 0x203157. Then 0x12B54 writes the magic, RAM byte 1 and `AON[0x15] = 1`. Reading the code: **0** = cold
+start or RAM lost; **1** = a reset that did not go through `WDG_SystemReset` (a watchdog after a hang; or a mode-3 reset
+if mode 3 does not clear AON); **5** = a HardFault through the ROM handler (if mode 3 clears AON); anything else = the
+reason the app passed (0xD0, 0xD3 seen). The SDK's own comment says a watchdog timeout in "reset all" mode reads as
+"HW", so 0 and 1 may share one meaning; the ring will tell. Survives a reset: the RAM word 0x203154 (seen on the ring)
+and AON 0x15 (modes 1 and 2).
+
+**RAM cleared at boot (dumped ROM code only).** The reset handler 0x4EFF fills 0x203200..0x203380 with 0xA5 (stack
+watermark), copies `.data` to 0x2000E8..0x2011C8, clears `.bss` 0x2011C8..0x203154 (it stops exactly at the
+reset-reason word) and the vector table 0x200000..0x200070. Nothing in the dump touches 0x203158..0x203200 or app RAM
+(0x207C00 and up). The heap is cleared on first use (0x112FA). The ring's loss of the crash block at 0x20DD10 after
+`08` therefore comes from a boot stage outside the dump (the patch image, the upper stack, the rest of the ROM) or
+from RAM power.
+
+**The light restart, with the real heap (emulator, `test_rom_heap_holds_through_the_light_restart_scenario`).** The
+app's own code allocates one thing at run time: a 12-byte block (24 with header) from `malloc` 0x833408, called at
+0x82F41A and freed at 0x82F440, about 30 a second during a measurement (from `qc_app`, `hub` and the timer callbacks),
+at most one or two alive at once. It allocates nothing per notification: the stock send ring (128 slots at 0x209A32)
+is static. With the data heap taken down to the ring's idle 528, the full scenario (`69 01`, `A1 0A`, a link taking
+12 to 16 notifications a second with stalls of 1.2 to 2.5 s, the stock stop at 30.5 s, then 30 s idle) keeps it
+between 528 and 504, and the buffer heap is not touched. Timers are created at each measurement start and deleted at
+each stop (no leak over 4 measurements). Verdict: the heap words are what we thought and the margin is thin (448 bytes
+lowest ever), but the app cannot use it up. Running out needs data heap and buffer heap (3,680 free) together, and
+only code the emulator does not have (the Bluetooth host stack in flash, the controller) could do that. If it
+happened, the ROM asserts and hangs; the ring would go silent and come back only by a watchdog, reason 1
+(`test_rom_heap_exhaustion_hangs_until_the_watchdog`). Not shown: what the Bluetooth stack allocates per notification.
+
 FW6 leaves the accelerometer's registers as stock (versions 2 to 4 changed its click settings; on the ring the chip never reported a double click). Double taps are found in the samples at the end of each batch read: per sample, jolt = |dx| + |dy| + |dz| against the sample before, high bytes only (32 mg a step). A tap is a jolt of 640 mg or more after a sample below 480 mg; a second tap 3 to 8 samples (120 to 320 ms) after the first is a double tap. More than 4 samples in a row at 480 mg or more is movement and cancels. The numbers come from `emu/testdata/taps.csv`, a real recording: 22 double taps in it (2 of its 3 gentle ones, the firm ones, the rhythmic tapping), none while shaking, one while moving. Version 5 used 1280 mg and 640 mg and needed hard taps. Only while the ring samples: the tap that wakes a resting ring is not in the samples.
 
 ## Wear state (FW15a)

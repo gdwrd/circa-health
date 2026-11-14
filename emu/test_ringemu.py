@@ -5,7 +5,12 @@ Run: python -m pytest -q -p no:faulthandler test_ringemu.py
 """
 import collections, contextlib, io, struct
 
+import pytest
+
 import ringemu
+
+needs_rom = pytest.mark.skipif(not (ringemu.ROM_FILE and ringemu.ROM_FILE.exists()),
+                               reason="needs the ROM dump firmware/rom_rtl8762.bin (untracked; FW16b) and RINGEMU_NO_ROM unset")
 
 
 def test_real_time_heart_rate_tracks_fake_pulse():
@@ -168,8 +173,8 @@ def test_wearing_the_patched_ring_sends_no_taps():
 
 def light(on_ms, off_ms=None, leave_ms=None, credits=None, cmds=(), ms=44000):
     """Patched over Bluetooth, live heart rate from 11.5 s, a1 0a at on_ms -> (emu, a1 packets with times, queue reads).
-    credits: notifications the link takes per 500 ms from on_ms (default: all).  e.waiting: most packets ever waiting
-    in the firmware's send ring."""
+    credits: notifications the link takes per 500 ms from on_ms (default: all), or a function of the time giving it.
+    e.waiting: most packets ever waiting in the firmware's send ring."""
     import patch_fw
     ringemu.PULSE_BPM = 60
     e = ringemu.Emu(quiet_mem=True, trace=True)
@@ -177,7 +182,7 @@ def light(on_ms, off_ms=None, leave_ms=None, credits=None, cmds=(), ms=44000):
     stock_call, sent, e.waiting = e.rom_SystemCall_Stack, collections.Counter(), 0
     def slow_link():                                    # the stack refuses a notify once this interval's credits are used
         if credits and e.arg(0) == 0x3108 and e.now > on_ms and not e.services[e.arg(2) - 1]["uuid"].startswith(ringemu.OTA_UUID):
-            if sent[e.now // 500] >= credits:
+            if sent[e.now // 500] >= (credits(e.now) if callable(credits) else credits):
                 e.uc.mem_write(e.arg(7), bytes(1))
                 return 0
             sent[e.now // 500] += 1
@@ -272,7 +277,7 @@ def test_memory_read_answers_rom_ram_and_flash_and_refuses_the_rest():
     assert got[1][2:7] == bytes([4]) + struct.pack("<I", 0x82B7C5)          # RAM: the app's handler in slot 16
     hook = struct.unpack("<I", got[2][3:7])[0]                               # slot 3 holds the fault hook (appended code)
     assert got[2][2] == 4 and hook == e.r32(0x20000C) and len(ringemu.IMAGE.read_bytes()) < hook - 0x824000 + 0x50 < len(img)
-    assert got[3][2:7] == bytes([4]) + bytes.fromhex("70477047")           # the emulator's ROM filler
+    assert got[3][2:7] == bytes([4]) + bytes(e.uc.mem_read(0, 4))         # the ROM dump, or the emulator's filler
     assert all(n[2] == 0xFF and not any(n[3:15]) for n in got[4:])          # refused: past flash and RAM, peripherals, wrap, len 0 and 13
 
 
@@ -298,7 +303,7 @@ def test_crash_record_survives_the_restart():
     assert [n[2] for n in got] == list(range(6)) * 4 and all(sum(n[:15]) & 0xFF == n[15] for n in got)
     reads = [b"".join(n[3:15] for n in got[i:i + 6]) for i in range(0, 24, 6)]
     first, fault, cleared, reset = [struct.unpack("<18I", d) for d in reads]
-    assert first[0] == 1 and first[1] == ringemu.ROM_HARDFAULT | 1 and first[3] == 0     # boot 1, chains to the stock handler, no record
+    assert first[0] == 1 and first[1] == e.hardfault_vec and first[3] == 0     # boot 1, chains to the stock handler, no record
     w = fault[3:]
     assert fault[0] == 2 and w[:4] == (patch_fw.REC_MAGIC, 1, 1, 0x20F000)                # boot 2; a HardFault in boot 1
     assert w[4:8] == (0x11, 0x22, 0x33, 0x44) and w[10:12] == (0x10000000, 1 << 24) and w[12:14] == (0x215F00 - 32, 0xFFFFFFFD)
@@ -308,6 +313,8 @@ def test_crash_record_survives_the_restart():
     w = reset[3:]
     assert reset[0] == 3 and w[:3] == (patch_fw.REC_MAGIC, 2, 2)                          # a reset in boot 2
     assert [w[4], w[5]] == [int(x, 16) for x in wdg[16:-1].split(", ")[:2]] and "check ok" in ringprobe.decode(reads[3])
+    if e.rom:   # the ROM's own fault path (0x101 -> WDG_SystemReset(3, 5)) and reset reasons, word +12 of each read
+        assert [first[2], fault[2], reset[2]] == [0xD3, 5, 0xD3]           # end of the update, the fault, 08
 
 
 def on_and_off(image, reads, off_ms=605000, on_ms=750000):
@@ -381,3 +388,64 @@ def test_bluetooth_update_restores_stock_firmware(tmp_path):
     assert e.resets == 2 and e.ota["state"] == 5
     after = [n for n in e.notified if n[0] == 0xA1]
     assert after and not any(n[1] == 5 for n in after), after   # the stream runs, but at the stock 1-a-second rate
+
+
+def heap(e):
+    """(data free, data lowest-ever free, data total) from the ROM's heap words."""
+    w = struct.unpack("<6I", e.uc.mem_read(ringemu.HEAP_WORDS, 24))
+    return w[0], w[2], w[4]
+
+
+def leave_free(e, at_ms, free, buffer_free=None):
+    """At at_ms take the data heap down to `free` bytes (and the buffer heap to `buffer_free`), standing in for what
+    the ring's closed code holds."""
+    def fill():
+        e.call(e.sym("pvPortMalloc"), 0, heap(e)[0] - free - 8)
+        if buffer_free is not None:
+            e.call(e.sym("pvPortMalloc"), 1, 8)                     # the buffer heap starts on first use
+            e.call(e.sym("pvPortMalloc"), 1, e.r32(ringemu.HEAP_WORDS + 4) - buffer_free - 8)
+    e.hw["fill"] = {"at": at_ms, "interval": None, "fire": fill}
+
+
+@needs_rom
+def test_rom_heap_holds_through_the_light_restart_scenario():
+    # The ring (FW16b, idle): data heap 528 free of 29,688, lowest ever 448.  Here: 69 01, a1 0a, a link taking 12-16
+    # notifications a second with stalls of 1.2 to 2.5 s, the stock stop at 42 s, 30 s idle, from the ring's 528.
+    stalls = ((20000, 21500), (27000, 29000), (35000, 36200), (40500, 43000))
+    credits = lambda now: 0 if any(a <= now < b for a, b in stalls) else 6 + now // 500 % 3
+    seen, lowest = [], {}
+    orig_boot = ringemu.Emu.boot
+    def boot(e):
+        leave_free(e, 11400, 528)
+        e.hw["heap"] = {"at": 11500, "interval": 250, "fire": lambda: seen.append(heap(e))}
+        seen.clear()
+        orig_boot(e)
+    try:
+        ringemu.Emu.boot = boot
+        e, tx, reads = light(12000, credits=credits, ms=72000)
+    finally:
+        ringemu.Emu.boot = orig_boot
+    assert seen[0][2] == 0x73F8                                            # same total as the ring
+    assert sum(n[1] == 0x0C for t, n in tx) > 200                          # the stream ran
+    assert all(f == 528 for f, low, tot in seen[-40:])                     # back to idle after the stop
+    assert min(low for f, low, tot in seen) >= 528 - 48                    # the app holds at most two 24-byte blocks
+    assert not any(ev["kind"] == "heap" or "HANG" in ev["text"] for ev in e.trace)
+
+
+@needs_rom
+def test_rom_heap_exhaustion_hangs_until_the_watchdog():
+    # What the ROM does when an allocation fails: os_mem_alloc(data) tries the data heap, then the buffer heap; when
+    # both are full, 0x11124 -> vAssertHandler, which the stock SystemInit turned on (0x200378 |= 0x26): interrupts
+    # off, spin.  The chip goes silent; only a watchdog restarts it.
+    e = ringemu.Emu(quiet_mem=True, trace=True)
+    e.command(3000, bytes([0x69, 0x01]))
+    leave_free(e, 2900, 0, 0)                           # the app's 12-byte blocks need 24
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(12000)
+    fail = next(ev["t"] for ev in e.trace if ev["kind"] == "heap")
+    hang = next(ev["t"] for ev in e.trace if ev["text"].startswith("HANG (ROM assert)"))
+    reset = next(ev["t"] for ev in e.trace if ev["text"].startswith("CHIP RESET #2"))
+    assert 3000 <= fail == hang and reset == hang + ringemu.WDG_TIMEOUT_MS
+    assert not any(ev["kind"] == "ble_tx" and hang < ev["t"] < reset for ev in e.trace)    # silent while hung
+    assert e.call(e.sym("reset_reason_get")) == 1       # no WDG_SystemReset: the default the ROM set at boot
