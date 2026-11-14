@@ -11,6 +11,69 @@ import ringemu
 
 needs_rom = pytest.mark.skipif(not (ringemu.ROM_FILE and ringemu.ROM_FILE.exists()),
                                reason="needs the ROM dump firmware/rom_rtl8762.bin (untracked; FW16b) and RINGEMU_NO_ROM unset")
+model_kernel = pytest.mark.skipif(ringemu.KERNEL == "real", reason="drives the modelled scheduler's tasks directly")
+
+
+@needs_rom
+@pytest.mark.parametrize("psp", [0x23CF00, 0x23CEFC])         # 8-byte aligned, and one word off (frame padded, xPSR bit 9)
+def test_exception_layer_masks_takes_and_returns(psp):
+    # Thread on PSP: enable IRQ 5, pend it with interrupts off, record the count, set Z, cpsie, then beq uses Z.
+    # Handler on MSP: count, record its sp, clobber r0, return.  Hand-assembled Thumb (no assembler installed).
+    e = ringemu.Emu(quiet_mem=True, kernel="real")
+    b, flag = 0x23D000, 0x23D080
+    code = [0x2001, 0x2102, 0x2203, 0x2304, 0x4C0C, 0x2520, 0x6025, 0xB672, 0x4C0B, 0x6025, 0x4E0B, 0x6837, 0x6077,
+            0x4280, 0xB662, 0xD000, 0xE7FE, 0x6837, 0x60B7, 0xE7FE,                     # thread; 0x20 bad, 0x26 ok
+            0xB4C0, 0x4E06, 0x6837, 0x3701, 0x6037, 0x466F, 0x60F7, 0x2063, 0xBCC0, 0x4770]  # handler at 0x28
+    e.uc.mem_write(b, struct.pack(f"<{len(code)}H3I", *code, ringemu.SCS + 0x100, ringemu.SCS + 0x200, flag))
+    e.w32(0x200000 + 4 * (16 + 5), b + 0x28 | 1)
+    e.uc.reg_write(ringemu.UC_ARM_REG_PSP, psp)
+    e.uc.reg_write(ringemu.UC_ARM_REG_CONTROL, 2)
+    e.uc.reg_write(ringemu.UC_ARM_REG_PC, b)
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(2)
+    count, before, after, handler_sp = struct.unpack("<4I", e.uc.mem_read(flag, 16))
+    assert (count, before, after) == (1, 0, 1)                      # not while masked; once, right at cpsie
+    assert handler_sp == 0x203800 - 8                                # on MSP, below its two pushed registers
+    assert e.r(ringemu.UC_ARM_REG_PC) == b + 0x26                    # beq saw Z again: flags came back
+    assert [e.r(r) for r in ringemu.REGS[:4]] == [1, 2, 3, 4]        # r0 restored from the frame
+    assert e.r(ringemu.UC_ARM_REG_SP) == psp and e.r(ringemu.UC_ARM_REG_IPSR) == 0 and not e.exc_active
+    assert e.stats["exception 21"] == 1
+
+
+@needs_rom
+def test_real_kernel_runs_the_measurement():
+    # The ROM's FreeRTOS schedules the app: SysTick from the 32 kHz reference at 100 Hz, PendSV switches, TIM5 through
+    # the ROM's Timer4/5 dispatcher every 2 s feeding the app's watchdog kick; the pulse comes out as with the model.
+    ringemu.PULSE_BPM = 60
+    e = ringemu.Emu(quiet_mem=True, kernel="real")
+    e.command(3000, bytes([0x69, 0x01]))
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(30000)
+    readings = [n[3] for n in e.notified if n[0] == 0x69 and n[3]]
+    assert readings and all(abs(r - 60) <= 2 for r in readings), readings
+    assert 2700 <= e.stats["exception 15"] <= 3000 and e.stats["exception 14"] > 100 and e.stats["exception 24"] >= 14
+    assert e.resets == 1 and e.sched_started                       # only the first-boot config write
+
+
+@needs_rom
+@pytest.mark.parametrize("erase_ms, restarts", [(300, False), (4500, True)])
+def test_real_kernel_watchdog_ends_a_long_interrupts_off_window(erase_ms, restarts):
+    # A flash erase holds interrupts off (ROM flash lock): the TIM5 kick waits.  4 s without a kick resets the chip
+    # and the latch holds where it was.  A real 4 KB erase (tens to a few hundred ms) stays well inside.
+    e = ringemu.Emu(quiet_mem=True, trace=True, kernel="real")
+    e.hw["erase"] = {"at": 5000, "interval": None, "fire": lambda: setattr(e, "flash_erase_ms", erase_ms)}
+    e.hw["dirty"] = {"at": 80000, "interval": None, "fire": lambda: e.uc.mem_write(0x8780E0, bytes(0x20))}    # slot rewrite: erase
+    e.command(5500, bytes.fromhex("01250120060400") + b"\x01")
+    e.command(5700, bytes.fromhex("16020105"))
+    import cmdmap
+    e.hw["rtc"] = {"at": 65500, "interval": 60000, "fire": cmdmap.minute_tick(e), "keep": True}
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(100000)
+    fired = [ev for ev in e.trace if ev["text"].startswith("WATCHDOG")]
+    assert any(ev["text"].startswith("flash erase 0x878000") for ev in e.trace)
+    assert bool(fired) == restarts and e.resets == 1 + restarts
 
 
 def test_real_time_heart_rate_tracks_fake_pulse():
@@ -311,6 +374,7 @@ def test_aon_read_answers_the_registers_and_refuses_the_rest(tmp_path):
     assert pc == 0x12B08                                # its WDG_SystemReset spin, latched and kept through the boot
 
 
+@model_kernel
 def test_crash_record_survives_the_restart():
     import patch_fw, ringprobe
     e = ringemu.Emu(quiet_mem=True, trace=True)
@@ -383,6 +447,7 @@ def on_and_off(image, reads, off_ms=605000, on_ms=750000):
     return e
 
 
+@pytest.mark.skipif(ringemu.KERNEL == "real", reason="compares a stock and a patched run byte for byte; under the real kernel the patch's extra cycles move the samples")
 def test_wear_state_and_when_it_changed():
     import patch_fw
     ringemu.PULSE_BPM = 60
@@ -476,7 +541,7 @@ def test_rom_heap_exhaustion_hangs_until_the_watchdog():
     fail = next(ev["t"] for ev in e.trace if ev["kind"] == "heap")
     hang = next(ev["t"] for ev in e.trace if ev["text"].startswith("HANG (ROM assert)"))
     reset = next(ev["t"] for ev in e.trace if ev["text"].startswith("CHIP RESET #2"))
-    assert 3000 <= fail == hang and reset == hang + ringemu.WDG_TIMEOUT_MS
+    assert 3000 <= fail == hang and hang < reset <= hang + ringemu.WDG_TIMEOUT_MS     # 4 s after the last kick (real kernel: before the hang)
     assert not any(ev["kind"] == "ble_tx" and hang < ev["t"] < reset for ev in e.trace)    # silent while hung
     assert e.call(e.sym("reset_reason_get")) == 1       # no WDG_SystemReset: the default the ROM set at boot
 
@@ -497,7 +562,7 @@ def test_rom_watchdog_latch_shows_the_hang_after_the_restart(tmp_path):
     with contextlib.redirect_stdout(io.StringIO()):
         e.run(11000)
     hang = next(ev["t"] for ev in e.trace if ev["text"].startswith("HANG (ROM assert)"))
-    assert e.resets == 2 and next(ev["t"] for ev in e.trace if ev["text"].startswith("CHIP RESET #2")) == hang + ringemu.WDG_TIMEOUT_MS
+    assert e.resets == 2 and hang < next(ev["t"] for ev in e.trace if ev["text"].startswith("CHIP RESET #2")) <= hang + ringemu.WDG_TIMEOUT_MS
     assert not any(ev["text"].startswith("WDG_Config(0x1, 0x0, 0x0") and ev["t"] > hang for ev in e.trace)   # no self-test
     got = [n for n in e.notified if n[:2] == bytes([0xA1, 0x12])]
     v = {}

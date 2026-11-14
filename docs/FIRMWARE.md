@@ -402,8 +402,10 @@ written in an earlier epoch: erase plus 4 KB rewrite, with interrupts off, while
 **Watchdog (code, settles the earlier disagreement).** The ROM boot (`0xE268`) enables it when OTP byte `0x20037A`
 bit 4 is set: `WDG_Config(div = [0x200379], limit = [0x20037A] & 0xF, mode = [0x20037A] >> 6)`. The app's SystemInit
 sets `0x200379 = 0x1F` and `0x20037A |= 0xDF`: on, divider 31, limit 15, mode 3 (RESET_ALL): the SDK's "4 s, reset
-all". It is kicked from the ROM idle hook (`0x1111E`) and on task switches (`0xFACA`), both gated by `0x20037A` bit 5
-(set), and by the app on message type `0x19` (`0x82990A`). The `WDG_Disable` at `0x833402` is the SDK's HCI-mode
+all". **Correction (FW16d part 2):** the ROM idle hook (`0x1111E`) and the task switch (`0xFACA`) kick only when
+`0x20037A` bit 5 is set, and `0xDF` (the ring reads `DF`) has bit 5 clear: they never kick. The only kick is the app
+task handling message `0x19` (`0x82990A`), which the TIM5 interrupt posts every 2 s (Timer4_5 line, ROM dispatcher
+`0x47E8`). So the app task must reach its queue at least every ~4 s, or the chip resets. The `WDG_Disable` at `0x833402` is the SDK's HCI-mode
 branch (`OTP->stack_en` clear), not taken in normal use. `print_reset_reason` (`0x82450A`) fires the watchdog in
 interrupt mode for 1 ms only when the latched lr (AON `0x1C4`/`0x1C6`) is 0, then restores `WDG_CTL`; the watchdog
 stays on. So a hang of about 4 s with interrupts off (an assert spin, `0x8D38`) or with the idle task starved resets the
@@ -495,6 +497,78 @@ overwrites the latch with where the CPU was:
 | Power loss, brown-out | the cold boot's self-test: inside the ROM delay `print_reset_reason` waits in (SDK: lr `0x7BB5` on A-cut) | 0 |
 
 The emulator models this (`Emu.latch`; `test_rom_watchdog_latch_shows_the_hang_after_the_restart`).
+
+## Real kernel, real boot and component inventory (FW16d part 2)
+
+From the complete ROM dump (`0..0x43F4C`), the ring's flash dump (`emu/firmware/flash_ring.bin`, partial while this
+was written: 0x800000..~0x83D000), SDK headers, Python one-offs and the emulator's new real-kernel mode
+(`RINGEMU_KERNEL=real`, `emu/README.md`).
+
+**Versions.** ROM: the boot log says `Bee3 ROM version: Jun  4 2021 16:47:30` (Bee3 = RTL8762E). App SDK: the app logs
+`sdk lib version: 1.2.0.7, commit ID: c6e7bc3e`. Image headers in flash (SDK `T_IMG_HEADER_FORMAT`, version =
+major.minor.revision of the image sub-version, then the git commit and branch):
+
+| Flash | Image (id) | Payload | Runs at | Version, commit |
+|---|---|---|---|---|
+| `0x801000` | SCCD (`0x278D`), the chip config | 340 B | - | - |
+| `0x802000` | OTA header (`0x2790`) | header only, mostly erased | - | - |
+| `0x803000` | ROM patch (`0x2792`) | 38,184 B | RAM `0x203800` (0x3510 B loaded from flash `0x809404`) + flash | 1.0.191, `02423699` "release" |
+| `0x80D000` | secure boot (`0x2791`) | 528 B | RAM `0x214000` | 1.1.0, `dea0248d` |
+| `0x80E000` | upper stack (`0x279A`), `UpperStackTask` | 82,312 B (to `0x822588`) | flash `0x80E400` | 1.0.67 ("1.0.(66 + 1).0"), `d6aa7850` "a00" |
+| `0x824000` | app (`0x2793`) | 113,060 B | flash `0x824400` | header 1.4.1, `1201a39e` "sdk" (Colmi 3.00.33) |
+
+The rest of the map (FTL, the HR log at `0x878000`, OTA temp) is as in "Flash regions" above; the app does not use the
+SDK default addresses (app at `0x824000`, not `0x832000`).
+
+**What the ROM patch overrides (code, approximate).** The patch's code refers to 14 of the ROM's RAM hook pointers,
+among them `WDG_SystemReset` (`0x201574`), `pvPortMalloc` (`0x20173C`), `os_timer_create` (`0x201644`) and the flash
+erase / write / ioctl hooks (`0x201794`..`0x2017F8`); others at `0x20153C`, `0x2015FC`, `0x201684`..`0x201690`,
+`0x2016A8`. Names come from the nearest named ROM function before each literal. So on the ring the heap, timer
+creation, flash erase/write and the software reset may run patched code that the emulator does not run.
+
+**Tasks (real kernel run, `uxTaskGetSystemState`; stack = bytes; lowest free after a 40 s measurement).** `IDLE` prio 0
+(888 free); `qc_app` prio 1, 3,584 B (2,976 free); `app` prio 2, 1,024 B (784 free); `hub` prio 2, 2,560 B (2,128 free);
+`Tmr Svc` prio 6 = the top (616 free). The upper stack's `UpperStackTask` (in its image) is not run; the emulator's
+stand-in `bt_model` has prio 6 (a guess). FreeRTOS tick: SysTick from the 32 kHz reference, LOAD 319, 100 Hz
+(`0x200484` = 100, `0x2003C8` = 32000). CPU clock `SystemCpuClock` = 40,000,000.
+
+**Timers (app, `os_timer_create`).** `m_ble_packet_timer_id` 2 s reload, `m_ota_write_flag_id` 2 s one-shot,
+`gsensor_read_timer_id` 2 s reload, `gsensor_shake_flag_timer_id` 2 s one-shot, `qc_timer_restart` 40 ms reload,
+`m_heart_rate_timer_id` 500 ms reload, `app_ring_sport_data_id` 1 s reload, `sports_mode_timer` 2 s reload, plus the
+measurement timers of FW16b (400 ms, 320 ms drain, 40 ms, the 1 s scheduled-measurement tick). After a 40 s
+measurement the ROM pool counts read 13 created, 4 deleted. Hardware timers: TIM5 every 2 s (the watchdog kick).
+
+**I2C devices (I2C0, from the emulator's bus log; chip IDs are what the firmware checks, not values read from a
+ring).** `0x44` optical / heart-rate chip: register `0x00` must read with bits `0x27` set; registers `0x01..0x5D`,
+the light queue at `0x40`/`0x41` (README of the public repo names a VCare VC30F for an older model; not confirmed
+here). `0x19` accelerometer: WHO_AM_I `0x0F` is read (LIS3DH-style map: `0x20..0x24`, FIFO `0x2E/0x2F`, click
+`0x38..0x3C`). `0x07` a third device, registers `0x00..0x0A`, `0x0A` must read with bits `0xE0` (likely the charger /
+fuel gauge; not identified). No other I2C or SPI device is addressed in these runs.
+
+**The real ROM boot (reset vector `0x4EFF`, `emu/rombootprobe.py` stubs).** With six register stubs, each read off the
+loop that polls it, the ROM's own reset path runs: AON wake check, `.data`/`.bss`, the image checks ("Images Error
+Code" list), `os_init`, the log UART (its text is captured), the ROM version line, `RamVectorTableInit`,
+`os_timer_init`, 32 kHz calibration, baseband writes; it stops in the Bluetooth MAC / radio bring-up (`0x40051xxx`,
+`btmac_pm_*`, `rtk_write_modem_radio_reg`), which hands over to radio hardware through an indirect port at every step.
+That is the boundary: past it every stub would be a guess at the radio. The patch image's entry and the hand-over
+to the app (`SystemInit` at `0x824400`) are not reached.
+
+**Watchdog (code, settled).** The kick is the app's message `0x19` only (see the correction above).
+
+**Sweep of the restart scenario under the real kernel (`emu/sweep.py`, 320 runs, seeds 0..239 and 1000..1079).** Per
+run: patched image; clock 06:04:00, HR log every 5 min, so a scheduled measurement ends at ~77 s with its log write and
+`73 01`; `69 01` timed so its 30.5 s stop falls within +-4 s of that; `A1 0A` 0.3..3 s later; link 12..16
+notifications/s with random 1.2..2.5 s stalls; flash erase 20..300 ms with interrupts off; in 165 runs the log slot was
+dirty, so the write erased the sector (it did in all 165); 30 s idle; then `03` must be answered. Seeds 1000+ also take
+the data heap down to the ring's 528 free bytes first and record the watchdog kick gap. **Nothing found:** no reset
+beyond the first-boot one, no watchdog, assert, HardFault or lockup, no dropped queue post, timer pool stable, the
+command path alive in every run; data heap lowest 504; largest kick gap 2,038 ms (limit 4,000). What this covers: the
+app's own code under the real FreeRTOS (priorities, preemption, tick, timer task and pool, queues), interrupts-off
+flash windows, the watchdog, the heap at the ring's level. What it cannot cover (still models): the Bluetooth upper
+stack (`UpperStackTask`, its heap use and its blocking on the controller) and the controller/radio, the ROM patch's
+replacements of `pvPortMalloc`, `os_timer_create`, flash erase/write and `WDG_SystemReset`, DLPS actually sleeping,
+the supply (brown-out), and real instruction timing (one cycle per 16-bit instruction). So the cause is most likely
+in one of those: next, run the patch image's hooks and the upper stack for real.
 
 ## Wear state (FW15a)
 

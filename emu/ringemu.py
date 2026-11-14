@@ -2,9 +2,10 @@
 
 Without firmware/rom_rtl8762.bin (or with RINGEMU_NO_ROM=1) the ROM never executes: every ROM function the app
 calls is replaced by a Python stand-in looked up by name in the SDK symbol table.  With the dump, the functions in
-ROM_REAL (heap, libc helpers, reset and fault paths) run from it; the kernel, Bluetooth, flash, logging and the
-hardware stay stand-ins (see README).  Every peripheral register access is logged.  Sensors, the phone and
-interrupts are faked.
+ROM_REAL (heap, libc helpers, reset and fault paths) run from it; Bluetooth, flash, logging and the hardware stay
+stand-ins (see README).  The kernel is a Python model unless RINGEMU_KERNEL=real (ROM needed): then the ROM's
+FreeRTOS runs on a Cortex-M0+ exception layer (SysTick, PendSV, NVIC) with time from executed instructions.
+Every peripheral register access is logged.  Sensors, the phone and interrupts are faked.
 
   python ringemu.py --ms 5000                      boot only
   python ringemu.py --ms 9000 --pin 3000:22        accelerometer interrupt at 3 s: motion sampling starts
@@ -17,7 +18,7 @@ Add --quiet-mem to hide raw register lines, --trace trace.js to record the run f
 """
 import argparse, bisect, collections, hashlib, json, math, os, re, struct, sys
 from pathlib import Path
-from unicorn import Uc, UcError, UC_ARCH_ARM, UC_MODE_THUMB, UC_HOOK_CODE, \
+from unicorn import Uc, UcError, UC_ARCH_ARM, UC_MODE_THUMB, UC_HOOK_CODE, UC_HOOK_BLOCK, UC_HOOK_INTR, \
     UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_MEM_WRITE
 from unicorn.arm_const import *
 
@@ -47,6 +48,19 @@ ROM_REAL = {"__aeabi_memcpy", "__aeabi_memcpy4", "__aeabi_memcpy8", "__rt_memcpy
             "os_mem_aligned_free", "os_mem_peek", "pvPortMalloc", "pvPortMalloc_auto_type", "vPortFree",
             "xPortGetFreeHeapSize", "xPortGetMinimumEverFreeHeapSize", "update_ram_layout", "reset_reason_get",
             "WDG_SystemReset", "vAssertHandler"}
+# Kernel mode.  "model": tasks, queues, timers and delays are Python stand-ins (round robin, no preemption).
+# "real" (needs the ROM): the ROM's FreeRTOS and its osif wrappers run, on the exception layer below (SysTick,
+# PendSV, NVIC); the app's tasks run under the real scheduler.
+KERNEL = os.environ.get("RINGEMU_KERNEL", "model")
+KERNEL_ROM = ((0xE884, 0x115D2), (0x12C30, 0x14000))   # FreeRTOS lists..heap, osif; real in the real-kernel mode
+ROM_DATA = (0x42E6C, 0x2000E8, 0x10E0)      # the reset handler's .data copy (0x8D52): ROM source, RAM, length
+ROM_BSS = (0x2011C8, 0x1F8C)                # and its .bss clear; it stops at the reset-reason word 0x203154
+SCS = 0xE000E000                            # Cortex-M system control space: SysTick, NVIC, SCB
+EXC_PAGE = 0xFFFFF000                       # mapped so that a branch to EXC_RETURN (0xFFFFFFF1/9/D) is caught
+BT_STUB, BT_DONE = 0x23E000, 0xFFF40        # real-kernel mode: code of the Bluetooth-stack stand-in task; its "done" call
+BOOT_NEXT = 0xFFF50                         # real-kernel mode: fake return address between the app's boot entries
+# Flash timing with interrupts off (the ROM's flash lock): typical SPI NOR figures, not measured on this ring
+FLASH_ERASE_MS, FLASH_PAGE_MS = 45, 0.7     # 4 KB sector erase; one 256-byte page program
 # Endless loops in the ROM, where the chip waits for its watchdog: name -> address
 ROM_SPINS = {"wdg_reset_spin": 0x12B08,     # end of WDG_SystemReset: watchdog armed with a tiny timeout, reset follows
              "assert_spin": 0x8D38,         # vAssertHandler with asserts on: interrupts off, waits forever
@@ -61,6 +75,7 @@ CPU_HZ = 40_000_000  # assumption: timers run from the 40 MHz system clock
 RTC_REGS = {0x00: "CR0", 0x04: "INT_CLR", 0x08: "INT_SR", 0x0C: "PRESCALER", 0x10: "COMP0", 0x14: "COMP1",
             0x18: "COMP2", 0x1C: "COMP3", 0x38: "PRE_COMP", 0x3C: "BACKUP"}
 TIMER_VEC = {"TIM2": 20, "TIM3": 19, "TIM4": 48, "TIM5": 49}          # RAM vector table slots
+SHARED_VEC = {48: 24, 49: 24}   # second-level slots -> their NVIC line (Timer4_5_IRQn 8); ROM 0x47E8 reads each timer's status
 # chip-ID bits the firmware checks before it will use a device: (i2c address, register) -> bits always read as set
 OTA_UUID = "de5bf728"                        # Colmi firmware-update service
 ID_BITS = {(0x44, 0x00): 0x27, (0x07, 0x0A): 0xE0}
@@ -78,7 +93,8 @@ QUIET = {"__aeabi_memcpy", "__aeabi_memcpy4", "__aeabi_memclr", "__aeabi_memclr4
          "memcmp", "strlen", "os_mutex_take", "os_mutex_give", "trace_string", "trace_bdaddr",
          "os_mem_alloc_intern", "os_mem_zalloc_intern", "os_mem_free", "log_buffer", "log_direct",
          "platform_delay_us", "WDG_Restart", "btaon_fast_read_safe", "btaon_fast_write_safe", "btaon_fast_write",
-         "vTaskSuspendAll", "xTaskResumeAll", "btaon_fast_read_safe_8b", "btaon_fast_write_8b", "btaon_fast_write_safe_8b"}
+         "vTaskSuspendAll", "xTaskResumeAll", "btaon_fast_read_safe_8b", "btaon_fast_write_8b", "btaon_fast_write_safe_8b",
+         "bt_done", "boot_next"}
 # guess: SDK default flash map; this ring's real map is unknown apart from the app address
 FLASH_BANKS = {0: (0x801000, 0x1000), 1: (0x802000, 0x55000), 3: (0x85B000, 0x25000), 6: (0x857000, 0x4000)}
 
@@ -89,15 +105,24 @@ class Task:
 
 
 class Emu:
-    def __init__(self, quiet_mem=False, trace=False, image=IMAGE, rom=ROM_FILE):
+    def __init__(self, quiet_mem=False, trace=False, image=IMAGE, rom=ROM_FILE, kernel=None):
         self.quiet_mem = quiet_mem
         self.rom = Path(rom).read_bytes() if rom and Path(rom).exists() else None
+        self.kernel = kernel or KERNEL
+        assert self.kernel in ("model", "real"), self.kernel
+        if self.kernel == "real" and not self.rom:
+            raise RuntimeError("the real kernel runs from the ROM dump: firmware/rom_rtl8762.bin missing or RINGEMU_NO_ROM set")
+        self.real = self.kernel == "real"
         self.trace = [] if trace else None
         self.syms = {}
         for n, v in re.findall(r"(\w+)\s*=\s*(0x[0-9a-fA-F]+)", (SDK / "rom_symbol_gcc.axf").read_text()):
             self.syms.setdefault(int(v, 16) & ~1, n)
-        real = {int(v, 16) & ~1 for n, v in re.findall(r"(\w+)\s*=\s*(0x[0-9a-fA-F]+)", (SDK / "rom_symbol_gcc.axf").read_text()) if n in ROM_REAL}
-        self.syms.update({DELAY_US: "platform_delay_us", DELAY_MS: "platform_delay_ms", ROM_HARDFAULT: "HardFault_Handler", CALL_RET: "call_ret"})
+        real = {a for a, n in self.syms.items() if n in ROM_REAL}
+        if self.real:
+            real |= {a for a, n in self.syms.items() if any(lo <= a < hi for lo, hi in KERNEL_ROM)
+                     or n in ("RamVectorTableInit", "RamVectorTableUpdate", "ulSetInterruptMaskFromISR", "vClearInterruptMaskFromISR")}
+        self.syms.update({DELAY_US: "platform_delay_us", DELAY_MS: "platform_delay_ms", ROM_HARDFAULT: "HardFault_Handler",
+                          CALL_RET: "call_ret", BT_DONE: "bt_done", BOOT_NEXT: "boot_next"})
         if self.rom:
             self.syms.update({a: n for n, a in ROM_SPINS.items()})
             # ROM addresses where execution stops for a stand-in: every named entry not in ROM_REAL, and the spins
@@ -128,7 +153,17 @@ class Emu:
         uc.mem_write(0x801400, struct.pack("<IH", 0x8721BEE2, len(mac_item)) + mac_item)
         uc.mem_map(0x40000000, 0x100000)
         uc.mem_map(0xE0000000, 0x100000)
-        uc.hook_add(UC_HOOK_CODE, self.on_rom, begin=0, end=0xFFFFF)
+        if self.real:       # a hook per stop address: the kernel's ROM code runs at full speed in between
+            for a in self.stops | {0x29C, 0x208, 0x11124}: uc.hook_add(UC_HOOK_CODE, self.on_rom, begin=a, end=a)
+            uc.hook_add(UC_HOOK_CODE, self.on_rom, begin=len(self.rom), end=0xFFFFF)
+            uc.mem_map(EXC_PAGE, 0x1000)
+            uc.hook_add(UC_HOOK_BLOCK, self.on_block)
+            uc.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, self.on_scs, begin=SCS, end=SCS + 0xFFF)
+            uc.hook_add(UC_HOOK_INTR, self.on_intr)
+            for a, name in self.syms.items():      # the osif calls show in the log as the stand-ins' calls do
+                if name.startswith("os_") and 0x12C30 <= a < 0x14000 and name not in QUIET:
+                    uc.hook_add(UC_HOOK_CODE, lambda uc, addr, s, _: self.ev(f"{self.syms[addr]}({', '.join(f'{self.arg(i):#x}' for i in range(4))})", "rom", name=self.syms[addr]), begin=a, end=a)
+        else: uc.hook_add(UC_HOOK_CODE, self.on_rom, begin=0, end=0xFFFFF)
         uc.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, self.on_mmio, begin=0x40000000, end=0x400FFFFF)
         uc.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, self.on_rom_ram, begin=0x200000, end=APP_GLOBALS - 1)
 
@@ -147,19 +182,39 @@ class Emu:
         self.services, self.connected, self.subscribed, self.notified = [], False, set(), []
         self.ota, self.ota_writes, self.ota_chunk = None, 0, 200     # phone-side state of a firmware update in progress
         self.gpio_int = 0           # latched GPIO interrupt bits
+        self.tim_int = set()        # timers with an interrupt waiting (status register 0x10)
         self.bus, self.pending = {}, None    # fake I2C/SPI buses and the one with an unprinted transfer
         self.app_ram, self.seen_rom_ram = set(), set()
         self.last, self.repeat = None, 0
         self.sched_started = False
         self.stats = collections.Counter()
         self.resets = 0
+        self.cyc, self.wdg_kick, self.in_call = 0, 0, 0     # real kernel: CPU cycles so far; last watchdog kick (ms)
+        self.exc_reset()
         self.rom_ram_init()
 
     def rom_ram_init(self):
         """What the real ROM leaves in its own RAM before it starts the app."""
+        if self.real:       # the reset handler's own steps (0x8D52, 0x8D74): .data, .bss, RAM vector table
+            src, dst, n = ROM_DATA
+            self.uc.mem_write(dst, self.rom[src:src + n])
+            self.uc.mem_write(ROM_BSS[0], bytes(ROM_BSS[1]))
+            self.uc.mem_write(0x200000, self.rom[0x42D84:0x42D84 + 0xE8])
+            self.w32(SCS + 0xD08, 0x200000)             # VTOR, as RamVectorTableInit(0x200000) sets it
+            self.w32(0x2011CC, 0x200000)                # and the table address RamVectorTableUpdate uses
+            self.app_ram.update(range(0x2000E8, 0x203158))
         self.w32(self.sym("platform_delay_us"), DELAY_US | 1)
         self.w32(self.sym("platform_delay_ms"), DELAY_MS | 1)
-        self.preset(0x2002DC, bytes([1]))   # OTP->stack_en bit; SystemInit returns at once without it
+        self.preset(0x2002DC, bytes([self.uc.mem_read(0x2002DC, 1)[0] | 1]))   # OTP->stack_en; SystemInit returns at once without it
+        if self.real:       # 0x2003C2 keeps the ROM default 0x28 (the ring reads the same): a HardFault spins
+            # The RAM layout the app's SystemInit sets again (update_ram_layout(0x7000, 0x7400)); on the ring the ROM
+            # has it from the flash config before os_init allocates (the ring's heap total 0x73F8 agrees).
+            self.uc.mem_write(0x200384, struct.pack("<2I", 0x7000, 0x7400))
+            self.call(0x12B2D)
+            self.call(0x12B55)
+            self.call(self.sym("os_init"))
+            self.call(self.sym("os_timer_init"))
+            return
         self.preset(0x20000C, struct.pack("<I", self.hardfault_vec))    # the ROM's vector table copy: its HardFault handler
         if not self.rom: return
         # The ROM's .data image (0x2000E8..0x2011C8, from ROM 0x42E6C) lies past the dump, so its config defaults are
@@ -190,8 +245,10 @@ class Emu:
         self.heap, self.free, self.sizes = HEAP, collections.defaultdict(list), {}
         self.queues, self.sems, self.timers = {}, {}, {}
         self.hw = {k: h for k, h in self.hw.items() if h["interval"] is None or h.get("keep")}    # keep outside events, drop chip timers
-        self.gpio_int, self.app_ram = 0, set()
+        self.gpio_int, self.app_ram, self.tim_int = 0, set(), set()
         self.services, self.connected, self.subscribed = [], False, set()         # the phone's link drops
+        self.exc_reset()
+        self.wdg_kick = self.now
         self.rom_ram_init()
         self.boot()
 
@@ -215,6 +272,13 @@ class Emu:
     def boot(self):
         """Queue the ROM's boot order for an app image: SystemInit, then the two hooks SystemInit registered."""
         ptr = lambda name: self.r32(self.sym(name))
+        if self.real:       # one CPU on the ROM's stack (MSP), thread mode; app_main starts the scheduler and never returns
+            self.bt_task()
+            self.boot_chain = [lambda: APP_BASE + 0x400 | 1, lambda: ptr("app_pre_main"), lambda: ptr("app_main")]
+            self.uc.reg_write(UC_ARM_REG_SP, 0x203800)
+            self.uc.reg_write(UC_ARM_REG_LR, BOOT_NEXT | 1)
+            self.uc.reg_write(UC_ARM_REG_PC, BOOT_NEXT)
+            return
         self.spawn("boot", APP_BASE + 0x400 | 1, on_exit=lambda: self.spawn(
             "boot", ptr("app_pre_main"), on_exit=lambda: self.spawn("boot", ptr("app_main"))))
 
@@ -261,6 +325,9 @@ class Emu:
         return self.handles
 
     def spawn(self, name, pc, args=(), stack=0x2000, on_exit=None, base=None):
+        if self.real:       # an outside callback (Bluetooth stack, phone): the stack's stand-in task runs it
+            self.bt_out.append(("call", pc | 1, args, on_exit))
+            return
         ctx = dict.fromkeys(REGS, 0)
         ctx.update(zip(REGS, args[:4]))
         base = base or self.alloc(stack)
@@ -280,12 +347,18 @@ class Emu:
         self.romcall = True
         uc.emu_stop()
 
-    def call(self, addr, *args):
-        """Run a real ROM function to its return, from Python, between slices; stand-ins it reaches run as usual."""
+    def call(self, addr, *args, isr=False):
+        """Run a real ROM function to its return, from Python, between slices; stand-ins it reaches run as usual.
+        Arguments past the fourth go on the stack.  isr: run it as an interrupt handler would (IPSR set, so the
+        osif wrappers take their FromISR paths); the caller makes sure interrupts are on."""
         saved = {reg: self.r(reg) for reg in REGS}
-        for reg, v in zip(REGS, args): self.uc.reg_write(reg, v)
+        banks = [self.r(r) for r in (UC_ARM_REG_XPSR, UC_ARM_REG_MSP, UC_ARM_REG_PSP)]
+        if isr: self.uc.reg_write(UC_ARM_REG_IPSR, 16 + 31)     # a pseudo interrupt line nothing else uses
+        for reg, v in zip(REGS, args[:4]): self.uc.reg_write(reg, v)
+        if args[4:]: self.uc.mem_write(HEAP_END - 0x100, struct.pack(f"<{len(args[4:])}I", *args[4:]))
         self.uc.reg_write(UC_ARM_REG_SP, HEAP_END - 0x100)   # scratch stack at the top of the emulator's own heap
         self.uc.reg_write(UC_ARM_REG_LR, CALL_RET | 1)
+        self.in_call += 1
         pc = addr
         while pc != CALL_RET:
             self.uc.emu_start(pc | 1, UNTIL, count=SLICE)
@@ -293,7 +366,10 @@ class Emu:
             if pc != CALL_RET:
                 assert self.dispatch(pc) is not BLOCK, f"Emu.call({addr:#x}) reached a blocking stand-in"
                 pc = self.r(UC_ARM_REG_PC)
+        self.in_call -= 1
         ret = self.r(UC_ARM_REG_R0)
+        self.uc.reg_write(UC_ARM_REG_XPSR, banks[0])        # IPSR first: it picks which bank SP below is written to
+        self.uc.reg_write(UC_ARM_REG_MSP, banks[1]); self.uc.reg_write(UC_ARM_REG_PSP, banks[2])
         for reg, v in saved.items(): self.uc.reg_write(reg, v)
         return ret
 
@@ -311,6 +387,7 @@ class Emu:
         """Interrupts off, the CPU spinning: nothing runs and the phone hears nothing until the watchdog resets the chip."""
         self.ev(f"HANG ({why}): interrupts off, chip silent; watchdog reset in {WDG_TIMEOUT_MS} ms (assumed)", "reset")
         self.hung = why
+        if self.real: return BLOCK      # the CPU stays on the spin; run_real's watchdog ends it (last kick + 4 s)
         pc, lr = self.r(UC_ARM_REG_PC), self.r(UC_ARM_REG_LR)
         self.hw["wdg"] = {"at": self.now + WDG_TIMEOUT_MS, "interval": None, "fire": lambda: (self.latch(pc, lr), self.reset(mode=3))}
         return self.block(FOREVER)
@@ -483,6 +560,10 @@ class Emu:
         return None
 
     def irq(self, name, slot):
+        if self.real:       # vector slot n is exception n; the NVIC decides when it runs
+            if slot in SHARED_VEC: self.tim_int.add(name)
+            self.pend(SHARED_VEC.get(slot, slot))
+            return
         handler = self.r32(0x200000 + 4 * slot)
         if handler: self.spawn("irq:" + name, handler, stack=0x1000)
         else: self.ev(f"IRQ {name}: no handler in vector slot {slot}")
@@ -501,6 +582,8 @@ class Emu:
         return None
 
     def hwtimer(self, name, off, w, value):
+        if off == 0x10 and not w: return int(name in self.tim_int)     # interrupt status (the TIM4/5 dispatcher reads it)
+        if off == 0x0C: self.tim_int.discard(name)                      # end of interrupt
         if w and off == 0x08:                           # control: bit0 enable, bit2 interrupt masked
             load = self.r32(next(b for b, n in self.periph if n == name))
             if value & 1 and not value & 4:
@@ -512,6 +595,7 @@ class Emu:
 
     # ---- run loop
     def run(self, limit_ms):
+        if self.real: return self.run_real(limit_ms)
         spins = 0
         while True:
             if self.cur is None:
@@ -550,8 +634,206 @@ class Emu:
         self.reset()
         return BLOCK
 
+    # ---- Cortex-M0+ exceptions (real-kernel mode).  Unicorn runs msr/mrs, cps and wfi but takes no exception: no
+    # stacking, no EXC_RETURN, no NVIC, no SysTick.  This layer does what the core and the NVIC do, at translation-block
+    # boundaries (cps, msr and isb end a block, so a pend or an unmask takes effect right after them).
+    def exc_reset(self):
+        self.exc_pend, self.exc_active, self.nv_en, self.exc_live = set(), [], 0, False
+        self.st_next, self.st_flag = None, False        # SysTick: cycle of its next wrap while it runs; COUNTFLAG
+        self.bt_out, self.bt_exit = collections.deque(), collections.deque()
+        self.sysreset, self.stop_cyc, self.idle_tcb, self.idle_until = False, 0, None, None
+        for reg, v in ((UC_ARM_REG_XPSR, 1 << 24), (UC_ARM_REG_CONTROL, 0), (UC_ARM_REG_PRIMASK, 0), (UC_ARM_REG_MSP, 0x203800)):
+            self.uc.reg_write(reg, v)
+
+    def pend(self, n, on=True):
+        """Set or clear exception n pending (None: only recheck); exc_live = something pending is enabled, which the
+        per-block check reads instead of the full rule."""
+        if n is not None: (self.exc_pend.add if on else self.exc_pend.discard)(n)
+        self.exc_live = any(n < 16 or self.nv_en >> (n - 16) & 1 for n in self.exc_pend)
+
+    def exc_prio(self, n):
+        """Priority of exception n, lower wins: NMI -2, HardFault -1, SVCall / PendSV / SysTick from SHPR2/3, IRQs
+        from NVIC_IPR.  The M0+ keeps 2 bits."""
+        if n <= 3: return n - 4
+        return self.uc.mem_read(SCS + {11: 0xD1F, 14: 0xD22, 15: 0xD23}.get(n, 0x400 + n - 16), 1)[0] & 0xC0
+
+    def exc_ready(self):
+        """The pending exception the core takes now, or None: enabled, and above the running priority (PRIMASK = 0)."""
+        if not self.exc_live: return None
+        cur = min((self.exc_prio(a) for a in self.exc_active), default=256)
+        if self.r(UC_ARM_REG_PRIMASK): cur = min(cur, 0)
+        n = min((n for n in self.exc_pend if n < 16 or self.nv_en >> (n - 16) & 1), key=lambda n: (self.exc_prio(n), n), default=None)
+        return n if n is not None and self.exc_prio(n) < cur else None
+
+    def exc_enter(self, n):
+        """Entry: r0-r3, r12, lr, pc, xPSR onto the active stack (8-byte aligned; xPSR bit 9 = one padding word), handler
+        mode on MSP, lr = EXC_RETURN, pc = the vector at VTOR + 4n."""
+        handler, ctrl, sp = bool(self.exc_active), self.r(UC_ARM_REG_CONTROL), self.r(UC_ARM_REG_SP)
+        frame = (sp - 32) & ~7
+        regs = [self.r(r) for r in (UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3, UC_ARM_REG_R12, UC_ARM_REG_LR, UC_ARM_REG_PC)]
+        self.uc.mem_write(frame, struct.pack("<8I", *regs, self.r(UC_ARM_REG_XPSR) & ~0x200 | 1 << 24 | (0x200 if sp & 4 else 0)))
+        self.uc.reg_write(UC_ARM_REG_SP, frame)
+        self.uc.reg_write(UC_ARM_REG_IPSR, n)               # handler mode: SP is MSP from here
+        self.uc.reg_write(UC_ARM_REG_CONTROL, ctrl & ~2)
+        self.uc.reg_write(UC_ARM_REG_LR, 0xFFFFFFF1 if handler else 0xFFFFFFFD if ctrl & 2 else 0xFFFFFFF9)
+        self.pend(n, False); self.exc_active.append(n)
+        self.stats[f"exception {n}"] += 1
+        self.uc.reg_write(UC_ARM_REG_PC, self.r32(self.r32(SCS + 0xD08) + 4 * n) & ~1)
+
+    def exc_return(self, excret):
+        """A branch to EXC_RETURN in handler mode: unstack from MSP or PSP (bit 2), back to thread or handler mode."""
+        n = self.exc_active.pop()
+        assert self.r(UC_ARM_REG_IPSR) == n, f"exception return from {self.r(UC_ARM_REG_IPSR)}, active {n}"
+        if excret & 4: self.uc.reg_write(UC_ARM_REG_CONTROL, self.r(UC_ARM_REG_CONTROL) | 2)
+        sp = self.r(UC_ARM_REG_PSP if excret & 4 else UC_ARM_REG_MSP)
+        *regs, xpsr = struct.unpack("<8I", self.uc.mem_read(sp, 32))
+        self.uc.reg_write(UC_ARM_REG_XPSR, xpsr & ~0x200)  # flags and IPSR; IPSR 0 = thread mode, SP the bank CONTROL picks
+        self.uc.reg_write(UC_ARM_REG_SP, sp + 32 + (4 if xpsr & 0x200 else 0))
+        for reg, v in zip((UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3, UC_ARM_REG_R12, UC_ARM_REG_LR, UC_ARM_REG_PC), regs):
+            self.uc.reg_write(reg, v)
+
+    def on_block(self, uc, addr, size, _):
+        if addr >= EXC_PAGE: return uc.emu_stop()          # EXC_RETURN 0xFFFFFFF9 / 0xFFFFFFFD (0xFFFFFFF1 is UNTIL)
+        self.cyc += size >> 1   # shortcut: one cycle per 16-bit instruction (the M0+ takes 2 for loads and taken branches); calibrate if timing gets close
+        if not self.in_call and (self.cyc >= self.stop_cyc or self.exc_live and self.exc_ready() is not None): uc.emu_stop()
+
+    def on_intr(self, uc, intno, _):
+        if intno == 2: self.pend(11)                       # svc: SVCall, taken before the next instruction
+        elif intno != 8: self.ev(f"CPU exception {intno} at pc={self.r(UC_ARM_REG_PC):#x}")    # 8: EXC_RETURN in handler mode
+        uc.emu_stop()
+
+    def on_scs(self, uc, access, addr, size, value, _):
+        """SysTick (0x010..0x018), NVIC set/clear registers (0x100..0x280), ICSR (0xD04), AIRCR (0xD0C).  Writes change
+        the state here; reads are answered from it.  Priorities and VTOR are plain memory."""
+        off = addr - SCS
+        csr = value if access == UC_MEM_WRITE and off == 0x010 else self.r32(SCS + 0x10)
+        scale = 1 if csr & 4 else CPU_HZ // self.r32(0x2003C8)      # CLKSOURCE clear: the reference clock the ROM set LOAD from (32 kHz)
+        period = (self.r32(SCS + 0x14) + 1) * scale
+        if access == UC_MEM_WRITE:
+            if off == 0x010: self.st_next = (self.st_next or self.cyc + period) if value & 1 else None
+            elif off == 0x018 and self.st_next is not None: self.st_next = self.cyc + period
+            elif off == 0x100: self.nv_en |= value
+            elif off == 0x180: self.nv_en &= ~value
+            elif off in (0x200, 0x280):
+                for i in range(32):
+                    if value >> i & 1: self.pend(16 + i, off == 0x200)
+            elif off == 0xD04:
+                for bit, n, on in ((31, 2, 1), (28, 14, 1), (27, 14, 0), (26, 15, 1), (25, 15, 0)):
+                    if value >> bit & 1: self.pend(n, on)
+            elif off == 0xD0C and value >> 16 == 0x05FA and value & 4: self.sysreset = True
+            self.pend(None)
+            return
+        if off == 0x010: v, self.st_flag = self.r32(addr) & 7 | self.st_flag << 16, False
+        elif off == 0x018: v = (self.st_next - self.cyc) % period // scale if self.st_next is not None else 0
+        elif off in (0x100, 0x180): v = self.nv_en
+        elif off in (0x200, 0x280): v = sum(1 << n - 16 for n in self.exc_pend if n >= 16)
+        elif off == 0xD04: v = (self.exc_active[-1] if self.exc_active else 0) | (14 in self.exc_pend) << 28 | (15 in self.exc_pend) << 26
+        else: return
+        uc.mem_write(addr, struct.pack("<I", v)[:size])
+
+    def run_real(self, limit_ms):
+        """Real kernel: one CPU, time from executed instructions (CPU_HZ); the idle task and hangs skip to the next event."""
+        while True:
+            self.now = self.cyc * 1000 // CPU_HZ
+            if self.sysreset:
+                self.sysreset = False
+                self.reset()
+                continue
+            if self.st_next is not None and self.cyc >= self.st_next:
+                period = (self.r32(SCS + 0x14) + 1) * (1 if self.r32(SCS + 0x10) & 4 else CPU_HZ // self.r32(0x2003C8))     # SysTick wrapped (once or more: one pend)
+                self.st_next += ((self.cyc - self.st_next) // period + 1) * period
+                self.st_flag = True
+                if self.r32(SCS + 0x10) & 2: self.pend(15)
+            for name, h in list(self.hw.items()):
+                if h["at"] <= self.now:
+                    if h["interval"]: h["at"] = self.now + h["interval"]
+                    else: del self.hw[name]
+                    h["fire"]()
+            if self.uc.mem_read(0x20037A, 1)[0] & 0x10 and self.now >= self.wdg_kick + WDG_TIMEOUT_MS:     # watchdog on and starved
+                self.ev(f"WATCHDOG: no kick since {self.wdg_kick} ms, pc={self.r(UC_ARM_REG_PC):#x}" + (f" ({self.hung})" if self.hung else ""), "reset")
+                self.latch(self.r(UC_ARM_REG_PC), self.r(UC_ARM_REG_LR))
+                self.reset(mode=3)
+                continue
+            if self.now > limit_ms: return
+            if not self.hung:
+                n = self.exc_ready()
+                if n is not None:
+                    self.exc_enter(n)
+                    continue
+                if self.bt_out and self.r32(BT_STUB + 0x40) and not self.exc_active and not self.r(UC_ARM_REG_PRIMASK):
+                    self.bt_deliver()
+                    continue
+            nxt = min([self.st_next or FOREVER * CPU_HZ, (limit_ms + 1) * CPU_HZ // 1000, (self.wdg_kick + WDG_TIMEOUT_MS) * CPU_HZ // 1000]
+                      + [-(-h["at"] * CPU_HZ // 1000) for h in self.hw.values()])
+            idle = self.is_idle()                           # the idle task first gets 4000 cycles (cleanup, hook, kick)
+            self.idle_until = (self.idle_until or self.cyc + 4000) if idle else None
+            if self.hung or idle and self.cyc >= self.idle_until:      # nothing runs until the next event: skip there
+                self.cyc, self.idle_until = max(self.cyc, nxt), None
+                continue
+            self.stop_cyc = min(nxt, self.idle_until) if idle else nxt
+            self.romcall = False
+            try:
+                self.uc.emu_start(self.r(UC_ARM_REG_PC) | 1, UNTIL)
+            except UcError as e:
+                self.ev(f"FAULT {e}: pc={self.r(UC_ARM_REG_PC):#x} lr={self.r(UC_ARM_REG_LR):#x} sp={self.r(UC_ARM_REG_SP):#x}", "fault")
+                if 3 in self.exc_active: self.hang("lockup: a fault in the HardFault handler")
+                else: self.exc_enter(3)
+                continue
+            pc = self.r(UC_ARM_REG_PC)
+            if pc >= EXC_PAGE: self.exc_return(pc | 1)
+            elif self.romcall: self.dispatch(pc)
+
+    def is_idle(self):
+        """The idle task holds the CPU in thread mode and nothing is pending."""
+        if self.idle_tcb is None:
+            self.idle_tcb = self.r32(0x201340 + 0x2C) or None     # xIdleTaskHandle (read by xTaskGetIdleTaskHandle 0xFE84)
+            self.sched_started = self.idle_tcb is not None
+        return bool(self.idle_tcb) and not self.exc_active and not self.exc_live and not self.bt_out and self.r32(0x201340) == self.idle_tcb
+
+    # The Bluetooth stack's task, as a stand-in: its callbacks into the app (writes, notification on, "sent") run in
+    # a real FreeRTOS task, fed from a real queue by a pseudo interrupt.  Loop: xQueueReceive(q, buf, forever); then
+    # fn(a0..a6) with a4..a6 on the stack; then bt_done (Python: the caller's on_exit).
+    BT_CODE = (0xB08C, 0x480B, 0x6800, 0xA904, 0x2200, 0x43D2, 0x4B09, 0x4798, 0x9809, 0x9000, 0x980A, 0x9001, 0x980B,
+               0x9002, 0x9805, 0x9906, 0x9A07, 0x9B08, 0x9C04, 0x47A0, 0x4C03, 0x47A0, 0xE7E9, 0xBF00)
+    BT_PRIO = 6     # assumption: the upper stack's task priority is not known (its image is not analysed); above the app's
+
+    def bt_task(self):
+        q = self.call(self.sym("xQueueGenericCreate"), 32, 32, 0)
+        self.uc.mem_write(BT_STUB, struct.pack(f"<{len(self.BT_CODE)}H3I", *self.BT_CODE, BT_STUB + 0x40, self.sym("xQueueReceive") | 1, BT_DONE | 1))
+        self.w32(BT_STUB + 0x40, q)
+        self.uc.mem_write(BT_STUB + 0x50, b"bt_model\0")
+        assert q and self.call(self.sym("xTaskCreate"), BT_STUB | 1, BT_STUB + 0x50, 256, 0, self.BT_PRIO, BT_STUB + 0x44) == 1
+
+    def bt_deliver(self):
+        """One Bluetooth-stack event from a pseudo interrupt (interrupts are on here): a message into one of the app's
+        queues, or a callback for the stack's stand-in task."""
+        kind, *item = self.bt_out.popleft()
+        if kind == "send": q, msg = item
+        else:
+            q, msg = self.r32(BT_STUB + 0x40), struct.pack("<8I", item[0], *(list(item[1]) + [0] * 7)[:7])
+        self.uc.mem_write(BT_STUB + 0x60, msg)
+        self.w32(BT_STUB + 0x80, 0)
+        if not self.call(self.sym("xQueueGenericSendFromISR"), q, BT_STUB + 0x60, BT_STUB + 0x80, 0, isr=True):
+            self.ev(f"Bluetooth stand-in: queue {q:#x} full, {kind} dropped")
+        elif kind == "call": self.bt_exit.append(item[2])
+        if self.r32(BT_STUB + 0x80): self.pend(14)                # a higher-priority task woke: PendSV
+
+    def rom_bt_done(self):
+        on_exit = self.bt_exit.popleft() if self.bt_exit else None
+        if on_exit: on_exit()
+
+    def rom_boot_next(self):
+        """Real kernel: the ROM's hand-over to the app, one entry after the other (SystemInit, app_pre_main, app_main)."""
+        nxt = self.boot_chain.pop(0)()
+        self.uc.reg_write(UC_ARM_REG_LR, (BOOT_NEXT if self.boot_chain else EXIT) | 1)
+        self.uc.reg_write(UC_ARM_REG_PC, nxt & ~1)
+        return BLOCK
+
     def dispatch(self, pc):
         lr = self.r(UC_ARM_REG_LR)
+        if self.real:
+            self.now = self.cyc * 1000 // CPU_HZ
+            if pc == EXIT: return self.hang("app_main returned")
         if pc == EXIT:
             t, self.cur = self.cur, None
             self.tasks.remove(t)
@@ -684,8 +966,14 @@ class Emu:
     rom_os_sched_resume = rom_os_sched_suspend
 
     def rom_os_delay(self): return self.block(self.arg(0))
-    def rom_platform_delay_ms(self): self.now += self.arg(0)
-    def rom_platform_delay_us(self): pass
+    def busy(self, ms):
+        """The CPU spends ms with nothing else running (a busy wait, or the flash lock with interrupts off).  Real
+        kernel: time passes, interrupts that come due wait until it is over, SysTick pends once however many ticks."""
+        if self.real: self.cyc += int(ms * CPU_HZ / 1000)
+        else: self.now += int(ms)
+    def rom_platform_delay_ms(self): self.busy(self.arg(0))
+    def rom_platform_delay_us(self):
+        if self.real: self.busy(self.arg(0) / 1000)
 
     def rom_os_msg_queue_create_intern(self):
         h = self.handle()
@@ -698,6 +986,9 @@ class Emu:
         return self.qsend(self.arg(0), bytes(self.uc.mem_read(self.arg(1), self.queues[self.arg(0)]["size"])))
 
     def qsend(self, h, msg):
+        if self.real:       # into the app's real queue, from the same pseudo interrupt, in order with the callbacks
+            self.bt_out.append(("send", h, msg))
+            return 1
         for t in self.tasks:
             if t.wait and t.wait.get("queue") == h:
                 self.uc.mem_write(t.wait["buf"], msg)
@@ -796,6 +1087,7 @@ class Emu:
         a, n = self.arg(0), self.arg(1)
         old, new = self.uc.mem_read(a, n), self.uc.mem_read(self.arg(2), n)
         self.uc.mem_write(a, bytes(x & y for x, y in zip(old, new)))    # flash can only clear bits
+        if self.real: self.busy(FLASH_PAGE_MS * -(-n // 256))
         return 1
 
     def rom_flash_auto_write_locked(self):
@@ -804,7 +1096,12 @@ class Emu:
 
     def rom_flash_erase_locked(self):
         self.uc.mem_write(self.arg(1) & ~0xFFF, b"\xff" * 0x1000)
+        if self.real:
+            self.ev(f"flash erase {self.arg(1) & ~0xFFF:#x}: interrupts off for {self.flash_erase_ms} ms", "flash")
+            self.busy(self.flash_erase_ms)
         return 1
+    flash_erase_ms = FLASH_ERASE_MS
+    def rom_WDG_Restart(self): self.wdg_kick = self.now
 
     def rom_flash_get_bank_addr(self): return FLASH_BANKS.get(self.arg(0), (0, 0))[0]
     def rom_flash_get_bank_size(self): return FLASH_BANKS.get(self.arg(0), (0, 0))[1]
