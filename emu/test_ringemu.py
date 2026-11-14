@@ -570,3 +570,84 @@ def test_rom_watchdog_latch_shows_the_hang_after_the_restart(tmp_path):
     text = ringprobe.decode_aon(v)
     assert "watchdog latch: pc 0x00008d38" in text      # the ROM's assert spin
     assert "AON 0x15 (reset-reason byte, re-armed to 1 at boot) 0x01" in text
+
+
+needs_flash = pytest.mark.skipif(not (ringemu.FLASH_FILE and ringemu.FLASH_FILE.exists() and ringemu.ROM_FILE and ringemu.ROM_FILE.exists()),
+                                 reason="needs the ROM dump and the ring's flash dump firmware/flash_ring.bin (both untracked)")
+
+
+@needs_flash
+def test_real_upper_stack_answers_over_hci():
+    # The upper stack from the ring's flash runs as UpperStackTask (priority 5 from the ROM config) and brings the
+    # controller up over the ROM's hci_if; the phone connects, finds the services over ATT, and the 03 answer comes back
+    # as a GATT notification through the stack's queues, credits and ACL.
+    e = ringemu.Emu(quiet_mem=True, trace=True, kernel="real", stack="real")
+    sent, write = [], e.rom_hci_if_write
+    e.rom_hci_if_write = lambda: sent.append(bytes(e.uc.mem_read(e.arg(0), e.arg(1)))) or write()
+    e.command(3000, bytes([0x03]))
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(5000)
+    ops = [struct.unpack_from("<H", p, 1)[0] for p in sent if p[0] == 1]
+    assert ops[:3] == [0x1009, 0x1002, 0x1005] and 0x2002 in ops and ops.index(0x200A) < ops.index(0x2016)   # advertising, then the link
+    assert {"6e40fff0", ringemu.OTA_UUID} <= {s["uuid"][:8] for s in e.services}
+    assert e.notified[-1][:2] == bytes([0x03, 0x00]) and e.resets == 1
+    tcb = e.r32(0x207564)
+    assert e.cstr(tcb + 0x34) == "UpperStac" and e.r32(tcb + 0x2C) == 5
+    assert struct.unpack("<H", e.uc.mem_read(0x207660, 2))[0] == ringemu.LE_ACL_BUFS      # every ACL credit back
+
+
+@needs_flash
+def test_real_upper_stack_holds_a_stalled_light_stream(tmp_path):
+    # Light stream at 12 notifications a second, then 4.5 s with no traffic.  The controller's 8 buffers fill, the stack's
+    # 10 notification credits (0x207784) run out and server_send_data refuses (exit 3, not a missing buffer); the app
+    # retries (os_delay 20) without reaching its 20-refusal drop and stays clear of the 4 s watchdog; the samples that
+    # arrive come in order once the link is back (the patch's light copy skips samples rather than fill the send ring).
+    import patch_fw, sweep
+    img = tmp_path / "patched.bin"
+    img.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()))
+    e = ringemu.Emu(quiet_mem=True, trace=True, image=img, kernel="real", stack="real")
+    e.link_rate, e.link_stalls = 12, ((15000, 19500),)
+    blocks, credits, retry = sweep.app_blocks(e), [], [0]
+    e.uc.hook_add(ringemu.UC_HOOK_MEM_WRITE, lambda uc, a, ad, s, v, _: credits.append((e.now, v & 0xFFFF)), begin=sweep.CREDITS, end=sweep.CREDITS + 1)
+    e.uc.hook_add(ringemu.UC_HOOK_MEM_WRITE, lambda uc, a, ad, s, v, _: retry.__setitem__(0, max(retry[0], v & 0xFF)), begin=sweep.RETRY, end=sweep.RETRY)
+    e.uc.hook_add(ringemu.UC_HOOK_CODE, lambda *a: pytest.fail("server_send_data refused"), begin=sweep.NO_BUF, end=sweep.NO_BUF)
+    e.command(3000, bytes([0x69, 0x01]))
+    e.command(4000, bytes([0xA1, 0x0A]))
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(36000)
+    light = [(ev["t"], bytes.fromhex(ev["data"])) for ev in e.trace if ev["kind"] == "ble_tx" and ev["data"][:4] == "a10c"]
+    reads = b"".join(bytes.fromhex(ev["rx"]) for ev in e.trace if ev["kind"] == "bus" and ev["dev"] == ringemu.PPG and ev["tx"] == "41" and ev["t"] > 4000)
+    sent = b"".join(n[3:3 + n[2]] for t, n in light)
+    it = iter(reads[i:i + 3] for i in range(0, len(reads), 3))
+    assert len(sent) > 1500 and all(any(s == r for r in it) for s in (sent[i:i + 3] for i in range(0, len(sent), 3)))   # in order
+    assert not any(15000 <= t < 19500 for t, n in light) and light[-1][0] > 19500
+    assert min(v for t, v in credits if t > 4000) == 0 and credits[-1][1] == ringemu.LE_ACL_BUFS
+    assert 0 < retry[0] < 20
+    assert max(g[0] for g in blocks["gaps"] if g[1] > 3000) < 2100 and e.resets == 1
+
+
+@needs_flash
+def test_rom_patch_ram_part_is_encrypted_in_flash():
+    # The ROM loads the patch's RAM part through its AES engine (ROM 0x5082; key select 1: a key derived from the efuse
+    # page at flash 0x800095 / 0x8000A7, which reads as erased once the ring runs).  The dump holds the ciphertext, so
+    # the hooks that point into it (heap, timers, queues, reset) cannot run here.
+    import math
+    f = ringemu.FLASH_FILE.read_bytes()
+    _, _, flags, image_id, _, _ = struct.unpack_from("<BBHHHI", f, 0x3000)
+    exe, load, n = struct.unpack_from("<3I", f, 0x301C)
+    assert (image_id, flags & 2, flags >> 4 & 7, exe, load & 0xFFFFFF, n) == (0x2792, 2, 1, 0x203800, 0x809404, 0x3510)
+    ent = lambda b: -sum(c / len(b) * math.log2(c / len(b)) for c in collections.Counter(b).values())
+    assert ent(f[0x9404:0x9404 + n]) > 7.9 and ent(f[0x3400:0x9404]) < 7.2       # ciphertext; the flash part is plain code
+    assert f[0x95:0xB8] == b"\xff" * 0x23
+
+
+@needs_flash
+@pytest.mark.skipif(not ringemu.PATCH_RAM.exists(), reason="needs firmware/patch_ram.bin, read off a running ring: "
+                    "python ringprobe.py dump 0x203800 0x3c00 firmware/patch_ram.bin")
+def test_rom_patch_hooks_are_installed():
+    # With the decrypted RAM part the ROM's patch entry (0x203801) runs as the ROM runs it and fills the hook pointers.
+    e = ringemu.Emu(quiet_mem=True, kernel="real", stack="real")
+    hooks = {0x20173C: 0x205C35, 0x201644: 0x205C01, 0x201574: 0x20503D, 0x2015FC: 0x205BD9}    # pvPortMalloc, os_timer_create, WDG_SystemReset, queue create
+    assert {p: e.r32(p) for p in hooks} == hooks

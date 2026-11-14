@@ -570,6 +570,141 @@ replacements of `pvPortMalloc`, `os_timer_create`, flash erase/write and `WDG_Sy
 the supply (brown-out), and real instruction timing (one cycle per 16-bit instruction). So the cause is most likely
 in one of those: next, run the patch image's hooks and the upper stack for real.
 
+## ROM patch image and upper stack (FW16d part 3)
+
+From the ring's flash dump (`emu/firmware/flash_ring.bin`), the ROM dump, the stock app and the emulator's stack mode
+(`RINGEMU_STACK=real`, `emu/README.md`). **Code** = read in the disassembly; **run** = seen in the emulator.
+
+**ROM patch image, `0x803000` (code).** Header: id `0x2792`, flags `0x916` (`enc` = 1, `load_when_boot`, key
+select 1), payload 38,184 B; flash part `0x803400..0x809404` (plain code: controller, modem and RF patches, the hook
+installers below); RAM part 13,584 B from flash `0x809404` (`load_base` `0x1809404`) to RAM `0x203800`
+(`exe_base`, the earlier note was right), entered by the ROM with `blx 0x203801` (`0x4B60` from the boot step `0x4ECE`,
+after the reset-reason steps, before the main boot through `*0x2000F0`). **The RAM part is AES-encrypted** (entropy 7.98
+bit/byte against 6.9 for the code): `0x5082` decrypts it by DMA through the AES engine (`0x40014000`, mode 1, IV 0) with
+a key that, for key select 1, is derived (`0x504C` → `0x4FDA`: AES with a key from flash `0x8000A7`, then
+`aes_cmac_inverse` with the ROM key at `0x41140`) from the 16 bytes at flash `0x800095`. On the running ring both read
+as `0xFF`, but the ROM checks that page (`0x3F54`/`0x3F2E`) and would not boot from it erased, so the page is hidden
+after boot (flash protection or an OTP window). The dump cannot be decrypted; the patch's entry and every hook target
+in RAM are unreadable here. They are readable on the ring: `A1 10` covers RAM `0x200000..0x216000`, so
+`ringprobe.py dump 0x203800 0x3c00 firmware/patch_ram.bin` (about 3 min) gives the decrypted copy; the emulator loads
+and runs it when the file exists (`test_rom_patch_hooks_are_installed`).
+
+Hooks the plain installers set (`0x8037C0`, `0x80384A`, `0x803914`, `0x803A62`; called from the encrypted entry, which
+may install more). "ROM user" = the instruction that loads the pointer; ROM convention: call the hook if set, and if it
+returns true, return its result instead of running the ROM code.
+
+| Pointer | ROM user | Target | What it changes |
+|---|---|---|---|
+| `0x20173C` | `pvPortMalloc` `0x113A2` | `0x205C35` RAM | the heap allocator: unknown (encrypted) |
+| `0x201644` | `os_timer_create` | `0x205C01` RAM | timer creation: unknown |
+| `0x2015FC` | `os_msg_queue_create_intern` | `0x205BD9` RAM | queue creation: unknown |
+| `0x201574` | `WDG_SystemReset` `0x129FC` | `0x20503D` RAM | the software reset: unknown |
+| `0x2016A8` | `SystemCall` (app system gate) | `0x203981` RAM | unknown |
+| `0x201794` | `flash_ioctl` | `0x2039C5` RAM | unknown |
+| `0x2017F0` | flash driver, ROM `0x9F56` | `0x205B71` RAM | unknown |
+| `0x200128` | ROM `.data` function pointer after `platform_delay_ms` | `0x20560D` RAM | unknown |
+| `0x2017F4` | `flash_write` | `0x8038A1` flash | refuses (logs, result 0) a write outside `0x800000 + flash size` or `0x1800000 +` size; else the ROM code runs |
+| `0x2017F8` | `flash_erase` | `0x8038ED` flash | the same check for erase |
+| `0x2017A8` | `flash_auto_write` | `0x8039D1` flash | reads the flash chip's ID (ROM `0x9566`) and looks it up in a device table in patch RAM (`0x206544`) |
+| `0x201690` | boot, before `app_main` (`0x5614`) | `0x803785` flash | masks IRQ 2 in the NVIC around `0x205134(2, 0)` (RAM, unknown), then `0x807AE6` |
+| `0x201684` | log/boot helper (`0x3EE6`) | `0x803763` flash | optional log re-init, then `*0x201688` (not set) |
+| `0x20153C` | unnamed ROM `0x11D3E` | `0x803A3D` flash | checks a peripheral base (`0x40013000` / `0x40013400`) against counts in patch RAM (`0x206E14`/`0x206E15`) |
+| `0x2016AC` | `SystemCall_Stack` | `0x819001` (upper stack) | set by the upper stack, not the patch: its API dispatcher |
+
+So the four replacements that matter for a hang (heap, timers, queues, reset) are exactly the encrypted ones. In the
+emulator these ROM functions run unpatched; the flash-checking hooks would only matter if flash I/O ran from the ROM
+(it is a stand-in).
+
+**Upper stack, `0x80E000` (code, run).** Header id `0x279A`, flags `0x901` (plain, executes in place), v1.0.67, entry
+`0x80E401`. Boot (code): the app's `SystemInit` sets `upperstack_entry` (`0x2011D4`) from the OTA image table
+(`0x824488(0x279A)`, table at `0x8021E4`); the ROM calls it at `0x55FE`, then `*0x20084C` (ROM `0xE47B`, the lower stack
+and radio, not run here), the patch's boot hook, `app_main`, `os_sched_start`. The entry logs its version, copies its
+`.data` (0xBC B, `0x8224CC` → `0x207400`), clears `.bss` (`0x2074BC`, 0x3A0 B: its RAM is `0x207400..0x20785C`, below the
+app's `0x207C00`), installs the `SystemCall_Stack` dispatcher (`0x2016AC` = `0x819001`), then `bte_sched_init`, the
+pools (`bte_*_pool_init`, from the data heap) and the layers (hci, l2c, sm, att/gatt, btif, gap).
+
+Tasks and priorities (ROM config `.data`, read by the creators): `UpperStackTask` (entry `0x81054D`) priority 5, stack
+0xC00 (`0x2002E4`/`0x2002E6`); `low_stack_task` (ROM `0x1460B`, `0x1463C`) priority 6, stack 0xC00; timer task 6; app
+`app` 2, `hub` 2, `qc_app` 1, idle 0. The upper stack has one task, one counting semaphore (`0x207618`) it sleeps on
+forever (`0x81055C`), internal message lists (`os_queue_in`/`out` under `os_lock`, i.e. interrupts off for a few
+instructions), and one timer. Every `os_msg_send` it makes uses wait 0. So **nothing the app calls in the stack can
+block the app task**; the app task can only be kept off the CPU by higher-priority work (priorities 5 and 6) and
+interrupts.
+
+**Controller boundary (code).** Not raw HCI over a UART: the ROM's `hci_if` module. The stack opens it with its callback
+(`0x177A4(hci_if_callback 0x818145)`, stored at `0x201F94`), sends H4-framed packets with `(*0x200878)(pkt, len)` = ROM
+`0x17805` (a command with the opcode at +1; ACL with its header at +9, `hci_write` leaving 8 bytes in front), which
+posts `{pkt, len, type}` to `low_stack_task`'s queue (`0x3230A`; patch hook `0x202C78`), and releases received buffers
+with `*0x20087C` / `*0x200880` (`0x178CD` / `0x178FB`). The lower stack calls back `hci_if_callback(evt, status, buf,
+len)` in its own task: evt 0 = opened (the stack then sends its HCI init), 2 = a received packet (H4 type 4 event at
+offset 0, type 2 ACL at offset 0x13; posted to the stack as message `0x202`; dropped and released if that post fails),
+3 = a sent buffer is done (message `0x201`), 4 = error. The emulator replaces exactly these ROM entries; everything above
+runs.
+
+**Flow control (code, run).** Two counters, no waiting anywhere: (1) notification credits, `0x207784`, 10 after the
+link comes up (from a GAP message, `gap_btif_msg_cb` `0x813D98`); `server_send_data` (`0x81EDDC`) takes one per
+notification (`0x81EE82`) and refuses with exit 3 when it is 0; it comes back when the stack's send completes
+(`0x81E898`); (2) ACL credits, `0x207660` (u16), set from LE Read Buffer Size (`0x818568`), taken per ACL packet in
+`hci_send_pkt` (`0x818EBC`), given back only in `hci_handle_lower_data_rsp` (`0x81804E`) when the lower stack returns the
+buffer (evt 3): Number Of Completed Packets is not used for it. HCI commands: one at a time (`0x207627`), and after LE
+Read Remote Features, Read Remote Version, LE Set PHY or LE Start Encryption the command queue waits for that command's
+completion event (`0x818E4C`). Buffers: `btif_buffer_get` (`0x810790`) from the stack's own pool, no wait; it was never
+empty in any run.
+
+**How a notification travels (code + run).** App task: `0x82A634` → `0x82A594` → veneer `0x8356E6` →
+`SystemCall_Stack(0x3108, …)` (ROM `0x4927`) → dispatcher `0x819001` → `server_send_data`: credit check, pool buffer,
+copy, `0x810B70` fills an `attr_update` message that goes onto the stack's internal list and wakes it (`os_queue_in`
+under `os_lock`, then its only `os_sem_give`, `0x81043A`: interrupts off for a few instructions, no wait). `UpperStackTask` (5) preempts the app at once: gatt → `att_send_notify_ind`
+→ l2c → `hci_send_pkt`: if an ACL credit is left, `hci_write` → `0x17805` → `low_stack_task` (6); otherwise the packet
+waits on the link's queue in the stack. The radio sends it at a connection event; the lower stack returns the buffer
+(evt 3) → message `0x201` → the stack frees it, returns the ACL credit, sends the next queued packet, and tells the app
+"sent" through its event queue; the app's callback (`0x829970` → `0x82A5CE`) re-posts its own send message. Where it
+can stop: credits at 0 (refusal, the app's `os_delay(20)` and retry; 20 refusals in a row drop the app's send ring);
+nothing else on this path waits.
+
+**Sweep with the real stack (`sweep.py --stack real`, 320 runs: seeds 0..239, and 1000..1079 with the data heap taken
+to the ring's 528 free bytes after the link is up).** Per run as in the earlier sweep, but through the ring's upper
+stack: the scheduled HR log write (flash, interrupts off 20..300 ms; erase when the slot is dirty) lands anywhere in the
+30 s light stream or up to 4 s after its stop; the phone takes 12..17 notifications a second; stalls of 0.5..5 s with
+no traffic either way; `03` at the end must be answered. **Nothing found:** no reset beyond the first-boot one, no
+watchdog, assert, HardFault or lockup, the command path alive in all 320; watchdog kick gap 2,000..2,111 ms (limit
+4,000); data heap lowest 504 in the ring-heap runs (8,696 otherwise). Flow control was exercised in every run with a
+stall: ACL credits reached 0 (all 8 controller buffers in flight), the stack refused up to 382 notifications a run
+(no credit, exit 3), its buffer pool was never empty, and the app's refusal streak reached 19 at most (seed 136: five
+stalls close together; 20 makes the app drop its whole send ring, which loses data but does not hang). A single 7 s
+stall gives a streak of 12 and the stream recovers. A further 64 runs (seeds 120..183) counted every post to a real
+queue: none found its queue full (a full app queue at TIM5 time would lose that watchdog kick); the fullest queues
+(32 slots each) peaked at 5 messages.
+
+**Where the app task waits (run, every run the same).** Longest stretch off the CPU 1,999 ms, always blocked forever on
+its own message queue (`0x2139E8`, waiting list `0x213A0C`; saved pc `0x1105C`, lr `0xF0B9`, inside the ROM's queue
+receive), until TIM5's 2 s message. Longest stretch ready but not running (preempted by the stack, the timer task or
+interrupts, or in its 20 ms retry delay): 22 ms. With a 4.5 s stall in the light stream the longest wait drops to
+1,453 ms (more messages). So under every condition modelled here the app task is never kept from its queue for
+anything like 4 s.
+
+**What this leaves (guesses, ranked).** The code we can now run (app, ROM kernel, upper stack) does not stall the app
+task. What is still not run: (1) the patch's encrypted replacements of `pvPortMalloc`, `os_timer_create`,
+`os_msg_queue_create` and `WDG_SystemReset`; (2) `low_stack_task` and the controller in ROM (priority 6, above the app
+and the upper stack), its BT interrupts and the ~8 KB it allocates; a busy loop or a long interrupts-off section there
+(for example retransmitting a backlog after a stall, or the flash lock while the radio is busy) would starve every task
+below it, and that is exactly the observed symptom; (3) real DLPS sleep and supply. The ring's 8.5 s late echo and
+1.7 s write fit (2) better than anything in the app or upper stack: those can only be delayed by higher priorities.
+
+**Smallest firmware change to try on the ring.** Kick the watchdog from somewhere that does not depend on the app task
+reaching its queue: in the TIM5 handler itself. It is RAM code at `0x207C00` (vector slot 49, through the ROM's
+Timer4/5 dispatcher `0x47E8`; copied from the app's flash overlay): it builds message `0x19`, posts it with
+`0x824890` at `0x207C1C` (a failed post is only logged, `0x207C2A`: that kick is lost), then clears the interrupt
+(`0x8348F0` at `0x207C32`). Add one `bl WDG_Restart` there (the ROM function the app's `0x82990A` calls). That turns a starvation of the app task into a ring that
+stays up (and a long app-task stall would then show as late answers instead of a reset), while a real hang with
+interrupts off (assert spin, fault spin) still resets. The risk is the obvious one: it also hides a wedged app task; to
+keep evidence, count in the same handler how many TIM5 periods pass without the app task handling `0x19` and report the
+peak with `A1 12`/`A1 11`. Not implemented (this item does not change the firmware).
+
+**Not verified.** Everything below the `hci_if` API (assumed: 8 LE buffers of 27 bytes; a packet's buffer held until
+it is sent; responses one connection event later); the encrypted patch code; the lower stack's priority-6 work and
+interrupts; instruction timing (one cycle per 16-bit instruction).
+
 ## Wear state (FW15a)
 
 The stock firmware has one. It decides "on the finger" from a reflection reading of the optical chip (I2C `0x44`),

@@ -4,7 +4,9 @@ Without firmware/rom_rtl8762.bin (or with RINGEMU_NO_ROM=1) the ROM never execut
 calls is replaced by a Python stand-in looked up by name in the SDK symbol table.  With the dump, the functions in
 ROM_REAL (heap, libc helpers, reset and fault paths) run from it; Bluetooth, flash, logging and the hardware stay
 stand-ins (see README).  The kernel is a Python model unless RINGEMU_KERNEL=real (ROM needed): then the ROM's
-FreeRTOS runs on a Cortex-M0+ exception layer (SysTick, PendSV, NVIC) with time from executed instructions.
+FreeRTOS runs on a Cortex-M0+ exception layer (SysTick, PendSV, NVIC) with time from executed instructions.  With
+RINGEMU_STACK=real (real kernel + firmware/flash_ring.bin) the ring's Bluetooth upper stack runs too, down to the ROM's
+hci_if API, below which a Python controller and phone answer.
 Every peripheral register access is logged.  Sensors, the phone and interrupts are faked.
 
   python ringemu.py --ms 5000                      boot only
@@ -53,6 +55,17 @@ ROM_REAL = {"__aeabi_memcpy", "__aeabi_memcpy4", "__aeabi_memcpy8", "__rt_memcpy
 # PendSV, NVIC); the app's tasks run under the real scheduler.
 KERNEL = os.environ.get("RINGEMU_KERNEL", "model")
 KERNEL_ROM = ((0xE884, 0x115D2), (0x12C30, 0x14000))   # FreeRTOS lists..heap, osif; real in the real-kernel mode
+# Bluetooth stack.  "model": SystemCall_Stack is a Python stand-in.  "real" (real kernel + the ring's flash dump): the
+# upper stack image (0x80E000, UpperStackTask) runs from the dump; below it the ROM's hci_if API is the boundary and a
+# Python controller and phone answer there (docs/FIRMWARE.md "Upper stack").
+STACK = os.environ.get("RINGEMU_STACK", "model")
+FLASH_FILE = None if os.environ.get("RINGEMU_NO_ROM") else HERE / "firmware" / "flash_ring.bin"   # personal logs inside: untracked
+STACK_SPANS = ((0x802000, 0x400), (0x80E000, 0x14600))     # OTA header (image table), upper stack code + .data image
+PATCH_RAM = HERE / "firmware" / "patch_ram.bin"   # ROM patch RAM part read off a running ring (0x203800..); flash copy is AES-encrypted
+HCI_IF = {0x177A4: "hci_if_open", 0x177CC: "hci_if_close", 0x17804: "hci_if_write", 0x178CC: "hci_if_rx_done",
+          0x178FA: "hci_if_rx_done", 0x7A92: "ftl_load_intern", 0x79BE: "ftl_save_intern"}  # unnamed ROM entries the stack calls
+LE_ACL_LEN, LE_ACL_BUFS = 27, 8     # assumption: the controller's answer to LE Read Buffer Size (not found in the ROM)
+CONN_MS = 49                        # connection interval: the phone's 48.75 ms, in whole ms
 ROM_DATA = (0x42E6C, 0x2000E8, 0x10E0)      # the reset handler's .data copy (0x8D52): ROM source, RAM, length
 ROM_BSS = (0x2011C8, 0x1F8C)                # and its .bss clear; it stops at the reset-reason word 0x203154
 SCS = 0xE000E000                            # Cortex-M system control space: SysTick, NVIC, SCB
@@ -94,7 +107,7 @@ QUIET = {"__aeabi_memcpy", "__aeabi_memcpy4", "__aeabi_memclr", "__aeabi_memclr4
          "os_mem_alloc_intern", "os_mem_zalloc_intern", "os_mem_free", "log_buffer", "log_direct",
          "platform_delay_us", "WDG_Restart", "btaon_fast_read_safe", "btaon_fast_write_safe", "btaon_fast_write",
          "vTaskSuspendAll", "xTaskResumeAll", "btaon_fast_read_safe_8b", "btaon_fast_write_8b", "btaon_fast_write_safe_8b",
-         "bt_done", "boot_next"}
+         "bt_done", "boot_next", "log_snoop", "trace_binary", "hci_if_write", "hci_if_rx_done"}
 # guess: SDK default flash map; this ring's real map is unknown apart from the app address
 FLASH_BANKS = {0: (0x801000, 0x1000), 1: (0x802000, 0x55000), 3: (0x85B000, 0x25000), 6: (0x857000, 0x4000)}
 
@@ -105,7 +118,7 @@ class Task:
 
 
 class Emu:
-    def __init__(self, quiet_mem=False, trace=False, image=IMAGE, rom=ROM_FILE, kernel=None):
+    def __init__(self, quiet_mem=False, trace=False, image=IMAGE, rom=ROM_FILE, kernel=None, stack=None):
         self.quiet_mem = quiet_mem
         self.rom = Path(rom).read_bytes() if rom and Path(rom).exists() else None
         self.kernel = kernel or KERNEL
@@ -113,6 +126,11 @@ class Emu:
         if self.kernel == "real" and not self.rom:
             raise RuntimeError("the real kernel runs from the ROM dump: firmware/rom_rtl8762.bin missing or RINGEMU_NO_ROM set")
         self.real = self.kernel == "real"
+        self.stack = stack or (STACK if self.real else "model")
+        assert self.stack in ("model", "real"), self.stack
+        if self.stack == "real" and not (self.real and FLASH_FILE and FLASH_FILE.exists()):
+            raise RuntimeError("the real upper stack needs the real kernel and the ring's flash dump firmware/flash_ring.bin")
+        self.upper = self.stack == "real"
         self.trace = [] if trace else None
         self.syms = {}
         for n, v in re.findall(r"(\w+)\s*=\s*(0x[0-9a-fA-F]+)", (SDK / "rom_symbol_gcc.axf").read_text()):
@@ -121,6 +139,9 @@ class Emu:
         if self.real:
             real |= {a for a, n in self.syms.items() if any(lo <= a < hi for lo, hi in KERNEL_ROM)
                      or n in ("RamVectorTableInit", "RamVectorTableUpdate", "ulSetInterruptMaskFromISR", "vClearInterruptMaskFromISR")}
+        if self.upper:      # the app's gate into the stack runs (it calls the stack's dispatcher at 0x2016AC); hci_if stops
+            real.add(self.sym("SystemCall_Stack"))
+            self.syms.update(HCI_IF)
         self.syms.update({DELAY_US: "platform_delay_us", DELAY_MS: "platform_delay_ms", ROM_HARDFAULT: "HardFault_Handler",
                           CALL_RET: "call_ret", BT_DONE: "bt_done", BOOT_NEXT: "boot_next"})
         if self.rom:
@@ -147,6 +168,10 @@ class Emu:
         uc.mem_map(0x800000, 0x80000)
         uc.mem_write(0x800000, b"\xff" * 0x80000)
         uc.mem_write(APP_BASE, Path(image).read_bytes()[OTA_HDR:])
+        if self.upper:      # only the image table and the upper stack image are taken from the dump (no logs, no FTL)
+            flash = FLASH_FILE.read_bytes()
+            for a, n in STACK_SPANS: uc.mem_write(a, flash[a - 0x800000:a - 0x800000 + n])
+            if PATCH_RAM.exists(): uc.mem_write(0x803000, flash[0x3000:0xD000])    # the patch's plain flash part
         # Factory config block the firmware expects (signature, length, one item: Bluetooth address at offset 6).
         # Without it the firmware rewrites the block and resets on every boot. The address value is made up.
         mac_item = struct.pack("<HB", 6, 6) + bytes.fromhex("112233445566") + bytes([0xFF]) * 6
@@ -212,6 +237,9 @@ class Emu:
             self.uc.mem_write(0x200384, struct.pack("<2I", 0x7000, 0x7400))
             self.call(0x12B2D)
             self.call(0x12B55)
+            if self.upper and PATCH_RAM.exists():     # as ROM 0x4B60(0x2792) does: load part in place, blx header.exe_base
+                self.uc.mem_write(0x203800, PATCH_RAM.read_bytes())     # shortcut: never run (no dump yet); unverified
+                self.call(0x203801)
             self.call(self.sym("os_init"))
             self.call(self.sym("os_timer_init"))
             return
@@ -275,6 +303,9 @@ class Emu:
         if self.real:       # one CPU on the ROM's stack (MSP), thread mode; app_main starts the scheduler and never returns
             self.bt_task()
             self.boot_chain = [lambda: APP_BASE + 0x400 | 1, lambda: ptr("app_pre_main"), lambda: ptr("app_main")]
+            if self.upper:  # ROM 0x55F6: upperstack_entry (set by SystemInit from the image table) before app_main
+                self.boot_chain.insert(2, lambda: ptr("upperstack_entry"))
+                self.hci = {"cb": 0, "conn": None, "bufs": {}}
             self.uc.reg_write(UC_ARM_REG_SP, 0x203800)
             self.uc.reg_write(UC_ARM_REG_LR, BOOT_NEXT | 1)
             self.uc.reg_write(UC_ARM_REG_PC, BOOT_NEXT)
@@ -795,7 +826,7 @@ class Emu:
     # fn(a0..a6) with a4..a6 on the stack; then bt_done (Python: the caller's on_exit).
     BT_CODE = (0xB08C, 0x480B, 0x6800, 0xA904, 0x2200, 0x43D2, 0x4B09, 0x4798, 0x9809, 0x9000, 0x980A, 0x9001, 0x980B,
                0x9002, 0x9805, 0x9906, 0x9A07, 0x9B08, 0x9C04, 0x47A0, 0x4C03, 0x47A0, 0xE7E9, 0xBF00)
-    BT_PRIO = 6     # assumption: the upper stack's task priority is not known (its image is not analysed); above the app's
+    BT_PRIO = 6     # the ROM's low_stack_task (0x14628) and timer task; UpperStackTask is 5 (ROM config 0x2002E6)
 
     def bt_task(self):
         q = self.call(self.sym("xQueueGenericCreate"), 32, 32, 0)
@@ -1105,7 +1136,7 @@ class Emu:
 
     def rom_flash_get_bank_addr(self): return FLASH_BANKS.get(self.arg(0), (0, 0))[0]
     def rom_flash_get_bank_size(self): return FLASH_BANKS.get(self.arg(0), (0, 0))[1]
-    def rom_get_header_addr_by_img_id(self): return APP_BASE if self.arg(0) == 0x2793 else 0
+    def rom_get_header_addr_by_img_id(self): return {0x2793: APP_BASE, 0x279A: 0x80E000 * self.upper}.get(self.arg(0), 0)
     def rom_get_active_ota_bank_addr(self): return FLASH_BANKS[1][0]
     def rom_get_temp_ota_bank_addr_by_img_id(self): return OTA_TMP
     def rom_get_temp_ota_bank_size_by_img_id(self): return OTA_TMP_SIZE
@@ -1144,6 +1175,7 @@ class Emu:
         if any(off + i not in self.ftl for i in range(n)): return 1    # nothing saved yet: app falls back to defaults
         self.uc.mem_write(self.arg(0), bytes(self.ftl[off + i] for i in range(n)))
         return 0
+    rom_ftl_load_intern, rom_ftl_save_intern = rom_ftl_load, rom_ftl_save     # the stack's calls (ROM 0x7A92, 0x79BE)
 
     # ---- misc
     # AON: 16-bit registers at even offsets; the 8-bit accessors take the odd offset as the high byte (ROM 0x32FB0)
@@ -1182,8 +1214,162 @@ class Emu:
             self.ev(f"  Bluetooth service {len(self.services)} registered, uuid={uuid[::-1].hex() or '16-bit'}")
         return 0
 
+    # ---- stack="real": the ROM's hci_if API is the boundary.  Below it on the chip: low_stack_task (ROM 0x1460B, prio 6),
+    # the link layer and the radio; here a Python controller and phone.  Calls into the stack's hci_if_callback
+    # (evt 0 opened, 2 received, 3 sent) run in the stand-in task, which has low_stack_task's priority 6.
+    link_rate, link_stalls, sup_ms = None, (), 20000     # notifications/s the phone takes (None: 6 an event); no-traffic windows
+
+    def lower(self, evt, buf=0, n=0, status=1):
+        self.bt_out.append(("call", self.hci["cb"] | 1, (evt, status, buf, n), None))
+
+    def later(self, fn, ms=CONN_MS):
+        gen = self.resets
+        self.hw[f"hci{len(self.hw)}:{self.now}"] = {"at": self.now + ms, "interval": None, "fire": lambda: gen == self.resets and fn()}
+
+    def rom_hci_if_open(self):
+        self.hci["cb"] = self.arg(0)
+        self.lower(0)
+        return 1
+
+    def rom_hci_if_close(self): return 1
+    def rom_hci_if_rx_done(self): return self.rom_os_mem_free() or 1
+
+    def hci_rx(self, kind, data):
+        """Controller -> stack: an event (H4 type 4) or ACL data (type 2; the stack wants it 0x13 bytes into the buffer)."""
+        off = 0x13 if kind == 2 else 0
+        buf = self.alloc(off + 1 + len(data))
+        self.uc.mem_write(buf, bytes([kind]))
+        self.uc.mem_write(buf + off, bytes([kind]) + data)
+        self.lower(2, buf, off + 1 + len(data))
+
+    def hci_event(self, code, params): self.hci_rx(4, bytes([code, len(params)]) + params)
+
+    def rom_hci_if_write(self):
+        """Stack -> controller (0x17805): a command (type 1, opcode at +1) or ACL data (type 2, header at +9: hci_write
+        leaves 8 bytes in front).  The buffer goes back (evt 3) at once for a command; for ACL data when the packet has
+        left over the air: the stack's ACL credit comes back only then (hci_handle_lower_data_rsp 0x81804E), it does
+        not use Number Of Completed Packets.  Assumption: the lower stack holds the stack's buffer until then (zero copy)."""
+        buf, n = self.arg(0), self.arg(1)
+        pkt = bytes(self.uc.mem_read(buf, n))
+        if pkt[0] == 2 and self.hci["conn"]: self.hci["conn"]["down"].append((pkt[9:], buf, n))
+        else: self.lower(3, buf, n)
+        if pkt[0] == 1: self.hci_command(struct.unpack_from("<H", pkt, 1)[0], pkt[4:])
+        return 1
+
+    def hci_command(self, op, p):
+        h = p[:2]
+        done = {0x2016: lambda: self.hci_event(0x3E, b"\x04\x00" + h + bytes(8)),                 # LE remote features
+                0x041D: lambda: self.hci_event(0x0C, b"\x00" + h + struct.pack("<BHH", 9, 0x5D, 0)),  # remote version
+                0x2013: lambda: self.hci_event(0x3E, b"\x03\x00" + h + struct.pack("<H", 39) + p[6:10]),  # conn update
+                0x2032: lambda: self.hci_event(0x3E, b"\x0C\x00" + h + b"\x01\x01"),             # PHY update
+                0x0406: lambda: self.link_down(0x16)}
+        if op in done:      # Command Status now, the completion one connection event later
+            self.hci_event(0x0F, struct.pack("<BBH", 0, 1, op))
+            return self.later(done[op])
+        ret = {0x1001: struct.pack("<BHBHH", 9, 0x0D, 9, 0x5D, 0x8762), 0x1002: b"\xff" * 64, 0x1003: bytes(8),
+               0x1009: bytes.fromhex("665544332211"), 0x1005: struct.pack("<HBHH", LE_ACL_LEN, 0, LE_ACL_BUFS, 0),
+               0x2002: struct.pack("<HB", LE_ACL_LEN, LE_ACL_BUFS), 0x2003: b"\x3f" + bytes(7), 0x200F: b"\x08",
+               0x2018: bytes(range(8)), 0x201C: b"\xff" * 8, 0x202F: struct.pack("<4H", 251, 2120, 251, 2120),
+               0x2023: struct.pack("<2H", 27, 328), 0x2022: h, 0x1405: h + b"\xc4", 0x2015: h + b"\xff" * 5,
+               0x201A: h, 0x201B: h}.get(op, b"")
+        self.hci_event(0x0E, struct.pack("<BHB", 1, op, 0) + ret)    # Command Complete, status 0, one command credit
+
+    def link_up(self):
+        c = self.hci["conn"] = {"handle": 0x10, "down": collections.deque(), "up": collections.deque(), "tokens": 0.0,
+                                "last": self.now, "wait": False, "reqs": [], "pending": [], "sub": set(), "found": False}
+        self.services, self.connected = [], True
+        self.ev("BLE phone connected", "ble_conn")
+        self.hci_event(0x3E, struct.pack("<BBHBB6sHHHB", 1, 0, c["handle"], 1, 0, bytes(6), 39, 0, self.sup_ms // 10, 0))
+        self.hw["conn"] = {"at": self.now + CONN_MS, "interval": CONN_MS, "fire": self.conn_event}
+        self.att_req(struct.pack("<BHHH", 0x10, 1, 0xFFFF, 0x2800))     # discovery: primary services
+
+    def link_down(self, reason):
+        c, self.hci["conn"] = self.hci["conn"], None
+        if not c: return
+        self.hw.pop("conn", None)
+        self.connected, self.subscribed = False, set()
+        self.ev(f"BLE phone disconnected (reason {reason:#x}), {len(c['down'])} packets were waiting in the controller", "ble_conn")
+        for acl, buf, n in c["down"]: self.lower(3, buf, n)        # the lower stack flushes them
+        self.hci_event(0x05, struct.pack("<BHB", 0, c["handle"], reason))
+
+    def conn_event(self):
+        """One connection event: unless the link stalls, the ring sends what the phone takes (each packet's buffer and
+        credit back to the stack), then the phone's packets come in."""
+        c = self.hci["conn"]
+        if any(a <= self.now < b for a, b in self.link_stalls):
+            if self.now - c["last"] >= self.sup_ms: self.link_down(0x08)      # supervision timeout
+            return
+        c["last"] = self.now
+        c["tokens"] = min(c["tokens"] + (self.link_rate or 1000) * CONN_MS / 1000, 6)
+        while c["down"] and c["tokens"] >= 1:
+            c["tokens"] -= 1
+            acl, buf, n = c["down"].popleft()
+            self.lower(3, buf, n)
+            self.phone_rx(acl)
+        while c["up"]:
+            att = c["up"].popleft()
+            self.hci_rx(2, struct.pack("<HHHH", c["handle"] | 0x2000, len(att) + 4, len(att), 4) + att)
+
+    def att_req(self, pdu):
+        """Phone -> ring ATT; requests one at a time, as ATT allows."""
+        self.hci["conn"]["reqs"].append(pdu)
+        self.att_next()
+
+    def att_next(self):
+        c = self.hci["conn"]
+        if c and not c["wait"] and c["reqs"]:
+            pdu = c["reqs"].pop(0)
+            c["wait"] = True
+            c["up"].append(pdu)
+
+    def phone_rx(self, acl):
+        """Ring -> phone: one ACL packet (no fragments: notifications fit the 27-byte buffers)."""
+        _, _, _, cid = struct.unpack_from("<HHHH", acl)
+        att, c = acl[8:], self.hci["conn"]
+        if cid != 4 or not att: return
+        if att[0] == 0x1B:                                  # notification
+            handle, msg = struct.unpack_from("<H", att, 1)[0], att[3:]
+            svc = next((s for s in self.services if s["start"] <= handle <= s["end"]), None)
+            if svc and svc["uuid"].startswith(OTA_UUID): return self.ota_ack(msg)
+            self.notified.append(msg)
+            return self.ev(f"BLE notify to phone: {msg.hex(' ')}", "ble_tx", data=msg.hex())
+        if att[0] == 0x1D: c["up"].append(b"\x1e")            # indication: confirm
+        if att[0] == 0x11:                                  # read by group type: (start, end, service uuid)...
+            n = att[1]
+            for i in range(2, len(att), n):
+                s, e = struct.unpack_from("<HH", att, i)
+                self.services.append({"uuid": att[i + 4:i + n][::-1].hex(), "start": s, "end": e})
+            if self.services[-1]["end"] < 0xFFFF: c["reqs"].insert(0, struct.pack("<BHHH", 0x10, self.services[-1]["end"] + 1, 0xFFFF, 0x2800))
+            else: c["found"] = True
+        if att[0] == 0x01 and att[1] == 0x10: c["found"] = True   # attribute not found: discovery done
+        if att[0] in (0x01, 0x11, 0x13):
+            c["wait"] = False
+            if c["found"]: self.phone_flush()
+            self.att_next()
+
+    def phone_flush(self):
+        """Writes the phone was asked for, once it knows the services: notifications on (CCCD = service start + 5), then
+        the write to the value at start + 2, as the Realtek attribute tables lay them out."""
+        c = self.hci["conn"]
+        while c["pending"]:
+            uuid, data = c["pending"].pop(0)
+            svc = next((s for s in self.services if s["uuid"].startswith(uuid)), None)
+            if not svc:
+                self.ev(f"BLE write dropped, service {uuid} not found on the ring")
+                continue
+            if uuid not in c["sub"]:
+                c["sub"].add(uuid)
+                c["reqs"].append(struct.pack("<BH", 0x12, svc["start"] + 5) + b"\x01\x00")
+            c["reqs"].append(struct.pack("<BH", 0x12, svc["start"] + 2) + data)
+
     def ble_write(self, data, uuid="6e40fff0"):
         """Phone -> ring: deliver one write to a service's write handler (default: the Colmi command service)."""
+        if self.upper:
+            if uuid == "6e40fff0": self.ev(f"BLE command from phone: {data.hex(' ')}", "ble_rx", data=data.hex())
+            if not self.hci["conn"]: self.link_up()
+            self.hci["conn"]["pending"].append((uuid, data))
+            if self.hci["conn"]["found"]: self.phone_flush()
+            return self.att_next()
         found = [(i + 1, svc) for i, svc in enumerate(self.services) if svc["uuid"].startswith(uuid)]
         if not found: return self.ev(f"BLE write dropped, service {uuid} is not registered (chip just reset?)")
         sid, svc = found[0]
@@ -1204,6 +1390,7 @@ class Emu:
 
     def ble_disconnect(self):
         """The phone's link drops (walked out of range): conn 0 goes DISCONNECTED, cause remote user terminated."""
+        if self.upper: return self.link_down(0x13)
         self.connected, self.subscribed = False, set()
         self.ev("BLE phone disconnected", "ble_conn")
         self.qsend(self.io_q, struct.pack("<HHBBH", 0, 2, 0, 0, 0x113))
