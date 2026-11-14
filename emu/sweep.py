@@ -10,6 +10,9 @@ hangs, faults, dropped queue posts, timer-pool growth, no answer.
 
   python sweep.py --runs 300            RINGEMU_KERNEL is forced to "real"
   python sweep.py --only 17             one seed, with its event log printed
+  python sweep.py --stack real --hold 500 4000
+                                        once per run the lower stack masks interrupts 0.5..4 s at a connection event
+                                        (what its code can do: docs/FIRMWARE.md "Lower stack")
 """
 import argparse, collections, contextlib, io, os, random, struct, sys, tempfile, time
 from pathlib import Path
@@ -55,7 +58,7 @@ def queue_fill(e):
     return st
 
 
-def run(seed, image, verbose=False, ring_heap=False, stack="model"):
+def run(seed, image, verbose=False, ring_heap=False, stack="model", hold=None):
     rnd = random.Random(seed)
     e = ringemu.Emu(quiet_mem=True, trace=True, image=image, kernel="real", stack=stack)
     e.flash_erase_ms = rnd.randint(20, 300)
@@ -98,6 +101,17 @@ def run(seed, image, verbose=False, ring_heap=False, stack="model"):
             return stock()
         e.rom_SystemCall_Stack = link
         e.hw["credits"] = {"at": on, "interval": 500, "fire": lambda: e.spawn("ble:done", 0x82A5CE | 1), "keep": True}
+    held = None
+    if hold and e.upper:    # the lower stack holds the CPU with interrupts masked at one connection event (docs/FIRMWARE.md "Lower stack")
+        held = [rnd.randint(on, sched_end + 4000), rnd.randint(*hold), None]
+        stock_event = e.conn_event
+        def conn_event():
+            if held[2] is None and e.now >= held[0]:
+                held[2] = e.now
+                e.ev(f"lower stack: interrupts masked {held[1]} ms at a connection event", "fault")
+                e.busy(held[1])
+            return stock_event()
+        e.conn_event = conn_event
     e.command(2000, SET_0604)
     e.command(2500, bytes.fromhex("16020105"))
     e.hw["rtc"] = {"at": 62000, "interval": 60000, "fire": cmdmap.minute_tick(e), "keep": True}
@@ -115,7 +129,7 @@ def run(seed, image, verbose=False, ring_heap=False, stack="model"):
     t = time.time()
     with contextlib.redirect_stdout(out): e.run(end + 3000)
     bad = [f"{ev['t']}ms {ev['text'][:110]}" for ev in e.trace
-           if ev["kind"] in ("reset", "fault") and not ev["text"].startswith(("CHIP RESET #1 ", "flash erase"))
+           if ev["kind"] in ("reset", "fault") and not ev["text"].startswith(("CHIP RESET #1 ", "flash erase", "lower stack: "))
            or "queue" in ev["text"] and "full" in ev["text"]]
     live = [ev["t"] for ev in e.trace if ev["kind"] == "ble_tx" and ev["data"][:2] == "03" and ev["t"] >= end]
     if not live: bad.append("no answer to 03 at the end: command path dead")
@@ -127,6 +141,7 @@ def run(seed, image, verbose=False, ring_heap=False, stack="model"):
     erases = sum(1 for ev in e.trace if ev["text"].startswith("flash erase"))
     free, low = struct.unpack("<I4xI", e.uc.mem_read(ringemu.HEAP_WORDS, 12))
     info = f"seed {seed}: heap free {free} lowest {low}, 69 01 at {t0}, a1 0a {on}, erase {e.flash_erase_ms} ms x{erases}, dirty {dirty}, stalls {len(stalls)}, kick gap {gap} ms, light {light}, resets {e.resets}, {time.time() - t:.1f} s"
+    if held: info += f"; masked hold {held[1]} ms at {held[2]} (stream stop {t0 + 30500})"
     if e.upper:
         gaps = [g for g in blocks["gaps"] if g[1] > 3000]
         g = max(gaps, default=(0,) * 6)
@@ -137,7 +152,8 @@ def run(seed, image, verbose=False, ring_heap=False, stack="model"):
                  f"longest off CPU not waiting on a queue {ready} ms; fullest queues "
                  + ", ".join(f"{q:#x} {w}/{n}" for q, (w, n) in sorted(queues["peak"].items(), key=lambda kv: kv[1][1] - kv[1][0])[:3]))
         if queues["full"]: bad.append("posts to a full queue: " + ", ".join(f"{q:#x} x{n}" for q, n in queues["full"].items()))
-        if g[0] > 2100 or ready > 500: bad.append(f"app task off the CPU {g[0]} ms, {ready} ms not on a queue")
+        if g[0] > 2100 + (held[1] if held else 0) or ready > 500 + (held[1] if held else 0):
+            bad.append(f"app task off the CPU {g[0]} ms, {ready} ms not on a queue")
         if retry[0] >= 20: bad.append("the app dropped its send ring (20 refusals)")
     if verbose: print(out.getvalue())
     return info, bad
@@ -150,13 +166,15 @@ def main():
     ap.add_argument("--only", type=int, help="run one seed and print its log")
     ap.add_argument("--ring-heap", action="store_true", help="take the data heap down to the ring's 528 free bytes first")
     ap.add_argument("--stack", default="model", choices=("model", "real"), help="real: the upper stack from firmware/flash_ring.bin")
+    ap.add_argument("--hold", type=int, nargs=2, metavar=("LO", "HI"),
+                    help="real stack: once per run, the lower stack masks interrupts LO..HI ms at a connection event")
     a = ap.parse_args()
     img = Path(tempfile.mkdtemp()) / "patched.bin"
     img.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()))
     seeds = [a.only] if a.only is not None else range(a.seed, a.seed + a.runs)
     found = 0
     for s in seeds:
-        info, bad = run(s, img, verbose=a.only is not None, ring_heap=a.ring_heap, stack=a.stack)
+        info, bad = run(s, img, verbose=a.only is not None, ring_heap=a.ring_heap, stack=a.stack, hold=a.hold)
         print(("FOUND " if bad else "ok    ") + info, flush=True)
         for b in bad: print("      ", b, flush=True)
         found += bool(bad)

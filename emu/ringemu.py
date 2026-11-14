@@ -64,7 +64,14 @@ STACK_SPANS = ((0x802000, 0x400), (0x80E000, 0x14600))     # OTA header (image t
 PATCH_RAM = HERE / "firmware" / "patch_ram.bin"   # ROM patch RAM part read off a running ring (0x203800..); flash copy is AES-encrypted
 HCI_IF = {0x177A4: "hci_if_open", 0x177CC: "hci_if_close", 0x17804: "hci_if_write", 0x178CC: "hci_if_rx_done",
           0x178FA: "hci_if_rx_done", 0x7A92: "ftl_load_intern", 0x79BE: "ftl_save_intern"}  # unnamed ROM entries the stack calls
-LE_ACL_LEN, LE_ACL_BUFS = 27, 8     # assumption: the controller's answer to LE Read Buffer Size (not found in the ROM)
+LE_ACL_LEN, LE_ACL_BUFS = 251, 10   # the ROM lower stack's answer to LE Read Buffer Size (rombootprobe.py --hci)
+# Command Complete parameters the ROM's lower stack returns (ROM default config, after the status byte) for the commands
+# the upper stack sends before a link: recorded with rombootprobe.py --hci, checked by test_rom_lower_stack_answers_hci.
+ROM_HCI = {0x1001: bytes.fromhex("0a0c000a5d006287"), 0x1003: bytes.fromhex("fffffffedbff7b87"),
+           0x1002: bytes.fromhex("b3ffbb03c0feffff3fffe49ff30fa8fe07e783ff1c00000061f7ffff7f000000fec0f9ffffffffe7ff030000f801") + bytes(18),
+           0x1005: bytes.fromhex("fd030000000000"), 0x2002: struct.pack("<HB", LE_ACL_LEN, LE_ACL_BUFS),
+           0x2003: bytes.fromhex("fd7ffe030e000000"), 0x201C: bytes.fromhex("ffffffffff030000"), 0x200F: b"\x08",
+           0x202A: b"\x08", 0x204B: bytes.fromhex("a600")}
 CONN_MS = 49                        # connection interval: the phone's 48.75 ms, in whole ms
 ROM_DATA = (0x42E6C, 0x2000E8, 0x10E0)      # the reset handler's .data copy (0x8D52): ROM source, RAM, length
 ROM_BSS = (0x2011C8, 0x1F8C)                # and its .bss clear; it stops at the reset-reason word 0x203154
@@ -1266,12 +1273,10 @@ class Emu:
         if op in done:      # Command Status now, the completion one connection event later
             self.hci_event(0x0F, struct.pack("<BBH", 0, 1, op))
             return self.later(done[op])
-        ret = {0x1001: struct.pack("<BHBHH", 9, 0x0D, 9, 0x5D, 0x8762), 0x1002: b"\xff" * 64, 0x1003: bytes(8),
-               0x1009: bytes.fromhex("665544332211"), 0x1005: struct.pack("<HBHH", LE_ACL_LEN, 0, LE_ACL_BUFS, 0),
-               0x2002: struct.pack("<HB", LE_ACL_LEN, LE_ACL_BUFS), 0x2003: b"\x3f" + bytes(7), 0x200F: b"\x08",
-               0x2018: bytes(range(8)), 0x201C: b"\xff" * 8, 0x202F: struct.pack("<4H", 251, 2120, 251, 2120),
+        ret = {**ROM_HCI, 0x1009: bytes.fromhex("665544332211"),
+               0x2018: bytes(range(8)), 0x202F: struct.pack("<4H", 251, 2120, 251, 2120),
                0x2023: struct.pack("<2H", 27, 328), 0x2022: h, 0x1405: h + b"\xc4", 0x2015: h + b"\xff" * 5,
-               0x201A: h, 0x201B: h}.get(op, b"")
+               0x201A: h, 0x201B: h, 0xFD82: p}.get(op, b"")
         self.hci_event(0x0E, struct.pack("<BHB", 1, op, 0) + ret)    # Command Complete, status 0, one command credit
 
     def link_up(self):

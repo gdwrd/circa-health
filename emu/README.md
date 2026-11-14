@@ -9,7 +9,7 @@ Tools for the Colmi RY02 ring's firmware (Realtek RTL8762E, image `RY02_3.00.33_
 | `viewer.html` | Replays a recorded run (`--trace trace.js`): spinning ring, chip-to-sensor diagram, event log. |
 | `test_ringemu.py` | End-to-end tests: heart rate, the patch, installing the patch over the emulated Bluetooth update, the exception layer and the real kernel. |
 | `sweep.py` | Seeded sweep of the light-stream restart scenario under the real kernel (`python sweep.py --runs 300`, `--only SEED`; `--stack real` runs the ring's own Bluetooth upper stack). |
-| `rombootprobe.py` | Runs the ROM's own reset handler and shows how far it gets (stops in the radio bring-up). |
+| `rombootprobe.py` | Runs the ROM's own reset handler through the Bluetooth lower stack's init to `os_sched_start`; `--hci` then sends the upper stack's HCI init through the ROM's real `hci_if` and lower stack, `--spin` runs its hardware polls with the hardware held busy. |
 | `ringprobe.py` | Talks to the real ring from a PC (`bleak`): timed command plans, and on ca0003 or later `peek` / `dump` memory (`A1 10`) and `crash` (`A1 11`, boot counter and crash record); on ca0004 `aon` (`A1 12`) and the watchdog latch in `crash`; on ca0005 also the watchdog experiment's counters (FW16f). `python ringprobe.py -h`. |
 | `firmware/` | The stock image and the built patch. |
 | `sdk-ref/` | Reference files from Realtek's RTL8762E SDK (ROM symbol table, register header) and the public web flasher. The emulator needs `8762e/rom_symbol_gcc.axf` and `8762e/rtl876x.h`. |
@@ -20,6 +20,8 @@ python ringemu.py --ms 34000 --quiet-mem --cmd 3000:6901
 python patch_fw.py
 python -m pytest -q -p no:faulthandler test_ringemu.py
 python sweep.py --stack real --runs 20         # restart scenario through the ring's own upper stack
+python sweep.py --stack real --hold 500 4000   # plus one interrupts-masked hold by the lower stack per run
+python rombootprobe.py --hci --spin
 python ringprobe.py crash                      # ring near the PC, phone Bluetooth off; RING_ADDR or --addr picks the ring
 ```
 
@@ -64,9 +66,10 @@ in it, and the stack's messages go into the app's real queues. The ROM boot itse
   and moves nothing during `link_stalls` (supervision timeout `sup_ms`, 20 s). Its callbacks into the stack run in the
   stand-in task at priority 6, `low_stack_task`'s real priority. The phone is a GATT client over ATT: it connects,
   discovers the services (Read By Group Type), turns notifications on (service start + 5) and writes commands
-  (start + 2). Assumptions: the controller's LE buffers (27 bytes, 8) and that the lower stack holds a packet's buffer
-  until it is sent; the radio, LL timing, retransmissions and the ROM lower stack's own allocations (about 8 KB of the
-  ring's data heap: 528 free on the ring, 8,776 here) are not modelled.
+  (start + 2). Its HCI command answers are the ROM lower stack's own (`ROM_HCI`, recorded and checked with
+  `rombootprobe.py`; LE buffers 251 bytes x 10). Assumptions: the lower stack holds a packet's buffer until it is sent;
+  the radio, LL timing, retransmissions and the ROM lower stack's own allocations (26 KB in its ROM default config, less
+  on the ring: 528 data-heap bytes free there, 8,776 here) are not modelled.
 
 Still modelled in both: flash and FTL contents (Python, no timing in `model`), AON registers, logging, DLPS (the
 power-manager hooks run; nothing sleeps), sensors.
@@ -81,9 +84,12 @@ running ring, so the dump cannot be decrypted. That part holds the patch's entry
 `test_rom_patch_hooks_are_installed` skips without it).
 
 The real ROM boot (`rombootprobe.py`): the reset handler runs through RAM init, `os_init`, the log UART (its text is
-captured: "Bee3 ROM version: Jun  4 2021 16:47:30"), the vector table, the timer pool, 32 kHz calibration and baseband
-setup with six justified register stubs, and stops in the Bluetooth MAC / radio bring-up (indirect port
-`0x40051074`): that is the boundary.
+captured: "Bee3 ROM version: Jun  4 2021 16:47:30"), the vector table, the timer pool, 32 kHz calibration, the Bluetooth
+MAC / radio bring-up and the lower stack's whole init (`low_stack_task`, its 8 queues, pools, buffers) up to
+`os_sched_start`, with nine register models, each read off the loop that polls it (listed in the file). Past that it has
+no exception layer: `--hci` calls `low_stack_task`'s dispatcher by hand, so the ROM's HCI layer answers real commands,
+but nothing over the air happens (no BTMAC interrupt, no bzdma rings: the boundary, docs/FIRMWARE.md "Lower stack").
+Flash images are not loaded there: the ROM patch and the app do not run.
 
 The ROM: `firmware/rom_rtl8762.bin` (`0x0..0x43F4C`, dumped from the ring) is Realtek's code and stays untracked.
 Without it, or with `RINGEMU_NO_ROM=1`, every ROM function is a stand-in and the ROM tests skip. With it, in both

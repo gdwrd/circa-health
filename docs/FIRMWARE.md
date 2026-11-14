@@ -774,6 +774,199 @@ the patched image still restarts within 4 s of the hang.
 it is sent; responses one connection event later); the encrypted patch code; the lower stack's priority-6 work and
 interrupts; instruction timing (one cycle per 16-bit instruction).
 
+## Lower stack in the ROM (FW16d part 4)
+
+From the ROM dump, the readable half of the patch RAM (`emu/firmware/patch_ram.partial`, `0x203800..0x205420`) and
+`emu/rombootprobe.py`, which now runs the ROM's reset handler through the whole lower-stack init and then real HCI
+through it. **Code** = read in the disassembly (Python one-offs, capstone); **run** = seen in the probe or emulator.
+
+**What runs for real now, and the boundary (run).** `rombootprobe.py` boots from the reset vector to `os_sched_start`
+with three register models beyond the six of FW16d part 2, each read off the loop that polls it: the radio/modem
+indirect port `0x40051244` (a command completes by flipping bit 15, as the MAC port `0x40051074` already did; a register
+file returns what was written), the bzdma init's done bits (`0x40058328` bits 8/9 for start bits 0/1), and
+`OTP->stack_en` (`0x2002DC` bit 0, which ringemu already presets; without it the ROM brings up the HCI-over-UART
+controller and waits on UART0 at `0x172B8`). `--hci` then opens `hci_if` and sends the upper stack's own 19 init
+commands (as the emulator's stack mode sends them, up to Advertise Enable) through the real `hci_if_write`, the real
+lower-stack queues and dispatcher `0x3204E`, the ROM's HCI command layer and event path, back to the callback; the
+received buffers are released as the upper stack does. Every command gets Command Complete, status 0. The probe has no
+exception layer: after `os_sched_start` the dispatcher is called by hand, nothing preempts, no interrupt or timer runs.
+**Boundary: the BTMAC interrupt and the bzdma rings.** Everything the link layer does over the air (advertising
+events, CONNECT_IND, connection events, ACL in and out, acknowledgements, supervision) is driven by the BB status
+bits below and by data the bzdma engine moves between the radio and RAM rings; their formats are not in the SDK
+headers or the symbol names, so a model there would be invented. The emulator's stack mode therefore keeps its Python
+link layer under `hci_if`, but its HCI command answers are now the ROM's own (`ringemu.ROM_HCI`, compared against the
+ROM by `test_rom_lower_stack_answers_hci`). That replaced one assumption: **LE Read Buffer Size = 251 bytes x 10
+buffers** (not 27 x 8); also Local Version (HCI/LMP `0x0A`, revision `0x000C`), the command, feature and LE feature
+masks, LE supported states, resolving list size 8, `0x204B` = `a6 00`, and the vendor command `0xFD82` is echoed. The
+stack tests pass unchanged with 10 ACL credits. These are the ROM defaults: the encrypted patch half may change the
+config on the ring (see the 8 KB below).
+
+**Task and queues (code + run).** One task, `low_stack_task` (`0x1460B`, priority 6, 0xC00 stack, made by `0x14624`
+with semaphore `[0x201854]`). Its loop `0x1460A`: `os_sem_take(sem, [0x20085C] = forever)`, then `0x3204E`. (`0x1460E`
+spins at priority 6 while the semaphore handle is 0; it is created right after the task at boot.) `0x3204E` sets
+`0x201831`, then scans its queue table `0x202BD0` (12-byte entries {handler, queue, enabled}, count byte `0x202C3C`)
+in index order, takes one message from the first non-empty queue (`0x31DB2`) and calls its handler, until all are
+empty; then the after-drain hook `[0x202A4C]` = `0x14725`. The queues are the lower stack's own rings (create
+`0x31C36`/`0x31E2C`, post `0x31CF6`, storage from `0x319AA`), not FreeRTOS queues; a post (`0x32108`, `0x320F4`)
+gives the semaphore (`0x320C6`), or pends a call on the timer task when `0x200364+0x19` bit 1 is set (not by default).
+
+| Queue | Handler | Role |
+|---|---|---|
+| 0 | `0x32990` | messages from the ISRs (switch on id `0x67..`; frees a carried buffer at `0x32A66`); run |
+| 1 | `0x18B16` | baseband control (rewrites the BB interrupt mask `0x20088C`) |
+| 2 | `0x17A5C` | `hci_if` H4 transport: open, write, rx done; run |
+| 3 | `0x16722` | HCI command layer: per-opcode handlers (`0x18EA2` LE Read Buffer Size, `0x18F84`, `0x192B6` advertising); run |
+| 4 | `0x18AD0` | not traced |
+| 5 | `0x2E48C` | link layer (reaches the radio port through `0x22772`) |
+| 6 | `0x165AA` | events and received ACL up to `hci_if_callback` (buffers from buffer RAM `0x280xxx`); run |
+| 7 | `0x2D97C` | link layer (BB ops slot `+0x30`) |
+
+**HCI below `hci_if` (code + run).** `hci_if_open` `0x177A4` stores the callback (`0x201F94`) and posts the open
+message; `hci_if_write` `0x17804` sorts by H4 type (1 command; 2 ACL, whose handle must be below `[0x2029A0]` +
+`[0x200E8E]` + 2, else type 5; 3 SCO) and posts `{pkt, len, type}`; rx done `0x178CC`/`0x178FA` post a release. All
+posts go through `0x3230A` (patch hook `0x202C78`). Advertise Enable goes on into the LL scheduler (`0x26E00`,
+`0x3339E`, `0x34A0E`), the BB ops and bzdma (`0x15206`). ACL out of `hci_if` reaches the radio through
+`bzdma_send_packet_to_ble_data_ring_fifo` (`0x15369`, from the LL's TX table `0x200BD8`) and `0x15300` (LL
+`0x28544`): both issue a bzdma command (below).
+
+**Interrupts (code).** ROM vectors at 0 (copied to RAM `0x200000`). BTMAC = IRQ 2, slot 18 = `0x32937`: reads the BT
+status `0x40006010`, calls the patch hook `rcp_BTMAC_Handler` (`0x202C94`; it returns false on the ring, below), then
+bit 0 → `0x3138` (two Bluetooth timers, `0x400020A0/A4`, callbacks `0x202D10`), bit 1 → `0x35C` (baseband), bit 3 →
+`0x2E0` (bzdma channels, `0x4005831C`, mask `0x201`, bounded loop). `0x35C` reads BB status `0x400500BE` and **loops
+while `status & ~[0x20088C]` is non-zero**; the mask is `0xD0` after boot, so bits 0-3, 5 and 8-15 keep it looping. It
+handles only bit 14 (MAC wake, `0x3DDAC`), bit 15 (LE, `0x2C16`, when OTP `0x2001D4` bit 1, set by default) and bit 2
+(PSD end, `0x34C`, only if BB register 0 bit 3). It leaves only when the status reads clear, or the MAC sleeps and bit 14
+is clear; no iteration bound. `0x2C16` reads the LE status (BB `0x50`, `0x80`) through the BB ops, dispatches through
+the tables at `0x202878`/`0x202540` (`+0x2C`, `+0x4C`), and has its own **loop `0x2D02..0x2D3E` until BB register
+`0x28C` reads 0**, also unbounded. Whether these status bits clear on read or by the handlers is hardware behaviour
+the code does not show.
+
+**BB register API (code).** Table `0x200B8C`: `+0xC` read16 (`0x225C4`, `0x40051000 + reg`), `+0x10` write16
+(`0x225CC`: wakes the MAC first if it sleeps; the patch replaces it, below), `+0x14`/`+0x18` radio port read/write
+(`0x225E6`/`0x226A2`, port `0x40051244`), `+0x20`/`+0x24` MAC port read/write (`0x22962`/`0x22A36`, port
+`0x40051074`), `+0x30` `0x22B6D` (patched). Both ports: `os_lock`, write data and index, poll bit 15 up to 1,000,000
+times, log on timeout, `os_unlock`.
+
+**Allocations (run; ROM default config with `stack_en`).** All made at boot through `os_mem_alloc_intern`, none freed:
+
+| Heap | Where (function: request sizes) | Bytes with headers |
+|---|---|---|
+| data | `0x1ED48`: 2960, 80, 160, 120 (LL init) | 3,352 |
+| data | `0x385A2`: 768, 2112 | 2,896 |
+| data | `0x31C36`: 4 x 160, 3 x 240, 320 (the 8 queues' message storage) | 1,744 |
+| data | `0x3BBE8`: 1504; `0x33A10`: 1040, 40; `0x283D2`: 200, 440 | 1,512; 1,096; 656 |
+| data | `0x2DB4E`: 178, 256; `0x387C0`: 384; `0x1766C`: 168; `0x322E4`: 128; `0x31E2C`: 28, 32, 40; `0x3EBE0`: 48, 4 | 1,360 |
+| data | `low_stack_task` stack 3,072 + TCB 88, its semaphore 80 | 3,264 |
+| buffer | `0x319AA`: 1967, 2640, 352 (queue/pool storage) | 4,984 |
+| buffer | `0x14AB6`: 2136 (bzdma rings); `0x335D6`: 2016; `0x38266`: 1024 | 2,144; 2,024; 1,032 |
+
+Total: data 15,880 B (falls back to the buffer heap when full), buffer 10,184 B. At run time the lower stack
+allocates only three lazy one-offs, each once while its pointer is 0 (`0x2ECE8` 28 B buffer heap for PSD reports,
+`0x2FD88` 61 B and `0x2FDAE` 244 B); the rest of its run-time traffic uses those pools and rings. **So the lower stack
+cannot run the heap down after boot.** **The missing 8 KB:** the emulator (app + real upper stack, real kernel, 5 s)
+uses 20,912 B data + 4,104 B buffer; the ring idle uses 29,160 + 10,760: 14,904 B are missing (8,248 data, 6,656
+buffer). The ROM-default lower stack is 26,064 B, 11 KB more than that, and the heaps (29,688 + 14,440) could not hold
+both. Loading the ring's config sector (`0x801400`, read by the ROM at `0x6B3A`) changes no size. So on the ring the
+lower stack is configured smaller than the ROM default, most likely by the encrypted patch half, which runs before
+the main boot. Not resolved: needs the rest of `patch_ram.bin` or `A1 10` reads of `0x202BD0..0x202C3C` (queue table)
+and the heap words right after boot.
+
+**Interrupt masking and hardware polls (code; run where marked).** The lower stack (ROM `0x14000..`) contains no
+`cpsid`: it masks interrupts only through `os_lock` (`0x132D8` → `vPortEnterCritical`, `msr primask` `0x1106E`; 123
+call sites ROM-wide) and by running in the BTMAC handler. Every loop in the ROM that reads a peripheral was listed
+(105); those on lower-stack paths:
+
+| Where | Waits for | Bound | Interrupts | Reached from | Probe, hardware held busy |
+|---|---|---|---|---|---|
+| `0x226A2` radio port write | `0x40051244` bit 15 clear (or BB `0x50` bit 5) | 1,000,000 polls, log, return | masked | radio register writes (`rtk_write_modem_radio_reg` callers), LL queue 5 via `0x22772`, DLPS restore | returns after 24.0 M instructions, all masked: ~0.6 s at 40 MHz |
+| `0x225E6` radio port read | bit 15 set | 1,000,000 | masked | radio register reads | 25.0 M masked, ~0.6 s |
+| `0x22A36` MAC port write (`0x22962` read) | `0x40051074` bit 15 | 1,000,000 | masked | BB ops `+0x24`/`+0x20` | not run (same shape) |
+| `0x22772`, `0x22AFC` | the port write returning 0 | none: retries while it returns an error (3) | masked per try | LL (`0x19966`, `0x2496C`, `0x2150A`, `0x241FC`, `0x249AA`) | not run |
+| `0x15294`/`0x152C4` (`0x152FE`, `0x15300`), `0x282DE` bzdma command | `0x40058460` bit 10 clear | **none** | **masked** | ACL TX into the radio ring (`0x15369`, LL `0x28544`) | never returns, masked |
+| `0x14EF0` bzdma init | `0x40058328` bits 8 and 9 | none | no | cold init only (argument 0; DLPS restore passes 1 and skips it) | never returns |
+| `0x3EB9C` MAC wake | BB status bit 14 | none | not itself | btmac PM table `0x2010D0` (DLPS exit) | never returns |
+| `0x2488A` | BB `0x13F` bit 1 | none | not itself | LL `0x216E8`, `0x2B76C`, `0x2C1A2`, LE test commands | not run |
+| `0x35C` BB ISR | status & ~mask clear | none | handler mode | every BB interrupt | never returns with an unhandled bit set |
+| `0x2D02` LE ISR | BB `0x28C` = 0 | none | handler mode | every LE interrupt | not run (entry conditions not read) |
+| `0x1820A` PSD start | `0x400500D6` bit 8 | 100,000 | no | channel assessment | ran to its bound during boot |
+| flash lock `0xA3C8` | nothing on the radio: sets BB `0xDA` bit 8 (nesting `0x2020D8`), then masks for erase/program | - | masked for the whole flash operation | flash erase/write | - |
+
+A BB register write while the MAC sleeps (`0x225CC` → `btmac_pm_initiate_wakeup` → power manager `0xD170`) only asks
+for the wake and does not wait (run). In the emulator time is one cycle per instruction: the real M0+ with branches and
+peripheral reads takes more, so the 0.6 s bounds are lower limits.
+
+**ROM patch RAM, the readable half (code).** Entry `0x203801`: log init and version, `0x2038F0`, then **the reset
+reason is replaced**: `0x201510` (what `reset_reason_get` returns) = AON register `0x16` high byte (AON `0x17`), then
+AON `0x17` = 1; then the flash part's entry (`0x803400` + offset) and `[0x206D2C]`. The patched `WDG_SystemReset`
+(`0x20503D`) writes the reason to AON `0x17` for every mode, calls an optional pointer from `0x205700` (past the file)
+and returns false, so the ROM's reset code still runs. So on the ring the reason is AON `0x17`: 1 after any reset that
+kept AON register `0x16` without passing through `WDG_SystemReset` (a watchdog after a hang, if AON survives it), the
+passed reason after `WDG_SystemReset` when the mode keeps AON (`08` → `0xD3`, seen), and **0 when AON `0x16` was lost**
+(power-on, brown-out, or a reset mode that clears it). The FW16b/FW16e decoding of 0 through the ROM's RAM magic does not
+apply on the ring. The installer `0x204428` sets 16 lower-stack hooks, all with targets in the readable half:
+
+| Pointer (ROM user) | Target | What it does |
+|---|---|---|
+| `0x200B9C` BB write16 | `0x203A4F` | as the ROM, but refuses (logs) a write to BB `0x5A` that changes only bits 12-13 |
+| `0x202C94` `rcp_BTMAC_Handler` | `0x203B91` | takes BTMAC status bit 0 itself (the two BT timers, `0x203B5E`), clears it, returns false |
+| `0x200B0C` `ll_hw_init` | `0x203AA1` | ROM `ll_hw_init`, then BB `0x136` bit 15 |
+| `0x202C78` lower-stack post | `0x203CD1` | rewrites one message (id `0x273`, type `0x14`) then posts as the ROM does; no wait |
+| `0x201708` `LogBufferLowerStack` | `0x203B47` | log filter |
+| `0x200BD0`, `0x200BBC` (BB ops `+0x44`, `+0x30`) | `0x203AC5`, `0x204123` | LL register helpers (`0x203AC5` under `os_lock`); their loops walk tables, no hardware polls |
+| `0x200F8C`, `0x202854`, `0x200C6C`, `0x202894`, `0x200C70`, `0x200C88`, `0x202880`, `0x202D70`, `0x200EE8` | `0x203BAB` .. `0x2043E5` | LL internals (`0x203D97` the largest: table walks with LL calls, no hardware polls) |
+
+Also there: `flash_ioctl` hook `0x2039C5` (flash ID; 6 efuse bytes through a bounded ROM loop), a copy of the DLPS
+enter step (`0x20494A`, the ROM's `0x3EAE2` plus saving watchdog register `+0x30` to `btmac_pm_system + 0x20`: a
+read, no kick), a DLPS restore wrapper (`0x204A28`) and a DLPS decision (`0x204A7C`, from
+`os_timer_next_timeout_value_get` and the RTC). No loop in the readable half polls hardware without a bound. Not in
+it: the targets of `pvPortMalloc` (`0x205C35`), `os_timer_create` (`0x205C01`), `os_msg_queue_create` (`0x205BD9`),
+`0x205B71`, `0x20560D` and `0x205700`.
+
+**Hunt (emulator, `sweep.py --hold LO HI`).** The lower stack cannot be run under the emulator's kernel past its HCI
+layer (boundary above), so the sweep injects what the code says it can do: once per run, at a connection event between
+the light stream's start and 4 s after its stop, the CPU is held with interrupts masked for LO..HI ms (one radio or MAC
+port timeout is ~0.6 s; a bzdma or ISR spin is unbounded), through the real kernel, the real upper stack and the
+patched app (`ca0005`). Seeds 100..123, holds 500..4,000 ms: 5 of 24 restarted through the watchdog, 9 more stretched the kick gap past 3 s without a restart. Every hold up to 2.6 s is survived (kick gap
+up to 3.6 s); holds of 2.7..3.8 s reset in some runs and not others (seeds 100, 102, 103, 109, 112 reset; 113, 114, 117
+not), depending on where the hold falls against the 2 s TIM5 tick: a reset needs hold + time since the last kick > 4 s,
+and ca0005's TIM5 kick does not help because it cannot run while interrupts are masked. So one radio or MAC port
+timeout (~0.6 s) cannot restart the ring; four or more back to back, or any of the unbounded spins, can. Without holds
+(`--stack real`, seeds 0..15, now with the ROM's 10 LE buffers) nothing: kick gap 2,000 ms, app task longest off the
+CPU 1,999 ms, app refusal streak 13 at most. `test_lower_stack_masked_hold_at_a_connection_event`: 600 ms survived,
+4,500 ms resets through the watchdog with ca0005.
+
+**What the lower stack can and cannot do to the app task (code).** It can keep the app task (priority 2) off the CPU
+in three ways: (a) `low_stack_task` at priority 6 never blocks while its queues hold messages; (b) the BTMAC handler
+runs above every task; (c) `os_lock` sections mask all interrupts, TIM5 and SysTick included, so FW16f's TIM5 kick
+cannot run either. It cannot exhaust the heap after boot (three lazy one-offs). It never waits on the flash (the flash
+lock only sets BB `0xDA` bit 8). Direct candidates, ranked:
+
+1. **bzdma command write on the ACL TX path** (`0x15294`/`0x152C4`, also `0x282DE`): `os_lock`, then waits for
+   `0x40058460` bit 10 with no timeout. If the DMA engine stays busy (radio or clock off, a stuck transfer during a
+   burst), interrupts stay masked for good; the watchdog fires after 4 s and latches a pc in `0x152B4..0x152BA` or
+   `0x152EA..0x152F0` (or `0x282FA..0x28300`). It runs exactly when ACL data goes out, i.e. during the light stream.
+2. **BB interrupt handler loops** (`0x35C` while an unmasked status bit stays set; `0x2D02` while BB `0x28C` is
+   non-zero): no bound, in handler mode; tasks starve, TIM5 runs only if its NVIC priority is higher. Latch pc in
+   `0x370..0x3C0`, `0x2D02..0x2D3E` or a callee.
+3. **Radio/MAC port timeouts** (`0x226A2`, `0x225E6`, `0x22A36`): ~0.6 s or more masked per call, and `0x22772` /
+   `0x22AFC` retry without a bound while the port reports an error. Seven back to back are 4 s.
+4. **Unbounded waits outside `os_lock`**: MAC wake `0x3EB9C` (DLPS exit), `0x2488A` (BB `0x13F`), bzdma cold init:
+   they hold only their caller's priority (6, or the idle task's DLPS path), so with interrupts on TIM5 still posts
+   but the app task does not run.
+
+**Not verified.** Whether any of these hardware bits ever sticks on the ring (the code only shows that nothing would
+end the wait); how the BB status bits clear; the NVIC priorities of BTMAC and TIM5; real instruction timing; the lower
+stack's config on the ring (the 11 KB gap above); the second half of the patch RAM (heap, timer and queue replacements);
+anything below the HCI layer at run time (no connection was run through the ROM).
+
+**The measurement on the ring that settles it.** Right after the next restart, `python ringprobe.py crash` (the
+watchdog latch, AON `0x1C0..0x1C6`, `A1 12`; it survives the reset). Latch pc in `0x152B4..0x152BA`, `0x152EA..0x152F0`
+or `0x282FA..0x28300` = candidate 1 (bzdma busy, interrupts masked); in `0x370..0x3C0`, `0x2D02..0x2D3E` = candidate 2;
+in `0x22604..0x2269E`, `0x226DA..0x2276E`, `0x22A6A..0x22AF8` or `0x225C4..0x225CA` (the BB read called from those
+loops, lr then in them) = candidate 3; `0x3EBB0`, `0x248D8` = candidate 4. On ca0005, candidates 1-3 still reset
+within 4 s (TIM5 is masked too); candidate 4 runs with interrupts on, so FW16f's TIM5 kick carries it: late > 0 and no
+restart if it ends within about 30 s, else a restart about 36 s after it began with the latch in the spin.
+
 ## Wear state (FW15a)
 
 The stock firmware has one. It decides "on the finger" from a reflection reading of the optical chip (I2C `0x44`),

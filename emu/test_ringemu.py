@@ -711,7 +711,7 @@ def test_real_upper_stack_answers_over_hci():
 
 @needs_flash
 def test_real_upper_stack_holds_a_stalled_light_stream(tmp_path):
-    # Light stream at 12 notifications a second, then 4.5 s with no traffic.  The controller's 8 buffers fill, the stack's
+    # Light stream at 12 notifications a second, then 4.5 s with no traffic.  The controller's 10 buffers fill, the stack's
     # 10 notification credits (0x207784) run out and server_send_data refuses (exit 3, not a missing buffer); the app
     # retries (os_delay 20) without reaching its 20-refusal drop and stays clear of the 4 s watchdog; the samples that
     # arrive come in order once the link is back (the patch's light copy skips samples rather than fill the send ring).
@@ -738,6 +738,62 @@ def test_real_upper_stack_holds_a_stalled_light_stream(tmp_path):
     assert min(v for t, v in credits if t > 4000) == 0 and credits[-1][1] == ringemu.LE_ACL_BUFS
     assert 0 < retry[0] < 20
     assert max(g[0] for g in blocks["gaps"] if g[1] > 3000) < 2100 and e.resets == 1
+
+
+@needs_rom
+def test_rom_lower_stack_answers_hci():
+    # The ROM's reset handler runs the Bluetooth lower stack's whole init (three more register models, rombootprobe.py);
+    # then the upper stack's HCI init goes through the real hci_if and low_stack_task's dispatcher, and the ROM's own HCI
+    # layer gives the answers the emulator's controller gives in stack mode (ringemu.ROM_HCI; LE buffers 251 x 10).
+    import rombootprobe
+    b = rombootprobe.boot()
+    assert b.pc == rombootprobe.OS_SCHED_START and ("low_stack_task", 0x1460B, 0xC00 // 4, 6) in b.tasks
+    assert sum((s + 15) & ~7 for t, s, at in b.allocs if t == 1 and at >= 0x14000) == 10184     # its buffer-heap blocks
+    got = dict(rombootprobe.hci(b))
+    for op, evs in got.items():     # one Command Complete each, status 0
+        assert len(evs) == 1 and evs[0][:2] == b"\x04\x0e" and struct.unpack_from("<HB", evs[0], 4) == (op, 0), hex(op)
+    assert {op: got[op][0][7:] for op in ringemu.ROM_HCI} == ringemu.ROM_HCI
+
+
+@needs_rom
+def test_rom_lower_stack_spins_with_interrupts_masked():
+    # Read off the code, run here with the hardware held busy: the bzdma command write on the packet TX path (0x152FE)
+    # waits for its busy bit under os_lock with no bound; the radio port (0x226A2) gives up after 1,000,000 polls, all
+    # masked (about 0.6 s at 40 MHz); the baseband ISR loops while an unmasked status bit it has no handler for stays
+    # set; a baseband write while the MAC sleeps only asks for the wake-up and does not wait.
+    import rombootprobe as rb
+    b = rb.boot()
+    back, masked, primask = rb.spin(b, 0x152FE, (0, 0), 0x40058460, 0x400)
+    assert not back and primask and masked > 10_000_000
+    back, masked, primask = rb.spin(b, 0x226A2, (0x10, 0), 0x40051244, 0x8000)
+    assert back and 20_000_000 < masked < 30_000_000 and not primask
+    assert not rb.spin(b, 0x35C, (), 0x400500BE, 1)[0]
+    assert rb.spin(b, 0x225CC, (0xDA, 0x100), 0x400500BE, 0, asleep=True)[0]
+
+
+@needs_flash
+@pytest.mark.parametrize("hold_ms, resets", [(600, 1), (4500, 2)])
+def test_lower_stack_masked_hold_at_a_connection_event(tmp_path, hold_ms, resets):
+    # What the lower stack's code can do (docs/FIRMWARE.md "Lower stack"): mask interrupts at a connection event, about
+    # 0.6 s per radio-port timeout, without a bound in a bzdma or ISR spin.  One timeout is survived; a hold past the
+    # watchdog resets even ca0005, whose TIM5 kick cannot run with interrupts masked (sweep.py --hold).
+    import patch_fw
+    img = tmp_path / "patched.bin"
+    img.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()))
+    e = ringemu.Emu(quiet_mem=True, trace=True, image=img, kernel="real", stack="real")
+    done, stock = [], e.conn_event
+    def conn_event():
+        if not done and e.now >= 8000:
+            done.append(e.now)
+            e.busy(hold_ms)
+        return stock()
+    e.conn_event = conn_event
+    e.command(3000, bytes([0x03]))
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(16000)
+    assert done and e.resets == resets
+    assert any("WATCHDOG" in ev["text"] for ev in e.trace) == (resets == 2)
 
 
 @needs_flash
