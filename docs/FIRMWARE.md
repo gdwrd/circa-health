@@ -205,10 +205,11 @@ but blank only in the emulator, and the ROM's own flash use (boot patch, `ftl_sa
 | `A1 0A` / `A1 0B`, `A1 0C nn <samples>` | FW7a | light copy on / off (echoed); while on, each read of the optical queue by the 320 ms drain (3 bytes a sample, up to 4). From ca0002 the copy turns itself off when the stock firmware stops the drain timer (every measurement end, e.g. live HR 30.5 s after `69 01`), so the phone sends `A1 0A` again with each `69 01`. On ca0001 a stock stop with the copy still on and the link up killed the real ring about 8 s later (cause not found). |
 | `A1 0F <state> <t 4>` | FW15b | wear state and the clock at its last change |
 | `A1 10 <len> <bytes>`, `A1 10 FF` | FW16a | answer to `A1 10 <addr 4 LE> <len>`: `len` (1..12) bytes from memory. `FF` = refused: the range is not wholly inside one of the readable ranges below, or len is 0 or above 12. Read only, byte loads. |
-| `A1 11 <seq> <12 bytes>` × 6 (× 7 from ca0005) | FW16a, FW16f | answer to `A1 11` (and `A1 11 01`, which wipes the record first): seq 0..5 carry the 72 bytes of the crash block from `+4` (table below); from ca0005 seq 6 carries the watchdog experiment's counters (`0x20DD5C`..`0x20DD68`: late u32, stand-in kicks u32, longest gap u16, run u16). The packet count tells the version. Decode with `emu/ringprobe.py crash`. |
+| `A1 11 <seq> <12 bytes>` × 6 (× 7 on ca0005 only) | FW16a, FW16f | answer to `A1 11` (and `A1 11 01`, which wipes the record first): seq 0..5 carry the 72 bytes of the crash block from `+4` (table below); on ca0005 (never flashed) seq 6 carried the watchdog experiment's counters (`0x20DD5C`..`0x20DD68`: late u32, stand-in kicks u32, longest gap u16, run u16). The packet count tells the version. Decode with `emu/ringprobe.py crash`. |
 | `A1 12 <count> <values>`, `A1 12 FF` | FW16e | answer to `A1 12 <reg lo> <reg hi> <count>`: `count` (1..6) 16-bit always-on (AON) registers `reg`, `reg+2`, …, each little-endian, read through the ROM's `btaon_fast_read_safe` (0x32F94). `FF` = refused: `reg` odd, count 0 or above 6, or a register past `0x1DE`. Read only. `0x1C0`..`0x1CA`: the watchdog latch (pc >> 1 lo/hi, lr lo/hi, psr lo/hi); `0x1CC`..`0x1D6`: the AON watchdog's; `0x14` high byte: the reset-reason byte ("AON 0x15"). Decode with `emu/ringprobe.py crash` (from ca0004). |
+| `A1 13 <selector>` | FW16g | answer to `A1 13 <n>` (sets the fault selector, below) and to `A1 13 FF` (reads it back): the selector now. `A1 13` with no argument sets 0 (packets are zero-padded). Lives in RAM: 0 after every restart. From ca0006. |
 
-Patch sub-types in use: 05, 07..0C, 0F, 10, 11, 12; 0D / 0E are kept for FW8c; free from 13.
+Patch sub-types in use: 05, 07..0C, 0F, 10..13; 0D / 0E are kept for FW8c; free from 14.
 
 ## Memory map, faults and resets (FW16a)
 
@@ -219,13 +220,13 @@ Found by reading the stock image and `emu/sdk-ref` (Python one-offs), not on the
 | `0x000000`..`0x043F4C` | ROM: code the app calls by address (`memcpy` `0x3F848`, `os_sched_start` `0x131C2`; the startup calls `exit` at `0x409B8`, the last ROM symbol), strings, and its `.data` image `0x42E6C`..`0x43F4C` (vector table copy from `0x42D84`). Its vector table is at 0. | read (ca0003: to `0x40A00`) | Sure: the ROM's reset handler (`0x8D52`, `0x8D74`) reads up to `0x43F4B` at every boot, and no ROM literal points further. Whether the ROM goes on past `0x43F4C` (padding) is not known; refused. |
 | `0x200000`..`0x207400` | ROM-reserved RAM (SDK: 29 KB): RAM vector table at `0x200000` (VTOR), ROM data (`pxCurrentTCB` `0x201340`, `app_cb_wdg_reset` `0x201514`), the main stack (initial MSP `0x203800`, from the app's vector table) | read | Sure (SDK `mem_config.h`, the app's own table and writes) |
 | `0x207400`..`0x207C00` | upper-stack RAM (SDK: 2 KB) | read | SDK |
-| `0x207C00`..`0x20EC00` | app RAM, 28 KB (`update_ram_layout(0x7000, 0x7400, 0)` in SystemInit `0x824696`): `.data` from `0x207C00`, `.bss` `0x208654`..`0x20DC30`, RAM-code overlay to `0x20DCF8`, patch RAM, crash block, FW16f counters to `0x20DD70` | read | Sure |
+| `0x207C00`..`0x20EC00` | app RAM, 28 KB (`update_ram_layout(0x7000, 0x7400, 0)` in SystemInit `0x824696`): `.data` from `0x207C00`, `.bss` `0x208654`..`0x20DC30`, RAM-code overlay to `0x20DCF8`, patch RAM, crash block to `0x20DD5C` (ca0005: FW16f counters to `0x20DD70`) | read | Sure |
 | `0x20EC00`..`0x216000` | heap, 29 KB (task stacks live here) | read | Sure (same call; 88 KB of RAM in all per the SDK) |
 | `0x800000`..`0x880000` | flash, 512 KB, read through the cache (XIP) | read | Likely: the SDK's `FLASH_SIZE`, and the firmware's own history writes reach `0x87D000`. A larger chip would only be refused. |
 | `0x40000000`.. | peripherals | refused | Many registers change state when read (FIFOs, read-to-clear flags). |
 | `0xE000E000`.. | Cortex-M0+ system control space | refused | Readable in principle (word access only); left out to keep the reader to byte loads. |
 
-Patch RAM: `0x20DCF8`..`0x20DD10` (TAP_STATE, SEQ, LIGHT, WEAR) is zeroed at every start by the extended `.bss` fill
+Patch RAM: `0x20DCF8`..`0x20DD10` (TAP_STATE, SEQ, LIGHT, FAULT_SEL `0x20DD05` from ca0006, WEAR) is zeroed at every start by the extended `.bss` fill
 (length literal `0x824728`). The crash block `0x20DD10`..`0x20DD5C` is above it and nothing in the image writes there
 except FW16a:
 
@@ -233,11 +234,11 @@ except FW16a:
 |---|---|---|
 | `+0` | 4 | boot magic `0x544F4F42` ("BOOT"); wrong = the block is wiped and the counter starts again |
 | `+4` | 4 | boot counter: +1 at each start (main's call to `os_sched_start`, `0x8249AC`) |
-| `+8` | 4 | the HardFault slot's value before the hook took it (the stock handler the hook chains to) |
+| `+8` | 4 | the HardFault slot's value before the hook took it (the stock handler; chained to until ca0005, not from ca0006) |
 | `+12` | 4 | `reset_reason_get()` (ROM `0x12B70`), read when `A1 11` is answered |
 | `+16` | 60 | record, 15 words: magic `0x48535243` ("CRSH", 0 = none), kind (1 HardFault, 2 `WDG_SystemReset`), boot counter at the time, `pxCurrentTCB`, 8 frame words, sp, lr on entry, check = XOR of the 14 words before it |
 
-FW16f (ca0005) counters follow at `0x20DD5C`..`0x20DD70`, zeroed by the boot hook (RAM is lost at every reset anyway).
+FW16f (ca0005 only: built, never flashed, removed in ca0006) counters followed at `0x20DD5C`..`0x20DD70`, zeroed by the boot hook (RAM is lost at every reset anyway).
 Each is written by one context only, with one store (M0+ word and halfword stores are single bus writes, so no
 read-modify-write is shared): the TIM5 interrupt writes late, stand-in, run and ticks; the app task (its `0x19`
 handling) writes ticks-at-kick and the longest gap, and clears run.
@@ -281,7 +282,7 @@ How faults and resets work on this image:
   known (no ROM dump); the emulator assumes the app's RAM keeps its bytes. On the ring the boot counter answers it: if it
   goes up after `08`, the block survives a software reset.
 
-Hook safety (why ca0003 cannot stop the ring from starting): the boot hook runs after all of the app's start-up, uses
+Hook safety (why ca0003 cannot stop the ring from starting; from ca0006 the fault hook no longer chains, see FW16g): the boot hook runs after all of the app's start-up, uses
 r0-r3 only, no stack, and tail-jumps to `os_sched_start` with main's lr; it writes only the crash block and slot 3. The
 startup and the vector table in flash are unchanged; the reset callback is one literal the stock SystemInit stores. The
 fault hook keeps lr, sp and r4-r11 for the stock handler (r0-r3 are already stacked), and never chains to itself (the
@@ -717,6 +718,9 @@ peak with `A1 12`/`A1 11`. Not implemented (this item does not change the firmwa
 
 ## Watchdog experiment (FW16f, ca0005)
 
+**Built as ca0005, never flashed, removed in ca0006.** The restart it was meant to explain turned out to be a
+HardFault (FW16b: watchdog latch pc `0x4782` on the real ring), not a starved app task. The findings below still hold.
+
 **Verified in the stock image and ROM (Python one-offs).** The startup `0x824448` copies `.data`:
 `memcpy(0x207C00, 0x83ED68, 0x7D8)`; app vector slot 49 (`0x83ED44`) = `0x207C01`. The TIM5 handler `0x207C00`:
 `push {r2, r3, r4, lr}` (the 8-byte message on the stack), `r4 = 0x40002064` (TIM5), read `+0xC` (end of interrupt),
@@ -773,6 +777,94 @@ the patched image still restarts within 4 s of the hang.
 **Not verified.** Everything below the `hci_if` API (assumed: 8 LE buffers of 27 bytes; a packet's buffer held until
 it is sent; responses one connection event later); the encrypted patch code; the lower stack's priority-6 work and
 interrupts; instruction timing (one cycle per 16-bit instruction).
+
+## HardFault word in the watchdog latch (FW16g, ca0006)
+
+**Why.** On ca0004 the random restart was caught: after a Light run the latch read pc `0x00004782`, lr `0x00005851`,
+psr `0x01000000`. `0x4782` is the ROM HardFault handler's spin (config `0x2003C2` bit 1 clear), so the restart is a
+HardFault, about 2 s after the stock live-HR stop, ended by the 4 s watchdog. FW16a's record was written, but to RAM,
+which loses power at every reset on this chip. The latch survives. So ca0006 makes the fault leave one chosen word in it.
+
+**What the latch holds (code, the ROM dump).** The live core pc and lr when the watchdog fires, not a stacked frame:
+the ring's pc `0x4782` is the spin instruction itself (`b .`), and lr `0x5851` is the return address of `bl 0x11AC0` at
+`0x584C`, inside a ROM UART/log helper (`0x5810`, reached through a pointer, no direct `bl` to it), i.e. what the live lr
+still held after the last call the ROM handler made before its spin (calls return with `pop {pc}`, which leaves lr).
+It is neither EXC_RETURN nor a frame word. The cold-boot self-test agrees: it latches the lr of a delay call in thread
+mode (SDK: `0x7BB5`). So a handler that sets lr and spins with `b .` leaves lr in the latch, with pc = its spin.
+
+**What the hook does.** Slot 3 holds `0x83FD2D` (entry `0x83FD2C`); the two instructions before it are its spins,
+**`FAULT_SPIN` = `0x0083FD28`** and **`0x0083FD2A`** for a word of 0 (both `b .`; `patch_fw.py` checks the address at
+build, `ringprobe.py` keeps a copy). In order:
+EXC_RETURN bit 2 picks PSP or MSP (handler-mode and thread-on-MSP faults: MSP, the current sp); the frame counts as
+good only if word aligned and in `0x200000`..`0x216000 - 32`; one word is picked by the byte `FAULT_SEL` (`0x20DD05`,
+the spare byte after LIGHT, zeroed by the startup at every boot); the FW16a record is written (as before, kind 1,
+first event after a clear only; now inline); lr = the word; `b 0x83FD28` forever, in handler mode, nothing kicks.
+**A word of 0 spins at `0x83FD2A` instead, with lr = EXC_RETURN**: `print_reset_reason` runs its watchdog self-test
+whenever the latched lr is 0 (`cmp` at `0x82458E`), and that overwrites the latch with a cold-boot-looking value
+(found in the emulator: selectors 13 and 20 on registers holding 0 lost the word).
+Until the word is picked only r0-r3 and r12 change (they are stacked), so r4-r11 are still the faulting context's.
+
+| Selector | lr in the latch |
+|---|---|
+| 0 (default, and any unknown value) | stacked pc: the faulting instruction |
+| 1 | stacked lr |
+| 2, 3, 4, 5, 6 | stacked r0, r1, r2, r3, r12 |
+| 7 | stacked xPSR |
+| 8 | the frame address (sp at the fault, as found, even when not in RAM) |
+| 9 | EXC_RETURN (`0xFFFFFFFD` a task on PSP, `0xFFFFFFF9` thread on MSP, `0xFFFFFFF1` a fault inside a handler) |
+| 10 | pxCurrentTCB (`0x201340`) |
+| 11 | the word at stacked pc - 4 (byte loads, little-endian) |
+| 12 | the word at stacked pc (its first halfword is the faulting instruction) |
+| 13 .. 20 | r4, r5, r6, r7, r8, r9, r10, r11 at fault entry, one register each (not packed) |
+
+Markers: `0xBADF0000` = a frame selector (0..7, 11, 12) with the frame not in RAM (selector 8 then gives its address);
+`0xDEAD0000 | (stacked pc & 0xFFFF)` = selector 11 / 12 and the 4 bytes not wholly inside a range `A1 10` reads (ROM to
+`0x43F4C`, RAM, flash to `0x880000`). `A1 13 <n>` sets the selector (echo `A1 13 <n>`), `A1 13 FF` reads it back.
+**It is lost at every restart** (it is in RAM): set it again after each one, and note which one was set, because the
+latch read after the restart cannot tell.
+
+**Why the ring still always recovers.** The hook never returns and kicks nothing; HardFault (priority -1) blocks every
+interrupt, so TIM5 cannot post the `0x19` kick either, and no task runs: the watchdog fires at most 4 s after the
+last kick before the fault. Is the watchdog on at that moment? Yes: the app enables it at boot (4 s, RESET_ALL); the
+only run-time `WDG_Disable` in the app (`0x833402`) is on the HCI/test-mode start path, which ends in its own
+`os_sched_start` instead of the normal one (`0x8249AC`); DLPS cannot be entered (the idle task never runs again, and the
+CPU spins instead of `wfi`); and the ring's own latch pc `0x4782` shows the watchdog ending exactly this situation
+(stock spin, interrupts likewise blocked). The ROM handler relies on the same: it spins too (bit 1 clear), after an
+optional `WDG_Restart` and `WDG_Config` (`0x4518`, logging path; no `WDG_Enable` call). **Why the hook cannot fault:** no push, no
+call (a stack overflow cannot hit it, and the frame below sp is left alone); its loads are its own literals, fixed RAM
+words (`FAULT_SEL`, pxCurrentTCB, the crash block), frame words only after the RAM and alignment check (a stacked sp
+outside RAM gives `0xBADF0000`, never a load), and code bytes only after the `A1 10` range check, by byte loads (no
+alignment fault). A fault in the hook would lock the M0+ up; the watchdog still resets a locked core (assumed: it is a
+peripheral; not seen). Residual: the hook runs from flash, as before (a fault during a flash erase or write would not
+reach it).
+
+**Emulator (`test_ringemu.py`).** Both kernels treat a `b .` inside the HardFault handler as a hang until the watchdog
+(as the ROM spins already were). Modelled kernel, a task faulting on PSP: selector 0 → latch pc `0x83FD28`, lr = the
+faulting pc; 1 → its lr; 8 → the frame address; 9 → `0xFFFFFFFD`; 10 → the TCB; 13 → r4; 20 → r11; 7 → xPSR; 12 on an
+unmapped pc → `0xDEAD1234`, one fault only; 12 / 11 on code in RAM → the `ldr` and the halfword after it / the two
+halfwords before; 99 → stacked pc; a frame outside the chip's RAM → `0xBADF0000` (selector 8: its address); the
+handler entered with a frame on MSP and EXC_RETURN `0xFFFFFFF1` → its stacked pc / its address; 15 on an r6 of 0 →
+pc `0x83FD2A`, lr `0xFFFFFFFD`, no self-test at the boot. Each case: `A1 13`
+echoes and reads back, reads 0 after the restart, the restart comes exactly 4 s after the hang, `A1 12` and
+`ringprobe.decode_aon` show the word. Real kernel: a priority-3 task (PSP) and an IRQ handler (nested, frame on the
+main stack) loading from an unmapped address; selectors 0, 1 / 0, 8, 9; one fault, one watchdog reset, latch as above.
+A normal 60 s run with two measurements: no restart, one kick per TIM5 tick, `A1 11` answers 6 packets. The app task
+starved for 10 s now restarts at about 24 s, patched as stock.
+
+**Not verified.** The latch behaviour on the ring beyond the one reading above (that the latch is the live lr is read
+from the code and the SDK, not tested with a known value); the M0+ lockup case; real timing.
+
+**How to catch the fault on the ring** (ca0006; `cd emu`):
+
+1. `python ringprobe.py fault-select 0` (stacked pc; also the default after any restart). Check it echoes 0.
+2. Light runs (`69 01` + `A1 0A`, as before) until the ring restarts.
+3. `python ringprobe.py crash`: the line `HardFault, word <selector name unknown after reset> = 0x...` is the word
+   for the selector last set. Note it with the selector.
+4. Repeat 1-3 with `fault-select 1` (stacked lr: who called the faulting code), `8` (sp: which stack, how deep),
+   `10` (the task), `12` (the faulting instruction's bytes; with selector 0's pc, disassemble them).
+
+Latch pc `0x83FD2A` = a HardFault whose word was 0 (lr is then EXC_RETURN). Any other pc is not a HardFault: decode it as in FW16e (`0x8D38` assert, `0x12B08` software reset,
+a loop address for a hang).
 
 ## Lower stack in the ROM (FW16d part 4)
 

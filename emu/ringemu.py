@@ -85,6 +85,7 @@ FLASH_ERASE_MS, FLASH_PAGE_MS = 45, 0.7     # 4 KB sector erase; one 256-byte pa
 ROM_SPINS = {"wdg_reset_spin": 0x12B08,     # end of WDG_SystemReset: watchdog armed with a tiny timeout, reset follows
              "assert_spin": 0x8D38,         # vAssertHandler with asserts on: interrupts off, waits forever
              "hardfault_spin": 0x4782}      # HardFault handler when its reset bit (0x2003C2 bit 1) is clear
+SPIN = b"\xfe\xe7"  # b . : in the HardFault handler (the patch's fault hook, FW16g) a hang until the watchdog
 AON_LATCH = range(0x1C0, 0x1CC, 2)  # watchdog latch: pc >> 1 (lo, hi), lr (lo, hi), psr (lo, hi); read-only, survives a reset
 WDG_TIMEOUT_MS = 4000  # assumption: the SDK's default ROM watchdog (4 s, reset all); whether it runs on the ring is not known
 HEAP_WORDS = 0x2014D8   # xFreeBytesRemaining[2], xMinimumEverFreeBytesRemaining[2], xHeapTotalSize[2]; [0] data, [1] buffer
@@ -647,6 +648,10 @@ class Emu:
                 self.hardfault()
                 continue
             if not self.romcall:
+                if self.cur.name == "HardFault" and self.uc.mem_read(self.r(UC_ARM_REG_PC), 2) == SPIN:
+                    self.hang("HardFault: b . in the handler")
+                    self.cur = None
+                    continue
                 spins += 1
                 if spins == 3:
                     self.ev(f"STUCK: {3 * SLICE} instructions without a ROM call, pc={self.r(UC_ARM_REG_PC):#x} lr={self.r(UC_ARM_REG_LR):#x}")
@@ -664,8 +669,9 @@ class Emu:
         self.uc.reg_write(UC_ARM_REG_PSP, frame)
         self.tasks.remove(self.cur)
         self.cur = None
+        kept = {r: self.r(r) for r in REGS[4:12]}          # r4-r11: exception entry leaves them as they were
         self.spawn("HardFault", self.r32(0x20000C), stack=0x400)
-        self.tasks[-1].ctx[UC_ARM_REG_LR] = 0xFFFFFFFD
+        self.tasks[-1].ctx.update(kept | {UC_ARM_REG_LR: 0xFFFFFFFD})
 
     def rom_HardFault_Handler(self):
         """Model: the stock fault handling ends in a chip reset (the real ring restarts); the ROM's handler is not available."""
@@ -732,6 +738,9 @@ class Emu:
 
     def on_block(self, uc, addr, size, _):
         if addr >= EXC_PAGE: return uc.emu_stop()          # EXC_RETURN 0xFFFFFFF9 / 0xFFFFFFFD (0xFFFFFFF1 is UNTIL)
+        if size == 2 and 3 in self.exc_active and not self.hung and uc.mem_read(addr, 2) == SPIN:   # only NMI is above
+            self.hang("HardFault: b . in the handler")
+            return uc.emu_stop()
         self.cyc += size >> 1   # shortcut: one cycle per 16-bit instruction (the M0+ takes 2 for loads and taken branches); calibrate if timing gets close
         if not self.in_call and (self.cyc >= self.stop_cyc or self.exc_live and self.exc_ready() is not None): uc.emu_stop()
 

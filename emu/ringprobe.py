@@ -5,8 +5,11 @@
   python ringprobe.py dump 0x0 0x40a00 rom.bin     same into a file, 12 bytes a request; run it again to resume
   python ringprobe.py crash [--clear]              a1 11: boot counter and crash record (--clear: a1 11 01, then read),
                                                    on ca0005 the watchdog experiment's counters (a 7th packet),
-                                                   then on ca0004 the watchdog latch and AON 0x15 (a1 12)
+                                                   then on ca0004 the watchdog latch and AON 0x15 (a1 12); from ca0006 a
+                                                   latch pc at the fault hook's spin = a HardFault, lr = the selected word
   python ringprobe.py aon 0x1c0 12                 a1 12: 16-bit AON registers 0x1c0, 0x1c2, .. (ca0004 or later)
+  python ringprobe.py fault-select 12              a1 13: which word the next HardFault leaves in the latch's lr
+                                                   (ca0006); 255 reads it back.  Back to 0 at every restart.
 
 Ring address: --addr, else RING_ADDR, else 31:37:42:30:68:07.  RESP=1 writes with response, V2=1 also logs de5bf729.
 """
@@ -16,6 +19,11 @@ WRITE, NOTIFY = "6e400002-b5a3-f393-e0a9-e50e24dcca9e", "6e400003-b5a3-f393-e0a9
 STREAM = {(0xA1, 0x0C): "light", (0xA1, 0x05): "motion"}
 REC_MAGIC = 0x48535243
 FRAME = {1: ("r0", "r1", "r2", "r3", "r12", "lr", "pc", "xpsr"), 2: ("mode", "reason", "r2", "r3", "r4", "r5", "r6", "r7")}
+FAULT_SPIN = 0x83FD28           # patch_fw.FAULT_SPIN (ca0006): the fault hook's b ., latched as pc after a HardFault;
+                                # + 2 = its spin for a word of 0 (lr = EXC_RETURN: a latched lr of 0 is lost at boot)
+SELECTORS = ("stacked pc", "stacked lr", "stacked r0", "stacked r1", "stacked r2", "stacked r3", "stacked r12",
+             "stacked xPSR", "frame address (sp at the fault)", "EXC_RETURN", "task (pxCurrentTCB)", "word at stacked pc - 4",
+             "word at stacked pc (the faulting instruction)", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11")
 
 
 def pkt(payload: bytes) -> bytes:
@@ -58,6 +66,13 @@ def decode_aon(v: dict) -> str:
     lines = [f"AON 0x15 (reset-reason byte, re-armed to 1 at boot) {v[0x14] >> 8:#04x}"]
     for name, b in (("watchdog latch", 0x1C0), ("AON watchdog latch", 0x1CC)):
         lines.append(f"{name}: pc {word(b) << 1:#010x}  lr {word(b + 4):#010x}  psr {word(b + 8):#010x}")
+    if word(0x1C0) << 1 in (FAULT_SPIN, FAULT_SPIN + 2):
+        lr = word(0x1C4)
+        lines.append(f"HardFault, word <selector name unknown after reset> = {lr:#010x}" if word(0x1C0) << 1 == FAULT_SPIN else
+                     f"HardFault, word <selector name unknown after reset> = 0x00000000  (second spin; lr = EXC_RETURN {lr:#010x})")
+        lines.append("  the selector was lost at the reset: it is the one last set with fault-select (0 = stacked pc if"
+                     " none since that boot)" + ("; 0xbadf0000 = the frame was not in RAM" if lr == 0xBADF0000 else "")
+                     + ("; 0xdead.... = selector 11/12 and the stacked pc not readable (its low 16 bits)" if lr >> 16 == 0xDEAD else ""))
     return "\n".join(lines)
 
 
@@ -179,6 +194,7 @@ async def main() -> None:
     p = sub.add_parser("dump"); p.add_argument("addr", type=lambda s: int(s, 0)); p.add_argument("len", type=lambda s: int(s, 0)); p.add_argument("file")
     p = sub.add_parser("crash"); p.add_argument("--clear", action="store_true")
     p = sub.add_parser("aon"); p.add_argument("reg", type=lambda s: int(s, 0)); p.add_argument("count", type=lambda s: int(s, 0))
+    p = sub.add_parser("fault-select"); p.add_argument("n", type=lambda s: int(s, 0), choices=range(256), metavar="n")
     a = ap.parse_args()
     ring = Ring(a.ring)
     await ring.connect()
@@ -197,6 +213,10 @@ async def main() -> None:
         elif a.cmd == "aon":
             v = await ring.aon(a.reg, a.count)
             print("a1 12 not supported (firmware before ca0004)" if v is None else "\n".join(f"{r:#05x}  {x:#06x}" for r, x in v.items()))
+        elif a.cmd == "fault-select":
+            n = (await ring.ask(pkt(bytes([0xA1, 0x13, a.n])), 0x13))[0][2]
+            print(f"fault selector {n}: {SELECTORS[n] if n < len(SELECTORS) else 'unknown = stacked pc'}"
+                  " (lost at the next restart: note it, crash cannot tell)")
         else:
             got = sorted(await ring.ask(pkt(bytes([0xA1, 0x11, 1 if a.clear else 0])), 0x11, 7, least=6), key=lambda d: d[2])
             assert [d[2] for d in got] == list(range(len(got))), [d[2] for d in got]     # 6 packets before ca0005, 7 from it

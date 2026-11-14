@@ -50,15 +50,15 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        FLASH_LO..FLASH_HI are read (byte loads, nothing else is touched); anything else, len 0 or len > 12 answers
        a1 10 ff.  Crash record in CRASH (above the zero-filled patch RAM, so the startup leaves it alone): BOOT hooks main's
        last call (os_sched_start) to count boots (BOOT_MAGIC valid: +1, else the block is wiped and the count starts at 1)
-       and to put FAULT_HOOK in the RAM vector table's HardFault slot, keeping the slot's old value to chain to.
-       FAULT_HOOK saves the stacked r0-r3, r12, lr, pc, xpsr (from PSP or MSP as EXC_RETURN says; zeros if that stack
-       pointer is outside RAM), then jumps to the old handler with lr and sp as it found them.  SystemInit stores
+       and to put FAULT_HOOK in the RAM vector table's HardFault slot, keeping the slot's old value (no longer chained to
+       from ca0006, FW16g).  FAULT_HOOK saves the stacked r0-r3, r12, lr, pc, xpsr (from PSP or MSP as EXC_RETURN says;
+       zeros if that stack pointer is outside RAM), see FW16g for what it does next.  SystemInit stores
        RESET_SEEN instead of the stock watchdog-reset callback (literal WDG_CB_LITERAL), so every WDG_SystemReset(mode,
        reason) is recorded too (r0 = mode, r1 = reason, r2-r7 as called) before the stock callback runs.  The first event
        after a clear wins: a record is written only while none is held.  Record (u32 LE, at REC): magic, kind (1 fault,
        2 reset), boots then, task (pxCurrentTCB), 8 frame words, sp, lr on entry (EXC_RETURN / return into the ROM),
        check = XOR of the 14 words before it.  a1 11 answers 6 packets  a1 11 <seq 0..5> <12 bytes>  of CRASH+4..CRASH+76:
-       boots, the stock HardFault handler, reset_reason_get() now, the record (7 from ca0005, FW16f).  a1 11 01 wipes the
+       boots, the stock HardFault handler, reset_reason_get() now, the record (ca0005 only: 7, FW16f).  a1 11 01 wipes the
        record first.
   FW16e a1 12 <reg lo> <reg hi> <count>  reads always-on (AON) registers through the ROM's read-only btaon_fast_read_safe
        (AON_READ): a1 12 <count> <count x 16-bit values, LE> .. checksum, registers reg, reg+2, ..; count 1..6.  reg must be
@@ -67,17 +67,21 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        lr (lo, hi), psr (lo, hi); 0x1CC..0x1D6 the same for the AON watchdog; 0x14 high byte = the reset-reason byte
        (AON "0x15", re-armed to 1 at every boot).  The stock boot keeps a latch whose lr is not 0, so no boot hook is
        needed.  a1 10 now also reads the ROM up to ROM_END = 0x43F4C (its .data image, copied by the ROM at every boot).
-  FW16f watchdog experiment.  The watchdog (about 4 s, reset-everything) is kicked only by the app task handling message 0x19
-       (APP_KICK), which the TIM5 handler (RAM code at DATA_RAM, copied from DATA_FLASH by the startup) posts every 2 s.  Two
-       hooks: TICK replaces the handler's post call (TIM5_POST, in the .data image) and KICK_SEEN the app's kick.  Per tick:
-       ticks + 1; run = ticks since the app task's last kick, less this one (0 = the previous 0x19 was handled); run >= 1
-       counts a late tick; while run <= RUN_MAX the handler restarts the watchdog itself (run >= 1 counts a stand-in kick);
-       past that it does not, so an app task dead for good still ends in a watchdog reset about 34..36 s after it stopped.
-       The run-0 kick is needed: at the first overdue tick the app's last kick is already 4 s minus its latency old, which
-       a 4 s watchdog does not wait for.  The app's kick sets ticks-at-kick = ticks (ends the run), clears run, keeps the
-       longest gap between its kicks in ticks, then kicks as stock.  Counters at WDT (zeroed by BOOT, lost at a reset):
-       late u32, stand-in u32, longest gap u16, run u16, ticks u32, ticks at the app's last kick u32.  a1 11 answers a 7th
-       packet (seq 6) with the first 12 bytes; all are readable with a1 10.
+  FW16f watchdog experiment (stand-in kicks from the TIM5 handler, counters in a 7th a1 11 packet): built as ca0005, never
+       flashed, removed in ca0006 (the restart is a HardFault, not a starved app task); see docs/FIRMWARE.md.
+  FW16g the HardFault's word survives the reset in the watchdog latch.  RAM is lost at every reset on the ring; the latch
+       (AON 0x1C0.., a1 12) is not, and holds the live pc and lr when the watchdog fires.  So FAULT_HOOK, after the record,
+       never chains: it picks one word by the selector byte FAULT_SEL, puts it in lr and spins at FAULT_SPIN (b ., in
+       handler mode, nothing kicks) until the 4 s watchdog resets the chip: latch pc = FAULT_SPIN, lr = the word.  A word
+       of 0 spins at FAULT_SPIN + 2 with lr = EXC_RETURN: the stock boot runs its self-test, overwriting the latch, when the
+       latched lr is 0 (print_reset_reason 0x82458E).
+       Selector: 0 stacked pc (default), 1 stacked lr, 2..6 stacked r0, r1, r2, r3, r12, 7 stacked xPSR, 8 the frame
+       address (sp at the fault), 9 EXC_RETURN, 10 pxCurrentTCB, 11 the word at stacked pc - 4, 12 the word at stacked pc
+       (byte loads, only if all 4 bytes lie in a range a1 10 reads, else 0xDEAD0000 | stacked pc & 0xFFFF), 13..20 r4..r11
+       at fault entry (one register each); anything else = stacked pc.  Frame selectors (0..7, 11, 12) give BAD_FRAME when the frame
+       is not in RAM.  No push, no call: the hook cannot fault, whatever frame it is handed.  a1 13 <n> sets the selector and
+       answers a1 13 <n>; a1 13 ff reads it back (a1 13 alone sets 0: packets are zero-padded).  FAULT_SEL is in the
+       zero-filled patch RAM: back to 0 after every restart, set it again after each one.
   Version: the firmware texts the ring reports end in _ca<VERSION, 4 digits> (e.g. _ca0001) instead of _250117, in the
   file's wrapper too.  Builds before ca0001 were tagged _circa<one character: 0-9, then A = 10>.
 
@@ -106,7 +110,7 @@ START_SAMPLING = 0x20BA3F               # flag the motion interrupt sets; the ne
 READ_TICK = 0x82E63C                    # gsensor_read_timer_id callback; the motion interrupt calls it directly
 MOTION_ONLY = 0x10
 TAP_T, TAP_Q, TAP_LO, TAP_HI, TAP_RUN = 20, 15, 3, 8, 4     # 640 mg, 480 mg; 120..320 ms apart at 25 Hz
-VERSION = 5                             # build number, tag ca0005.  Old scheme (tag circa<n>): 1 = v4.1.0 (FW1); 2, 3 = v4.2.0,
+VERSION = 6                             # build number, tag ca0006.  Old scheme (tag circa<n>): 1 = v4.1.0 (FW1); 2, 3 = v4.2.0,
                                         # v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected taps, never fired on the ring); 5 = taps found
                                         # in the samples (v4.2.3, firm taps only); 6 = normal taps (v4.2.4); 7 = motion stream ends when
                                         # the phone leaves (FW11); 8 = numbered samples (FW12); 9 = light samples (FW7a); 10 (circaA) =
@@ -115,7 +119,8 @@ VERSION = 5                             # build number, tag ca0005.  Old scheme 
                                         # copy ends with the measurement and sends only the drain's own reads (FW7a); 3 (ca0003) =
                                         # debug window: memory read, crash record, boot counter (FW16a); 4 (ca0004) = AON read
                                         # a1 12, ROM readable to 0x43F4C (FW16e); 5 (ca0005) = watchdog experiment:
-                                        # bounded stand-in kick in the TIM5 handler, counters in a1 11 (FW16f)
+                                        # bounded stand-in kick in the TIM5 handler, counters in a1 11 (FW16f; never
+                                        # flashed); 6 (ca0006) = FW16f removed, the HardFault's word in the latch (FW16g)
 LIGHT_READ = 0x830238                   # optical read helper (reg, buf, len) for I2C 0x44; its epilogue below
 LIGHT_HOOK = 0x830268                   # mov r0, r4 ; pop {r1-r7, pc}: r4 = 0 if read, r6 = len, r7 = buf, [sp] = register,
 LIGHT_EPILOGUE = bytes.fromhex("2046febd")   # [sp + 28] = the helper's return address (only the helper reaches here)
@@ -131,7 +136,8 @@ STOCK_TEXT = b"3.00.33_250117"          # in the wrapper, the device-information
 TAP_STATE = 0x20DCF8                    # 8 bytes: count, last xh yh zh, quiet samples, jolt run, since first tap + 1, spare
 SEQ = TAP_STATE + 8                     # FW12: 4 bytes, the last packet's seq (0 after boot)
 SEQ_MAX = 0x3FFFF
-LIGHT = SEQ + 4                         # FW7a: 1 byte (+3 spare), light copy on
+LIGHT = SEQ + 4                         # FW7a: 1 byte (+2 spare), light copy on
+FAULT_SEL = LIGHT + 1                   # FW16g: 1 byte, the word the fault hook puts in the latch (0 at every boot)
 WEAR = LIGHT + 4                        # FW15b: state byte (+3 spare), then 4 bytes: CLOCK at the last change
 WEAR_HOOK = 0x832004                    # detector: strb r0, [r5, #1] (r0 = 0 not worn / 1 worn) ; b 0x832010
 WEAR_BACK = 0x832010
@@ -156,14 +162,10 @@ BOOT_MAGIC, REC_MAGIC = 0x544F4F42, 0x48535243     # "BOOT", "CRSH"
 # FW16e.  ROM btaon_fast_read_safe(u16 reg) -> u16: no stack, r0-r2 only, interrupts left on; restores the AON access
 # register it borrows.  Registers are 16 bits at even offsets; the stock code (ROM and app) touches 0x000..0x1DE.
 AON_READ, AON_END = 0x32F94, 0x1E0
-# FW16f.  The startup (0x824448) copies .data, with the TIM5 handler's RAM code in it, from flash DATA_FLASH to DATA_RAM.
-DATA_RAM, DATA_FLASH, DATA_LEN = 0x207C00, 0x83ED68, 0x7D8
-TIM5_POST = 0x207C1C                    # TIM5 handler: bl POST_MSG (r0 = message {0x19}; r4 = TIM5, kept by the handler)
-POST_MSG = 0x824890
-APP_KICK = 0x82990A                     # app task, message 0x19: bl WDG_RESTART, the watchdog's only kick on this ring
-WDG_RESTART = 0x129EE                   # ROM: WDG_CTL (0x40006000) |= 1 << 24; r0-r2 and flags only, no stack, no OS call
-WDT = CRASH + 76                        # 20 bytes: late, stand-in (u32), longest gap, run (u16), ticks, ticks at the app's kick
-RUN_MAX = 15                            # stand-in kicks in a row at most (about 30 s), then the watchdog may fire
+# FW16g.  FAULT_SPIN = the hook's first instruction (b .), checked at build; ringprobe.py keeps a copy.  FAULT_SPIN + 2:
+# the second spin, for a word of 0 (lr = EXC_RETURN there).  Latch lr markers:
+FAULT_SPIN = 0x83FD28
+BAD_FRAME, UNREADABLE = 0xBADF0000, 0xDEAD0000      # frame not in RAM; stacked pc's bytes not readable (| pc & 0xFFFF)
 
 # Entered instead of the epilogue: sp is still the batch-read frame, r4 = bytes in this batch,
 # the samples sit at sp+0x11.  r5-r7 are free because the epilogue restores them.
@@ -274,6 +276,8 @@ MOTION_CMD = f"""
     cmp   r0, #0x11
     beq   debug
     cmp   r0, #0x12
+    beq   debug
+    cmp   r0, #0x13
     beq   debug
     strb  r5, [r6]
     movs  r0, #0xa1
@@ -446,7 +450,7 @@ back:
 """
 
 
-# FW16a, from MOTION_CMD: r0 = sub-type 10, 11 or 12, r7 = the request, sp = the zeroed reply buffer.  r4-r7 are restored by
+# FW16a, from MOTION_CMD: r0 = sub-type 10..13, r7 = the request, sp = the zeroed reply buffer.  r4-r7 are restored by
 # the handler's pop; the handler's tail at REPLY checksums and queues the buffer at sp.
 DEBUG_CMD = f"""
     mov   r4, sp
@@ -454,6 +458,21 @@ DEBUG_CMD = f"""
     beq   crash
     cmp   r0, #0x12
     beq   aon
+    cmp   r0, #0x13
+    bne   peek
+    movs  r1, #0xa1
+    strb  r1, [r4, #0]
+    strb  r0, [r4, #1]
+    ldr   r1, =0x{FAULT_SEL:x}
+    ldrb  r2, [r7, #2]
+    cmp   r2, #0xff
+    beq   selected
+    strb  r2, [r1]
+selected:
+    ldrb  r2, [r1]
+    strb  r2, [r4, #2]
+    b     reply
+peek:
     ldrb  r1, [r7, #2]
     ldrb  r2, [r7, #3]
     lsls  r2, r2, #8
@@ -573,7 +592,7 @@ packet:
     movs  r2, #12
     bl    0x{MEMCPY:x}
     adds  r5, #12
-    cmp   r6, #6
+    cmp   r6, #5
     beq   reply
     mov   r0, sp
     movs  r1, #15
@@ -589,7 +608,7 @@ reply:
     bx    r3
 """
 
-# FW16a record writer: r0 = kind, r1 = 8 frame words (0: store zeros), r2 = lr on entry, r3 = sp.  Writes only while REC
+# FW16a record writer (RESET_SEEN; FAULT_HOOK writes the same record inline): r0 = kind, r1 = 8 frame words (0: store zeros), r2 = lr on entry, r3 = sp.  Writes only while REC
 # holds no record; the magic goes in before the check, so a record cut short by the reset fails its check.
 SAVE = f"""
     push  {{r4, r5, r6, lr}}
@@ -631,9 +650,19 @@ out:
     pop   {{r4, r5, r6, pc}}
 """
 
-# FW16a HardFault entry (handler mode, on MSP): r0-r3 and r12 are already stacked, r4-r11, lr and sp are left as found
-# for the stock handler.  The two .short lines are  mrs r1, psp  (keystone has no M-profile special registers).
+# FW16a/FW16g HardFault entry (handler mode, on MSP, lr = EXC_RETURN), at FAULT_SPIN + 4.  A word of 0 spins at FAULT_SPIN + 2
+# with lr = EXC_RETURN instead: a latched lr of 0 makes the stock boot run its self-test, which overwrites the latch.  Never returns, never chains: the
+# record (as SAVE writes it, inline), then lr = the selected word and the spin, until the watchdog latches pc and lr.
+# No push and no call.  Every load is from the hook's literals, fixed patch / ROM RAM words, a frame checked to lie in RAM
+# (word aligned, 32 bytes below RAM_HI), or bytes checked as a1 10 checks them, so it cannot fault again (on an M0+ a
+# fault here would lock the core up).  Until the word is picked only r0-r3 and r12 change (stacked), so r4-r11 are the
+# faulting context's; lr keeps EXC_RETURN until then.  r1 = the frame (0 = not in RAM), r12 = its address as found.
+# The .short line is  mrs r1, psp  (keystone has no M-profile special registers).
 FAULT_HOOK = f"""
+spin:
+    b     spin
+zero:
+    b     zero
     mov   r2, lr
     mov   r1, sp
     movs  r0, #4
@@ -641,7 +670,9 @@ FAULT_HOOK = f"""
     beq   main_stack
     .short 0xf3ef, 0x8109
 main_stack:
-    mov   r3, r1
+    mov   r12, r1
+    lsls  r0, r1, #30
+    bne   lost
     ldr   r0, =0x{RAM_LO:x}
     cmp   r1, r0
     blo   lost
@@ -651,14 +682,158 @@ main_stack:
 lost:
     movs  r1, #0
 kept:
-    push  {{r2}}
-    movs  r0, #1
-    bl    SAVE
-    pop   {{r0}}
+    ldr   r3, =0x{FAULT_SEL:x}
+    ldrb  r3, [r3]
+    mov   r0, r12
+    cmp   r3, #8
+    beq   chosen
+    mov   r0, lr
+    cmp   r3, #9
+    beq   chosen
+    ldr   r0, =0x{CURRENT_TCB:x}
+    ldr   r0, [r0]
+    cmp   r3, #10
+    beq   chosen
+    mov   r0, r4
+    cmp   r3, #13
+    beq   chosen
+    mov   r0, r5
+    cmp   r3, #14
+    beq   chosen
+    mov   r0, r6
+    cmp   r3, #15
+    beq   chosen
+    mov   r0, r7
+    cmp   r3, #16
+    beq   chosen
+    mov   r0, r8
+    cmp   r3, #17
+    beq   chosen
+    mov   r0, r9
+    cmp   r3, #18
+    beq   chosen
+    mov   r0, r10
+    cmp   r3, #19
+    beq   chosen
+    mov   r0, r11
+    cmp   r3, #20
+    beq   chosen
+    ldr   r0, =0x{BAD_FRAME:x}
+    cmp   r1, #0
+    beq   chosen
+    cmp   r3, #11
+    beq   code
+    cmp   r3, #12
+    beq   code
+    movs  r2, #20
+    cmp   r3, #1
+    beq   word
+    movs  r2, #28
+    cmp   r3, #7
+    beq   word
+    subs  r2, r3, #2
+    lsls  r2, r2, #2
+    cmp   r3, #2
+    blo   pc_word
+    cmp   r3, #6
+    bls   word
+pc_word:
+    movs  r2, #24
+word:
+    ldr   r0, [r1, r2]
+    b     chosen
+code:
+    ldr   r0, [r1, #24]
+    cmp   r3, #12
+    beq   at
+    subs  r0, #4
+at:
+    adds  r3, r0, #4
+    bcs   unreadable
+    ldr   r2, =0x{ROM_END:x}
+    cmp   r3, r2
+    bls   readable
+    ldr   r2, =0x{RAM_LO:x}
+    cmp   r0, r2
+    blo   unreadable
+    ldr   r2, =0x{RAM_HI:x}
+    cmp   r3, r2
+    bls   readable
+    ldr   r2, =0x{FLASH_LO:x}
+    cmp   r0, r2
+    blo   unreadable
+    ldr   r2, =0x{FLASH_HI:x}
+    cmp   r3, r2
+    bhi   unreadable
+readable:
+    ldrb  r3, [r0, #3]
+    ldrb  r2, [r0, #2]
+    lsls  r3, r3, #8
+    orrs  r3, r2
+    ldrb  r2, [r0, #1]
+    lsls  r3, r3, #8
+    orrs  r3, r2
+    ldrb  r2, [r0, #0]
+    lsls  r3, r3, #8
+    orrs  r3, r2
+    mov   r0, r3
+    b     chosen
+unreadable:
+    ldr   r0, [r1, #24]
+    uxth  r0, r0
+    ldr   r2, =0x{UNREADABLE:x}
+    orrs  r0, r2
+chosen:
+    mov   r2, lr
+    movs  r7, #0
+    cmp   r0, #0
+    bne   nonzero
+    movs  r7, #1
+    mov   r0, r2
+nonzero:
     mov   lr, r0
+    ldr   r4, =0x{REC:x}
+    ldr   r5, [r4]
+    ldr   r6, =0x{REC_MAGIC:x}
+    cmp   r5, r6
+    beq   held
+    movs  r0, #1
+    str   r0, [r4, #4]
+    mov   r3, r12
+    str   r3, [r4, #48]
+    str   r2, [r4, #52]
+    ldr   r0, =0x{CURRENT_TCB:x}
+    ldr   r0, [r0]
+    str   r0, [r4, #12]
     ldr   r0, =0x{CRASH:x}
-    ldr   r0, [r0, #8]
-    bx    r0
+    ldr   r0, [r0, #4]
+    str   r0, [r4, #8]
+    movs  r3, #28
+copy:
+    movs  r0, #0
+    cmp   r1, #0
+    beq   put
+    ldr   r0, [r1, r3]
+put:
+    adds  r5, r4, r3
+    str   r0, [r5, #16]
+    subs  r3, #4
+    bpl   copy
+    str   r6, [r4]
+    movs  r0, #0
+    movs  r3, #52
+sum:
+    ldr   r5, [r4, r3]
+    eors  r0, r5
+    subs  r3, #4
+    bpl   sum
+    str   r0, [r4, #56]
+held:
+    cmp   r7, #0
+    bne   was_zero
+    b     spin
+was_zero:
+    b     zero
 """
 
 # FW16a watchdog-reset callback (r0 = mode, r1 = reason), called by the ROM's WDG_SystemReset before the chip resets.
@@ -677,8 +852,8 @@ RESET_SEEN = f"""
 """
 
 # FW16a, replaces main's bl os_sched_start (lr = main's return): boot counter, HardFault slot, then the stock call.  A slot
-# that already holds FAULT_HOOK (RAM kept and not re-filled by the ROM) keeps the saved handler, so the hook never chains
-# to itself.
+# that already holds FAULT_HOOK (RAM kept and not re-filled by the ROM) keeps the saved handler (reported at CRASH + 8;
+# chained to until ca0005).
 BOOT = f"""
     ldr   r0, =0x{CRASH:x}
     ldr   r1, [r0]
@@ -707,66 +882,8 @@ known:
     str   r2, [r0, #8]
     str   r3, [r1]
 start:
-    movs  r1, #0
-    str   r1, [r0, #{WDT - CRASH}]
-    str   r1, [r0, #{WDT - CRASH + 4}]
-    str   r1, [r0, #{WDT - CRASH + 8}]
-    str   r1, [r0, #{WDT - CRASH + 12}]
-    str   r1, [r0, #{WDT - CRASH + 16}]
     ldr   r3, =0x{OS_SCHED_START | 1:x}
     bx    r3
-"""
-
-# FW16f, replaces the TIM5 handler's post (interrupt context): r0 = the message (kept for the post), r4 is not touched.
-# run = ticks since the app task's last kick, less this one: 0 = the previous 0x19 was handled.  Kicks while run <= RUN_MAX,
-# run 0 too: the app's last kick can be up to 4 s old at the first overdue tick, which a 4 s watchdog does not wait for
-# (the emulator fires first).  Counts late ticks and stand-in kicks (run >= 1).  Every counter here is written by this
-# interrupt only (the app's hook below writes ticks-at-kick, the longest gap and clears run), one store each.
-TICK = f"""
-    push  {{r0, lr}}
-    ldr   r3, =0x{WDT:x}
-    ldr   r0, [r3, #12]
-    adds  r0, #1
-    str   r0, [r3, #12]
-    ldr   r1, [r3, #16]
-    subs  r0, r0, r1
-    subs  r0, #1
-    strh  r0, [r3, #10]
-    beq   kick
-    ldr   r1, [r3, #0]
-    adds  r1, #1
-    str   r1, [r3, #0]
-    cmp   r0, #{RUN_MAX}
-    bhi   post
-    ldr   r1, [r3, #4]
-    adds  r1, #1
-    str   r1, [r3, #4]
-kick:
-    bl    0x{WDG_RESTART:x}
-post:
-    pop   {{r0, r1}}
-    mov   lr, r1
-    ldr   r3, =0x{POST_MSG | 1:x}
-    bx    r3
-"""
-
-# FW16f, replaces the app task's bl WDG_Restart (message 0x19): r0-r3 are free (the caller pops r2-r4, pc next).  Ends the
-# run, keeps the longest gap in ticks, then the stock kick with the caller's lr.
-KICK_SEEN = f"""
-    ldr   r3, =0x{WDT:x}
-    ldr   r0, [r3, #12]
-    ldr   r1, [r3, #16]
-    str   r0, [r3, #16]
-    movs  r2, #0
-    strh  r2, [r3, #10]
-    subs  r1, r0, r1
-    ldrh  r2, [r3, #8]
-    cmp   r1, r2
-    bls   kick
-    strh  r1, [r3, #8]
-kick:
-    ldr   r0, =0x{WDG_RESTART | 1:x}
-    bx    r0
 """
 
 
@@ -925,18 +1042,14 @@ def patch(stock: bytes) -> bytes:
     redirect(STOP_HOOK, STOP_CODE, LIGHT_STOP)                                                # FW7a
     redirect(WEAR_HOOK, asm(f"strb r0, [r5, #1]\nb 0x{WEAR_BACK:x}", WEAR_HOOK), WEAR_SEEN)   # FW15b
     save = hex(append(SAVE))                                                                  # FW16a
-    fault = append(FAULT_HOOK.replace("SAVE", save))
-    redirect(SCHED_CALL, asm(f"bl 0x{OS_SCHED_START:x}", SCHED_CALL), BOOT.replace("FAULT_HOOK", hex(fault | 1)))
+    spin = append(FAULT_HOOK)                                                                 # FW16a, FW16g
+    assert spin == FAULT_SPIN and img[off(spin):off(spin) + 4] == b"\xfe\xe7" * 2, hex(spin)  # ringprobe.py decodes it
+    redirect(SCHED_CALL, asm(f"bl 0x{OS_SCHED_START:x}", SCHED_CALL), BOOT.replace("FAULT_HOOK", hex(spin + 4 | 1)))
     assert img[off(WDG_CB_LITERAL):off(WDG_CB_LITERAL) + 4] == struct.pack("<I", STOCK_WDG_CB | 1)
     struct.pack_into("<I", img, off(WDG_CB_LITERAL), append(RESET_SEEN.replace("SAVE", save)) | 1)
-    assert struct.unpack_from("<3I", img, off(0x824710)) == (DATA_LEN, DATA_FLASH, DATA_RAM)      # FW16f: .data copy
-    tim5 = off(DATA_FLASH + TIM5_POST - DATA_RAM)
-    assert img[tim5:tim5 + 4] == asm(f"bl 0x{POST_MSG:x}", TIM5_POST)
-    img[tim5:tim5 + 4] = asm(f"bl 0x{append(TICK):x}", TIM5_POST)
-    redirect(APP_KICK, asm(f"bl 0x{WDG_RESTART:x}", APP_KICK), KICK_SEEN)
-    assert CRASH >= WEAR + 8 and REC + 60 == WDT and WDT + 20 <= 0x20EC00    # outside the zero-fill below, below the heap
+    assert CRASH >= WEAR + 8 and REC + 60 <= 0x20EC00 and FAULT_SEL < WEAR    # outside / inside the zero-fill below, below the heap
     assert img[off(BSS_LEN):off(BSS_LEN) + 4] == struct.pack("<I", 0x55DC)
-    # FW6, FW12, FW7a, FW15b: the startup zero-fill runs on over TAP_STATE, SEQ, LIGHT and WEAR; the overlay is copied in over its part afterwards
+    # FW6, FW12, FW7a, FW15b, FW16g: the startup zero-fill runs on over TAP_STATE, SEQ, LIGHT, FAULT_SEL and WEAR; the overlay is copied in over its part afterwards
     struct.pack_into("<I", img, off(BSS_LEN), WEAR + 8 - 0x208654)
     struct.pack_into("<I", img, WRAP + 8, len(img) - WRAP - HDR)        # Realtek header: payload length
     # Clear the header's "not ready" flag (0x0981 -> 0x0901).  The stock firmware only clears it itself after the

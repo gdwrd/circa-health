@@ -392,12 +392,14 @@ def test_crash_record_survives_the_restart():
     e.boot()
     with contextlib.redirect_stdout(io.StringIO()):
         e.run(32000)
-    assert e.resets == 4 and e.ota["state"] == 5        # update, the fault, 08
+    assert e.resets == 4 and e.ota["state"] == 5        # update, the fault (its spin ended by the watchdog), 08
     got = [n for n in e.notified if n[:2] == bytes([0xA1, 0x11])]
-    assert [n[2] for n in got] == list(range(7)) * 4 and all(sum(n[:15]) & 0xFF == n[15] for n in got)
-    reads = [b"".join(n[3:15] for n in got[i:i + 7]) for i in range(0, 28, 7)]
+    assert [n[2] for n in got] == list(range(6)) * 4 and all(sum(n[:15]) & 0xFF == n[15] for n in got)
+    reads = [b"".join(n[3:15] for n in got[i:i + 6]) for i in range(0, 24, 6)]
     first, fault, cleared, reset = [struct.unpack("<18I", d[:72]) for d in reads]
-    assert first[0] == 1 and first[1] == e.hardfault_vec and first[3] == 0     # boot 1, chains to the stock handler, no record
+    assert first[0] == 1 and first[1] == e.hardfault_vec and first[3] == 0     # boot 1, the stock handler kept, no record
+    hang = next(ev["t"] for ev in e.trace if ev["text"].startswith("HANG (HardFault: b ."))
+    assert 13000 <= hang < next(ev["t"] for ev in e.trace if ev["text"].startswith("CHIP RESET #3")) <= hang + ringemu.WDG_TIMEOUT_MS
     w = fault[3:]
     assert fault[0] == 2 and w[:4] == (patch_fw.REC_MAGIC, 1, 1, 0x20F000)                # boot 2; a HardFault in boot 1
     assert w[4:8] == (0x11, 0x22, 0x33, 0x44) and w[10:12] == (0x10000000, 1 << 24) and w[12:14] == (0x215F00 - 32, 0xFFFFFFFD)
@@ -407,8 +409,8 @@ def test_crash_record_survives_the_restart():
     w = reset[3:]
     assert reset[0] == 3 and w[:3] == (patch_fw.REC_MAGIC, 2, 2)                          # a reset in boot 2
     assert [w[4], w[5]] == [int(x, 16) for x in wdg[16:-1].split(", ")[:2]] and "check ok" in ringprobe.decode(reads[3])
-    if e.rom:   # the ROM's own fault path (0x101 -> WDG_SystemReset(3, 5)) and reset reasons, word +12 of each read
-        assert [first[2], fault[2], reset[2]] == [0xD3, 5, 0xD3]           # end of the update, the fault, 08
+    if e.rom:   # reset reasons, word +12 of each read: the fault no longer goes through WDG_SystemReset(3, 5)
+        assert [first[2], fault[2], reset[2]] == [0xD3, 1, 0xD3]           # end of the update, the watchdog, 08
 
 
 def on_and_off(image, reads, off_ms=605000, on_ms=750000):
@@ -572,45 +574,174 @@ def test_rom_watchdog_latch_shows_the_hang_after_the_restart(tmp_path):
     assert "AON 0x15 (reset-reason byte, re-armed to 1 at boot) 0x01" in text
 
 
-def wdt(e):
-    """FW16f counters: (late, stand-in kicks, longest gap, run, ticks, ticks at the app's last kick)."""
+def latch(e):
+    """The watchdog latch as the AON registers hold it: (pc, lr)."""
+    return e.aon[0x1C2] << 17 | e.aon[0x1C0] << 1, e.aon[0x1C6] << 16 | e.aon[0x1C4]
+
+
+CODE = 0x215E00                 # chip RAM (a1 10 reads it): a task's code that faults on its first instruction
+LOAD = 0x6808                   # ldr r0, [r1]  with r1 = 0x30000000: nothing is mapped there
+FRAME_MSP = 0x215C00            # a hand-made exception frame in chip RAM
+
+
+def fault_case(case):
+    """(task setup, expected latch lr) for a fault from the modelled scheduler; the frame sp - 32 = 0x215EE0."""
     import patch_fw
-    return struct.unpack("<2I2H2I", e.uc.mem_read(patch_fw.WDT, 20))
+    task = {"pc": 0x10001234, "lr": 0x0824ABCD, "sp": 0x215F00, "regs": {}}
+    sel, expect = case
+    if expect in ("ldr", "before"):     # the faulting instruction's bytes (ldr, nop), or the two nops before it
+        task["pc"] = CODE
+    return sel, task, {"pc": 0x10001234, "lr": 0x0824ABCD, "sp": 0x215F00 - 32, "exc": 0xFFFFFFFD, "tcb": 0x20F000,
+                       "r4": 0x44444444, "r11": 0xBBBBBBBB, "xpsr": 1 << 24, "dead": patch_fw.UNREADABLE | 0x1234,
+                       "ldr": LOAD | 0xBF00 << 16, "before": 0xBF00BF00, "bad": patch_fw.BAD_FRAME, "zero": 0}.get(expect, expect)
 
 
-def test_watchdog_experiment_counts_nothing_on_a_normal_run(tmp_path):
-    # ca0005, 60 s with two live measurements: every 0x19 handled on time, nothing counted; two kicks per tick (the
-    # handler's run-0 kick, then the app's own); a1 11 answers a 7th packet with the counters.
+@model_kernel
+@pytest.mark.parametrize("case", [(0, "pc"), (1, "lr"), (8, "sp"), (9, "exc"), (10, "tcb"), (13, "r4"), (20, "r11"),
+                                  (7, "xpsr"), (12, "dead"), (12, "ldr"), (11, "before"), (99, "pc"), (0, "bad"),
+                                  (8, 0x23F000 - 32), (0, "msp"), (8, "msp"), (15, "zero")])
+def test_fault_hook_leaves_the_selected_word_in_the_latch(tmp_path, case):
+    # ca0006: a1 13 picks the word; a task faults (thread mode, PSP; or the handler entered on MSP with a hand-made frame);
+    # the hook records, spins, the watchdog resets the chip 4 s later, and a1 12 after the boot reads pc = the spin and
+    # lr = the word.  The selector echoes, reads back, and is 0 again after the restart.  One fault only: the hook never
+    # faults itself, also for an unreadable pc (selector 12) or a frame outside the chip's RAM.  A word of 0 (r6 here)
+    # spins at FAULT_SPIN + 2 with lr = EXC_RETURN: a latched lr of 0 would make the boot's self-test overwrite the latch.
     import patch_fw, ringprobe
     img = tmp_path / "patched.bin"
     img.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()))
+    sel, task, expect = fault_case(case)
+    e = ringemu.Emu(quiet_mem=True, trace=True, image=img)
+    msp = expect == "msp"
+    if msp: expect = 0x08246789 if sel == 0 else FRAME_MSP
+    elif case[1] == 0x23F000 - 32 or case[1] == "bad": task["sp"] = 0x23F000      # emulator RAM, past the chip's 88 KB
+    def crash():
+        e.uc.mem_write(patch_fw.CURRENT_TCB, struct.pack("<I", 0x20F000))
+        e.uc.mem_write(CODE - 4, struct.pack("<4H", 0xBF00, 0xBF00, LOAD, 0xBF00))        # nop, nop, ldr, nop
+        if msp:                 # entry as for a fault in handler mode: frame on MSP, lr = 0xFFFFFFF1
+            e.uc.mem_write(FRAME_MSP, struct.pack("<8I", 1, 2, 3, 4, 12, 0x0824ABCD, 0x08246789, 1 << 24))
+            e.spawn("HardFault", e.r32(0x20000C))
+            e.tasks[-1].ctx.update({ringemu.UC_ARM_REG_SP: FRAME_MSP, ringemu.UC_ARM_REG_LR: 0xFFFFFFF1})
+            return
+        e.spawn("crash", task["pc"], (0x11, 0x30000000, 0x33, 0x44))
+        e.tasks[-1].ctx.update({ringemu.UC_ARM_REG_SP: task["sp"], ringemu.UC_ARM_REG_LR: task["lr"],
+                                ringemu.UC_ARM_REG_R4: 0x44444444, ringemu.UC_ARM_REG_R11: 0xBBBBBBBB})
+    e.command(10000, bytes([0xA1, 0x13, sel]))
+    e.command(10200, bytes([0xA1, 0x13, 0xFF]))
+    e.hw["crash"] = {"at": 11000, "interval": None, "fire": crash}
+    e.command(19000, bytes([0xA1, 0x13, 0xFF]))
+    aon_reads(e, 19200, [(0x1C0, 6), (0x1CC, 6), (0x14, 1)])
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(20000)
+    hang = next(ev["t"] for ev in e.trace if ev["text"].startswith("HANG (HardFault: b ."))
+    assert e.resets == 2 and hang + ringemu.WDG_TIMEOUT_MS == next(ev["t"] for ev in e.trace if ev["text"].startswith("CHIP RESET #2"))
+    assert sum(ev["text"].startswith("CRASH") for ev in e.trace) == (0 if msp else 1)       # no second fault
+    sels = [n[2] for n in e.notified if n[:2] == bytes([0xA1, 0x13])]
+    assert sels == [sel, sel, 0]
+    zero = expect == 0
+    assert latch(e) == ((patch_fw.FAULT_SPIN + 2, 0xFFFFFFFD) if zero else (patch_fw.FAULT_SPIN, expect)), [hex(v) for v in latch(e)]
+    rec = struct.unpack("<15I", e.uc.mem_read(patch_fw.REC, 60))      # the RAM record is still written (lost on the ring)
+    assert rec[:2] == (patch_fw.REC_MAGIC, 1) and rec[13] == (0xFFFFFFF1 if msp else 0xFFFFFFFD)
+    got = [n for n in e.notified if n[:2] == bytes([0xA1, 0x12])]
+    v = {}
+    for n, reg in zip(got, (0x1C0, 0x1CC, 0x14)): v.update(zip(range(reg, reg + 2 * n[2], 2), struct.unpack_from(f"<{n[2]}H", n, 3)))
+    assert f"HardFault, word <selector name unknown after reset> = {expect:#010x}" in ringprobe.decode_aon(v)
+    assert not any(ev["text"].startswith("WDG_Config(0x1, 0x0, 0x0") and ev["t"] > hang for ev in e.trace)   # no self-test
+    assert ringprobe.FAULT_SPIN == patch_fw.FAULT_SPIN
+
+
+BUSY = 0x23D000                 # spare emulator RAM (cleared at a reset): test code, its flag at BUSY + 0x800
+
+
+@needs_rom
+@pytest.mark.parametrize("where, sel", [("task", 0), ("task", 1), ("irq", 0), ("irq", 8), ("irq", 9)])
+def test_fault_hook_real_kernel_thread_psp_and_nested_msp(tmp_path, where, sel):
+    # Real kernel: a priority-3 task (thread mode, PSP) or an interrupt handler (IRQ 5, handler mode: the frame on MSP)
+    # loads from an unmapped address.  The hook spins in handler mode; nothing kicks; the watchdog resets the chip and
+    # latches pc = the spin, lr = the selected word: the faulting pc, the task's lr (the busy loop's bl return), the MSP
+    # frame address (as the record's sp), EXC_RETURN 0xFFFFFFF1 (nested).
+    import patch_fw
+    img = tmp_path / "patched.bin"
+    img.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()))
+    e = ringemu.Emu(quiet_mem=True, trace=True, image=img, kernel="real")
+    code = patch_fw.asm(f"""
+    loop:
+        ldr   r0, =0x{BUSY + 0x800:x}
+        ldr   r0, [r0]
+        cmp   r0, #0
+        bne   fault
+        movs  r0, #10
+        bl    0x{e.sym("vTaskDelay"):x}
+        b     loop
+    fault:
+        ldr   r1, =0x30000000
+        ldr   r0, [r1]
+        b     loop
+    """, BUSY)
+    handler = patch_fw.asm("ldr r1, =0x30000000\nldr r0, [r1]\nbx lr", BUSY + 0x100)
+    boot = e.boot
+    def task_boot():
+        boot()
+        e.uc.mem_write(BUSY, code)
+        e.uc.mem_write(BUSY + 0x100, handler)
+        e.uc.mem_write(BUSY + 0x7E0, b"busy\0")
+        assert e.call(e.sym("xTaskCreate"), BUSY | 1, BUSY + 0x7E0, 128, 0, 3, BUSY + 0x7F0) == 1
+    def fire():
+        if where == "task": return e.w32(BUSY + 0x800, 1)
+        e.w32(0x200000 + 4 * (16 + 5), BUSY + 0x100 | 1)
+        e.nv_en |= 1 << 5
+        e.pend(16 + 5)
+    e.boot = task_boot
+    e.command(10000, bytes([0xA1, 0x13, sel]))
+    e.hw["fault"] = {"at": 11000, "interval": None, "fire": fire}
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(17000)
+    fired = [ev["t"] for ev in e.trace if ev["text"].startswith("WATCHDOG")]
+    assert len(fired) == 1 and 11000 < fired[0] <= 11000 + ringemu.WDG_TIMEOUT_MS and e.resets == 2
+    assert any(ev["text"].startswith("HANG (HardFault: b .") for ev in e.trace)
+    assert sum(ev["kind"] == "fault" for ev in e.trace) == 1             # the hook did not fault
+    rec = struct.unpack("<15I", e.uc.mem_read(patch_fw.REC, 60))
+    pc_at = BUSY + 0x102 if where == "irq" else BUSY + code.index(bytes.fromhex("0868"))
+    assert rec[:2] == (patch_fw.REC_MAGIC, 1) and rec[10] == pc_at
+    assert rec[13] == (0xFFFFFFF1 if where == "irq" else 0xFFFFFFFD)
+    assert (0x203000 <= rec[12] < 0x203800) == (where == "irq")         # the frame on MSP (main stack) or a task stack
+    expect = {0: pc_at, 1: rec[9], 8: rec[12], 9: rec[13]}[sel]
+    assert latch(e) == (patch_fw.FAULT_SPIN, expect), [hex(v) for v in latch(e)]
+
+
+def test_patched_normal_run_kicks_as_stock(tmp_path):
+    # ca0006, 60 s with two live measurements: no restart, no fault, one watchdog kick per TIM5 tick (the app task's, as
+    # stock: FW16f's handler kicks are gone); a1 11 answers 6 packets; the fault selector reads 0.
+    import patch_fw
+    img = tmp_path / "patched.bin"
+    img.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()))
     ringemu.PULSE_BPM = 60
-    e = ringemu.Emu(quiet_mem=True, image=img)
+    e = ringemu.Emu(quiet_mem=True, trace=True, image=img)
     e.command(3000, bytes([0x69, 0x01]))
     e.command(40000, bytes([0x69, 0x01]))
     e.command(60000, bytes([0xA1, 0x11]))
+    e.command(60200, bytes([0xA1, 0x13, 0xFF]))
     e.boot()
     with contextlib.redirect_stdout(io.StringIO()):
         e.run(61000)
     readings = [n[3] for n in e.notified if n[0] == 0x69 and n[3]]
     assert readings and all(abs(r - 60) <= 2 for r in readings), readings
-    assert e.resets == 1
-    late, standin, longest, run, ticks, kicked = wdt(e)
-    assert (late, standin, longest, run) == (0, 0, 1, 0) and 28 <= ticks <= 31 and kicked in (ticks - 1, ticks)
-    assert e.stats["WDG_Restart"] == ticks + kicked     # one from each tick, one from each app-task handling
-    got = [n for n in e.notified if n[:2] == bytes([0xA1, 0x11])]
-    assert [n[2] for n in got] == list(range(7)) and struct.unpack("<2I2H", got[6][3:15]) == (0, 0, 1, 0)
-    assert "late 0x19 ticks 0  stand-in kicks 0  longest gap between app kicks 1 ticks" in ringprobe.decode(b"".join(n[3:15] for n in got))
+    assert e.resets == 1 and not any(ev["text"].startswith(("HANG", "CRASH", "FAULT")) for ev in e.trace)
+    assert 28 <= e.stats["WDG_Restart"] <= 31
+    assert [n[2] for n in e.notified if n[:2] == bytes([0xA1, 0x11])] == list(range(6))
+    assert [n[2] for n in e.notified if n[:2] == bytes([0xA1, 0x13])] == [0]
 
 
-BUSY = 0x23D000                 # spare emulator RAM (cleared at a reset): the busy task's code, its flag at BUSY + 0x800
-
-
-def starved(image, busy_ms, ms, cmds=()):
-    """Real kernel: a priority-3 task (above the app task's 2, below the stack's 5 and 6) spins with interrupts on from
-    20 s for busy_ms (None: for good) -> (emu, watchdog kick times, (time, counters) just before each reset)."""
+@needs_rom
+@pytest.mark.parametrize("patched", [True, False])
+def test_starved_app_task_restarts_patched_as_stock(tmp_path, patched):
+    # The app task held off the CPU for 10 s by a priority-3 busy task (real kernel): no kick for 4 s, the watchdog
+    # restarts the ring at about 24 s, stock and ca0006 alike (ca0005's stand-in kicks carried it through; removed).
     import patch_fw
-    e = ringemu.Emu(quiet_mem=True, trace=True, image=image, kernel="real")
+    img = tmp_path / "patched.bin"
+    img.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()) if patched else ringemu.IMAGE.read_bytes())
+    e = ringemu.Emu(quiet_mem=True, trace=True, image=img, kernel="real")
     code = patch_fw.asm(f"""
     loop:
         ldr   r0, =0x{BUSY + 0x800:x}
@@ -622,66 +753,21 @@ def starved(image, busy_ms, ms, cmds=()):
         b     loop
     spin:
     """ + "    nop\n" * 480 + "    b     loop\n", BUSY)       # long blocks: the emulator's cost is per block
-    boot, reset, kicks, snaps = e.boot, e.reset, [], []
+    boot = e.boot
     def busy_boot():
         boot()
         e.uc.mem_write(BUSY, code)
         e.uc.mem_write(BUSY + 0x7E0, b"busy\0")
         assert e.call(e.sym("xTaskCreate"), BUSY | 1, BUSY + 0x7E0, 128, 0, 3, BUSY + 0x7F0) == 1
-    def watched_reset(mode=None):
-        snaps.append((e.now, wdt(e)))
-        reset(mode)
-    def kick():
-        kicks.append(e.now)
-        e.wdg_kick = e.now
-    e.boot, e.reset, e.rom_WDG_Restart = busy_boot, watched_reset, kick
-    flag = lambda v: e.w32(BUSY + 0x800, v)
-    e.hw["busy"] = {"at": 20000, "interval": None, "fire": lambda: flag(1)}
-    if busy_ms: e.hw["free"] = {"at": 20000 + busy_ms, "interval": None, "fire": lambda: flag(0)}
-    for t, c in cmds: e.command(t, c)
+    e.boot = busy_boot
+    e.hw["busy"] = {"at": 20000, "interval": None, "fire": lambda: e.w32(BUSY + 0x800, 1)}
+    e.hw["free"] = {"at": 30000, "interval": None, "fire": lambda: e.w32(BUSY + 0x800, 0)}
     e.boot()
     with contextlib.redirect_stdout(io.StringIO()):
-        e.run(ms)
-    return e, kicks, snaps
-
-
-@needs_rom
-@pytest.mark.parametrize("patched", [True, False])
-def test_watchdog_experiment_stands_in_for_a_starved_app_task(tmp_path, patched):
-    # The app task off the CPU for 10 s: stock restarts (no kick for 4 s); ca0005's handler kicks at the on-time tick and
-    # stands in at each tick that finds the previous 0x19 unhandled (block ~20.07..30 s: 24, 26, 28 s), the ring stays up,
-    # and the app recovers (drains the queued 0x19s, answers a1 11, run back to 0).
-    import patch_fw
-    img = tmp_path / "patched.bin"
-    img.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()) if patched else ringemu.IMAGE.read_bytes())
-    e, kicks, snaps = starved(img, 10000, 34000, [(32000, bytes([0xA1, 0x11]))])
+        e.run(26000)
     fired = [ev["t"] for ev in e.trace if ev["text"].startswith("WATCHDOG")]
-    if not patched:
-        assert fired and 23000 <= fired[0] <= 24100 and e.resets == 2
-        return
-    assert not fired and e.resets == 1
-    assert max(b - a for a, b in zip(kicks, kicks[1:])) < ringemu.WDG_TIMEOUT_MS
-    late, standin, longest, run, ticks, kicked = wdt(e)
-    assert late == standin and 3 <= standin <= 5 and longest == standin + 1 and run == 0 and kicked in (ticks - 1, ticks)
-    got = [n for n in e.notified if n[:2] == bytes([0xA1, 0x11])]
-    assert [n[2] for n in got] == list(range(7)) and struct.unpack("<2I2H", got[6][3:15]) == (late, standin, longest, 0)
-
-
-@needs_rom
-def test_watchdog_experiment_still_resets_a_dead_app_task(tmp_path):
-    # The app task off the CPU for good: 15 stand-in kicks (about 30 s), then none, and the watchdog restarts the ring
-    # about 34 to 36 s after the block began, latching the busy task's pc.  The counters start again at the boot.
-    import patch_fw
-    img = tmp_path / "patched.bin"
-    img.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()))
-    e, kicks, snaps = starved(img, None, 62000)
-    fired = [ev["t"] for ev in e.trace if ev["text"].startswith("WATCHDOG")]
-    assert len(fired) == 1 and 20000 + 33500 <= fired[0] <= 20000 + 36500 and e.resets == 2
-    t, (late, standin, longest, run, ticks, kicked) = snaps[-1]
-    assert t == fired[0] and standin == patch_fw.RUN_MAX and run == patch_fw.RUN_MAX + 1 and late in (16, 17)
-    pc = (e.aon[0x1C2] << 17) | (e.aon[0x1C0] << 1)
-    assert BUSY <= pc < BUSY + 0x400, hex(pc)            # the latch: where the CPU was kept busy
-    assert wdt(e)[:4] == (0, 0, 1, 0)                   # after the restart: fresh counters, app on time again
+    assert fired and 23000 <= fired[0] <= 24100 and e.resets == 2
+    assert BUSY <= latch(e)[0] < BUSY + 0x400                      # the latch: where the CPU was kept busy
 
 
 needs_flash = pytest.mark.skipif(not (ringemu.FLASH_FILE and ringemu.FLASH_FILE.exists() and ringemu.ROM_FILE and ringemu.ROM_FILE.exists()),
@@ -776,7 +862,7 @@ def test_rom_lower_stack_spins_with_interrupts_masked():
 def test_lower_stack_masked_hold_at_a_connection_event(tmp_path, hold_ms, resets):
     # What the lower stack's code can do (docs/FIRMWARE.md "Lower stack"): mask interrupts at a connection event, about
     # 0.6 s per radio-port timeout, without a bound in a bzdma or ISR spin.  One timeout is survived; a hold past the
-    # watchdog resets even ca0005, whose TIM5 kick cannot run with interrupts masked (sweep.py --hold).
+    # watchdog resets the patched image too (sweep.py --hold).
     import patch_fw
     img = tmp_path / "patched.bin"
     img.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()))
