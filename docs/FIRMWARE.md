@@ -206,8 +206,9 @@ but blank only in the emulator, and the ROM's own flash use (boot patch, `ftl_sa
 | `A1 0F <state> <t 4>` | FW15b | wear state and the clock at its last change |
 | `A1 10 <len> <bytes>`, `A1 10 FF` | FW16a | answer to `A1 10 <addr 4 LE> <len>`: `len` (1..12) bytes from memory. `FF` = refused: the range is not wholly inside one of the readable ranges below, or len is 0 or above 12. Read only, byte loads. |
 | `A1 11 <seq> <12 bytes>` × 6 | FW16a | answer to `A1 11` (and `A1 11 01`, which wipes the record first): seq 0..5 carry the 72 bytes of the crash block from `+4` (table below). Decode with `emu/ringprobe.py crash`. |
+| `A1 12 <count> <values>`, `A1 12 FF` | FW16e | answer to `A1 12 <reg lo> <reg hi> <count>`: `count` (1..6) 16-bit always-on (AON) registers `reg`, `reg+2`, …, each little-endian, read through the ROM's `btaon_fast_read_safe` (0x32F94). `FF` = refused: `reg` odd, count 0 or above 6, or a register past `0x1DE`. Read only. `0x1C0`..`0x1CA`: the watchdog latch (pc >> 1 lo/hi, lr lo/hi, psr lo/hi); `0x1CC`..`0x1D6`: the AON watchdog's; `0x14` high byte: the reset-reason byte ("AON 0x15"). Decode with `emu/ringprobe.py crash` (from ca0004). |
 
-Patch sub-types in use: 05, 07..0C, 0F, 10, 11; 0D / 0E are kept for FW8c; free from 12.
+Patch sub-types in use: 05, 07..0C, 0F, 10, 11, 12; 0D / 0E are kept for FW8c; free from 13.
 
 ## Memory map, faults and resets (FW16a)
 
@@ -215,7 +216,7 @@ Found by reading the stock image and `emu/sdk-ref` (Python one-offs), not on the
 
 | Range | What | `A1 10` | How sure |
 |---|---|---|---|
-| `0x000000`..`0x040A00` | ROM: code the app calls by address (`memcpy` `0x3F848`, `os_sched_start` `0x131C2`; the startup calls `exit` at `0x409B8`, the last ROM symbol). Its vector table is at 0. | read | Sure up to the last symbol. The ROM's real end is not known: past `0x040A00` is refused until a dump shows where it ends. |
+| `0x000000`..`0x043F4C` | ROM: code the app calls by address (`memcpy` `0x3F848`, `os_sched_start` `0x131C2`; the startup calls `exit` at `0x409B8`, the last ROM symbol), strings, and its `.data` image `0x42E6C`..`0x43F4C` (vector table copy from `0x42D84`). Its vector table is at 0. | read (ca0003: to `0x40A00`) | Sure: the ROM's reset handler (`0x8D52`, `0x8D74`) reads up to `0x43F4B` at every boot, and no ROM literal points further. Whether the ROM goes on past `0x43F4C` (padding) is not known; refused. |
 | `0x200000`..`0x207400` | ROM-reserved RAM (SDK: 29 KB): RAM vector table at `0x200000` (VTOR), ROM data (`pxCurrentTCB` `0x201340`, `app_cb_wdg_reset` `0x201514`), the main stack (initial MSP `0x203800`, from the app's vector table) | read | Sure (SDK `mem_config.h`, the app's own table and writes) |
 | `0x207400`..`0x207C00` | upper-stack RAM (SDK: 2 KB) | read | SDK |
 | `0x207C00`..`0x20EC00` | app RAM, 28 KB (`update_ram_layout(0x7000, 0x7400, 0)` in SystemInit `0x824696`): `.data` from `0x207C00`, `.bss` `0x208654`..`0x20DC30`, RAM-code overlay to `0x20DCF8`, patch RAM, crash block | read | Sure |
@@ -256,11 +257,11 @@ How faults and resets work on this image:
   `0x829E2A`, `0x82AB98`). Per the SDK the ROM first calls `app_cb_wdg_reset` (`0x201514`), which SystemInit sets to the
   app's `0x8244FE` (literal `0x8247B8`, loaded only at `0x82468A`); FW16a points that literal at its own callback.
   Reasons seen in the emulator: `0xD0` (first-boot config rewrite), `0xD3` (`08`, end of an update), mode 1.
-- **Watchdog:** `print_reset_reason` (`0x82450A`, in `pre_main`) reads the watchdog's latched pc/lr/psr from AON words
-  `0x1C0`..`0x1D6` (through `btaon_fast_read_safe`; not memory-mapped, so `A1 10` cannot read them), calls
-  `reset_reason_get` when the latched lr is 0, then fires the watchdog once itself (`WDG_Config` / `Enable` / `Disable`)
-  and restores `WDG_CTL` (`0x40006000`). That self-test overwrites the latched values, so after the start they say
-  nothing about the last reset. A watchdog timeout (a hang) leaves no record here.
+- **Watchdog:** `print_reset_reason` (`0x82450A`, in `pre_main`; SDK `system_rtl876x.c`) reads the watchdog's latched
+  pc/lr/psr from AON registers `0x1C0`..`0x1D6` (through `btaon_fast_read_safe`; not memory-mapped, so `A1 10` cannot
+  read them; `A1 12` can, from ca0004). Only when the latched lr is 0 (a cold start) does it fire the watchdog once in
+  interrupt mode for 1 ms, "to update wdg_reset_lr (register is Read-Only)", then restores `WDG_CTL` (`0x40006000`).
+  Otherwise it only reads. So the latch still holds the last watchdog event when a phone connects (FW16e below).
 - **What survives a reset:** the startup (MSP `0x203800`, `.data` copy, `.bss` fill to `0x20DD10`, overlays below
   `0x20DCF8`) does not touch the crash block. Whether the ROM clears RAM at a reset, or a reset drops RAM power, is not
   known (no ROM dump); the emulator assumes the app's RAM keeps its bytes. On the ring the boot counter answers it: if it
@@ -461,6 +462,39 @@ Ranked causes (guesses, from the above):
    mode 3 loses RAM, as above). Against: no candidate fault in app code; hooks verified.
 4. DLPS entry with a backlog. Against: DLPS happens all through every measurement already.
 5. The light hook or stop hook corrupting state. Against: verified byte by byte; the restart needs no live stop.
+
+## AON registers and the watchdog latch (FW16e)
+
+From the ROM dump, the stock image and the SDK source (`system_rtl876x.c`, `rtl876x.h`); Python one-offs.
+
+**Accessor (code, sure).** `btaon_fast_read_safe(u16 reg) -> u16` at `0x32F94`: 9 instructions, r0-r2 only, no stack, no
+interrupt masking, no call. It saves the AON access register (`0x40000048`), writes `reg << 17` with bit 0 clear (read),
+reads the data from bits 1..16, writes the saved value back with bit 0 clear. The `_8b` variant (`0x32FB0`) masks the
+offset to even (`0x3FFC0000`) and returns the high byte for an odd one: registers are 16 bits at even offsets, and
+"AON 0x15" is the high byte of `0x14`. The stock app calls it at run time too (`0x824B2A`, `0x83367C`..), not only at
+boot; the ROM calls it all over. Risk: an interrupt doing a non-safe AON access between its write and read would give `A1 12` a wrong
+value (no write happens); the latch does not change while running, so a second read settles it. Every AON register the
+ROM or app touches lies in `0x000`..`0x1DE`; `A1 12` allows exactly that.
+
+**Latch (SDK source + code, sure).** `0x1C0`/`0x1C2` = pc >> 1, `0x1C4`/`0x1C6` = lr, `0x1C8`/`0x1CA` = psr, latched by the
+watchdog when it fires; `0x1CC`..`0x1D6` the same for the AON watchdog (`0x40000190`). Read-only: nothing in the ROM or
+the app writes `0x1C0`..`0x1D6` (nearest writes: `0x180`..`0x1A7`, `0x1D8`, `0x1DE`). The SDK's "fix reset reason error
+when watchdog timeout and ROM_WATCH_DOG_MODE is RESET_ALL" sits in the lr ≠ 0 branch, so the latch survives a RESET_ALL
+watchdog reset (rtl876x.h: "reset whole chip except partial AON and RTC"). The stock boot reads it and runs its self-test
+only when lr is 0; **nothing destroys a set latch before a phone can connect, so FW16e adds no boot code.**
+AON 0x15 is different: the boot (`0x12B54`) re-arms it to 1 every time, after `0x12B2C` has decoded it into
+`reset_reason_get()` (`0x201510`), which `A1 11` already reports.
+
+**What each restart leaves (code; the hardware latch behaviour itself not seen on a ring).** Every watchdog fire
+overwrites the latch with where the CPU was:
+
+| Restart | Latch pc | `reset_reason_get()` (`A1 11` +12) |
+|---|---|---|
+| Hang ended by the 4 s watchdog | where it hung: `0x8D38` assert spin, `0x4782` HardFault spin without reset bit, or app/ROM code in a loop | 0 (RESET_ALL) |
+| `WDG_SystemReset` (`08`, a HardFault with the reset bit → `(3, 5)`) | `0x12B08` (its final spin), lr `0x12B09` in the emulator | the reason (mode 1/2), or 0 / 5 (mode 3) |
+| Power loss, brown-out | the cold boot's self-test: inside the ROM delay `print_reset_reason` waits in (SDK: lr `0x7BB5` on A-cut) | 0 |
+
+The emulator models this (`Emu.latch`; `test_rom_watchdog_latch_shows_the_hang_after_the_restart`).
 
 ## Wear state (FW15a)
 

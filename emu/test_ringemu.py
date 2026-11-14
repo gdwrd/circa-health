@@ -263,7 +263,8 @@ def test_memory_read_answers_rom_ram_and_flash_and_refuses_the_rest():
     import patch_fw
     img = patch_fw.patch(ringemu.IMAGE.read_bytes())
     asks = [(0x824400, 12), (0x200040, 4), (0x20000C, 4), (0x0, 4),          # flash, RAM (vector slots 16 and 3), ROM
-            (0x880000, 1), (0x215FFC, 8), (0x40000000, 4), (0xE000ED00, 4), (0xFFFFFFFC, 8), (0x824400, 0), (0x824400, 13)]
+            (0x43F40, 12),                                                   # the last 12 bytes of the ROM's .data image
+            (0x43F44, 9), (0x880000, 1), (0x215FFC, 8), (0x40000000, 4), (0xE000ED00, 4), (0xFFFFFFFC, 8), (0x824400, 0), (0x824400, 13)]
     e = ringemu.Emu(quiet_mem=True, trace=True)
     e.ota_start(3000, img)
     for i, (a, n) in enumerate(asks): e.command(12000 + 200 * i, bytes([0xA1, 0x10]) + struct.pack("<IB", a, n))
@@ -278,7 +279,36 @@ def test_memory_read_answers_rom_ram_and_flash_and_refuses_the_rest():
     hook = struct.unpack("<I", got[2][3:7])[0]                               # slot 3 holds the fault hook (appended code)
     assert got[2][2] == 4 and hook == e.r32(0x20000C) and len(ringemu.IMAGE.read_bytes()) < hook - 0x824000 + 0x50 < len(img)
     assert got[3][2:7] == bytes([4]) + bytes(e.uc.mem_read(0, 4))         # the ROM dump, or the emulator's filler
-    assert all(n[2] == 0xFF and not any(n[3:15]) for n in got[4:])          # refused: past flash and RAM, peripherals, wrap, len 0 and 13
+    assert got[4][2:15] == bytes([12]) + bytes(e.uc.mem_read(0x43F40, 12))
+    assert all(n[2] == 0xFF and not any(n[3:15]) for n in got[5:])          # refused: past ROM, flash and RAM, peripherals, wrap, len 0 and 13
+
+
+def aon_reads(e, at_ms, asks):
+    """Schedule a1 12 <reg> <count> requests 200 ms apart from at_ms."""
+    for i, (reg, n) in enumerate(asks): e.command(at_ms + 200 * i, bytes([0xA1, 0x12]) + struct.pack("<HB", reg, n))
+
+
+def test_aon_read_answers_the_registers_and_refuses_the_rest(tmp_path):
+    import patch_fw
+    patched = tmp_path / "patched.bin"
+    patched.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()))
+    e = ringemu.Emu(quiet_mem=True, trace=True, image=patched)
+    e.hw["set"] = {"at": 9000, "interval": None, "fire": lambda: e.aon.update({0x100: 0xBEEF, 0x1DE: 0x1234})}
+    asks = [(0x1C0, 6), (0x1CC, 6), (0x14, 1), (0x100, 1), (0x1DE, 1),
+            (0x1E0, 1), (0x1DA, 4), (0x15, 1), (0x14, 0), (0x14, 7), (0xFFFE, 1)]    # past 0x1DE, odd, count 0 and 7, wrap
+    aon_reads(e, 10000, asks)
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(13000)
+    got = [n for n in e.notified if n[:2] == bytes([0xA1, 0x12])]
+    assert len(got) == len(asks) and all(sum(n[:15]) & 0xFF == n[15] for n in got)
+    for n, (reg, k) in zip(got[:5], asks):
+        assert n[2] == k and list(struct.unpack_from(f"<{k}H", n, 3)) == [e.aon.get(r, 0) for r in range(reg, reg + 2 * k, 2)]
+    assert got[3][3:5] == bytes.fromhex("efbe") and got[4][3:5] == bytes.fromhex("3412")
+    assert all(n[2] == 0xFF and not any(n[3:15]) for n in got[5:])
+    assert e.resets == 1                                # only the first-boot config write
+    pc = (e.aon[0x1C2] << 17) | (e.aon[0x1C0] << 1)
+    assert pc == 0x12B08                                # its WDG_SystemReset spin, latched and kept through the boot
 
 
 def test_crash_record_survives_the_restart():
@@ -449,3 +479,29 @@ def test_rom_heap_exhaustion_hangs_until_the_watchdog():
     assert 3000 <= fail == hang and reset == hang + ringemu.WDG_TIMEOUT_MS
     assert not any(ev["kind"] == "ble_tx" and hang < ev["t"] < reset for ev in e.trace)    # silent while hung
     assert e.call(e.sym("reset_reason_get")) == 1       # no WDG_SystemReset: the default the ROM set at boot
+
+
+@needs_rom
+def test_rom_watchdog_latch_shows_the_hang_after_the_restart(tmp_path):
+    # ca0004 on a ring that hangs (heap exhausted -> ROM assert spin, interrupts off) and is restarted by its watchdog: the
+    # phone's a1 12 after the restart reads the hang's pc from the latch; the stock boot left it alone (its self-test runs
+    # only while the latched lr is 0).
+    import patch_fw, ringprobe
+    patched = tmp_path / "patched.bin"
+    patched.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()))
+    e = ringemu.Emu(quiet_mem=True, trace=True, image=patched)
+    e.command(3000, bytes([0x69, 0x01]))
+    leave_free(e, 2900, 0, 0)
+    aon_reads(e, 10000, [(0x1C0, 6), (0x1CC, 6), (0x14, 1)])
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(11000)
+    hang = next(ev["t"] for ev in e.trace if ev["text"].startswith("HANG (ROM assert)"))
+    assert e.resets == 2 and next(ev["t"] for ev in e.trace if ev["text"].startswith("CHIP RESET #2")) == hang + ringemu.WDG_TIMEOUT_MS
+    assert not any(ev["text"].startswith("WDG_Config(0x1, 0x0, 0x0") and ev["t"] > hang for ev in e.trace)   # no self-test
+    got = [n for n in e.notified if n[:2] == bytes([0xA1, 0x12])]
+    v = {}
+    for n, reg in zip(got, (0x1C0, 0x1CC, 0x14)): v.update(zip(range(reg, reg + 2 * n[2], 2), struct.unpack_from(f"<{n[2]}H", n, 3)))
+    text = ringprobe.decode_aon(v)
+    assert "watchdog latch: pc 0x00008d38" in text      # the ROM's assert spin
+    assert "AON 0x15 (reset-reason byte, re-armed to 1 at boot) 0x01" in text

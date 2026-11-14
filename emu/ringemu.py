@@ -51,7 +51,8 @@ ROM_REAL = {"__aeabi_memcpy", "__aeabi_memcpy4", "__aeabi_memcpy8", "__rt_memcpy
 ROM_SPINS = {"wdg_reset_spin": 0x12B08,     # end of WDG_SystemReset: watchdog armed with a tiny timeout, reset follows
              "assert_spin": 0x8D38,         # vAssertHandler with asserts on: interrupts off, waits forever
              "hardfault_spin": 0x4782}      # HardFault handler when its reset bit (0x2003C2 bit 1) is clear
-WDG_TIMEOUT_MS = 4000   # assumption: the SDK's default ROM watchdog (4 s, reset all); whether it runs on the ring is not known
+AON_LATCH = range(0x1C0, 0x1CC, 2)  # watchdog latch: pc >> 1 (lo, hi), lr (lo, hi), psr (lo, hi); read-only, survives a reset
+WDG_TIMEOUT_MS = 4000  # assumption: the SDK's default ROM watchdog (4 s, reset all); whether it runs on the ring is not known
 HEAP_WORDS = 0x2014D8   # xFreeBytesRemaining[2], xMinimumEverFreeBytesRemaining[2], xHeapTotalSize[2]; [0] data, [1] buffer
 UNTIL, SLICE = 0xFFFFFFF0, 2_000_000
 FOREVER = 0xFFFFFFFF
@@ -183,7 +184,7 @@ class Emu:
                            (0x40000000, 0x100000), (0xE0000000, 0x100000)):
             self.uc.mem_write(base, bytes(size))
         if self.rom: self.uc.mem_write(0x203154, magic)
-        if mode == 3: self.aon.clear()
+        if mode == 3: self.aon = {k: v for k, v in self.aon.items() if k in AON_LATCH}   # SDK: "partial AON" survives
         self.hung = None
         self.tasks, self.cur = [], None
         self.heap, self.free, self.sizes = HEAP, collections.defaultdict(list), {}
@@ -296,7 +297,13 @@ class Emu:
         for reg, v in saved.items(): self.uc.reg_write(reg, v)
         return ret
 
+    def latch(self, pc, lr, psr=1 << 24):
+        """The watchdog firing latches the CPU's pc (bit 0 dropped), lr and psr into AON 0x1C0..0x1CA, 16 bits a register
+        (SDK print_reset_reason).  psr is a model: Thumb bit only."""
+        self.aon.update(zip(AON_LATCH, (pc >> 1 & 0xFFFF, pc >> 17 & 0xFFFF, lr & 0xFFFF, lr >> 16, psr & 0xFFFF, psr >> 16)))
+
     def rom_wdg_reset_spin(self):
+        self.latch(self.r(UC_ARM_REG_PC), self.r(UC_ARM_REG_LR))
         self.reset(mode=self.r(UC_ARM_REG_R6))         # r6: the mode WDG_SystemReset was called with
         return BLOCK
 
@@ -304,7 +311,8 @@ class Emu:
         """Interrupts off, the CPU spinning: nothing runs and the phone hears nothing until the watchdog resets the chip."""
         self.ev(f"HANG ({why}): interrupts off, chip silent; watchdog reset in {WDG_TIMEOUT_MS} ms (assumed)", "reset")
         self.hung = why
-        self.hw["wdg"] = {"at": self.now + WDG_TIMEOUT_MS, "interval": None, "fire": lambda: self.reset(mode=3)}
+        pc, lr = self.r(UC_ARM_REG_PC), self.r(UC_ARM_REG_LR)
+        self.hw["wdg"] = {"at": self.now + WDG_TIMEOUT_MS, "interval": None, "fire": lambda: (self.latch(pc, lr), self.reset(mode=3))}
         return self.block(FOREVER)
 
     def rom_assert_spin(self): return self.hang("ROM assert")
@@ -822,10 +830,11 @@ class Emu:
     def rom_WDG_SystemReset(self):
         """As the SDK documents it (system_rtl876x.c): the app's callback in app_cb_wdg_reset gets (mode, reason) first."""
         cb = self.r32(self.sym("app_cb_wdg_reset"))
+        done = lambda: (self.latch(0x12B08, 0x12B09), self.reset())     # the real one's spin, as the ROM run latches it
         if not cb:
-            self.reset()
+            done()
             return BLOCK
-        self.spawn("wdg_cb", cb, (self.arg(0), self.arg(1)), on_exit=self.reset)
+        self.spawn("wdg_cb", cb, (self.arg(0), self.arg(1)), on_exit=done)
         return self.block(FOREVER)
 
     def rom_ftl_save(self):
@@ -840,12 +849,20 @@ class Emu:
         return 0
 
     # ---- misc
-    def rom_btaon_fast_read_safe(self): return self.aon.get(self.arg(0), 0)
-    def rom_btaon_fast_write_safe(self): self.aon[self.arg(0)] = self.arg(1)
+    # AON: 16-bit registers at even offsets; the 8-bit accessors take the odd offset as the high byte (ROM 0x32FB0)
+    def rom_btaon_fast_read_safe(self): return self.aon.get(self.arg(0) & ~1, 0)
+    def rom_btaon_fast_write_safe(self): self.aon[self.arg(0) & ~1] = self.arg(1) & 0xFFFF
     rom_btaon_fast_write = rom_btaon_fast_write_safe
-    def rom_btaon_fast_read_safe_8b(self): return self.aon.get(self.arg(0), 0) & 0xFF
-    def rom_btaon_fast_write_8b(self): self.aon[self.arg(0)] = self.arg(1) & 0xFF
+    def rom_btaon_fast_read_safe_8b(self): return self.aon.get(self.arg(0) & ~1, 0) >> 8 * (self.arg(0) & 1) & 0xFF
+    def rom_btaon_fast_write_8b(self):
+        reg, sh = self.arg(0) & ~1, 8 * (self.arg(0) & 1)
+        self.aon[reg] = self.aon.get(reg, 0) & ~(0xFF << sh) | (self.arg(1) & 0xFF) << sh
     rom_btaon_fast_write_safe_8b = rom_btaon_fast_write_8b
+    # print_reset_reason's boot self-test (only when the latched lr is 0): WDG_Config(1, 0, INTERRUPT_CPU), WDG_Enable, 1 ms.
+    # Model: the latch then holds the return address into print_reset_reason (the SDK names lr 0x7BB5, a ROM delay).
+    def rom_WDG_Config(self): self.wdg_mode = self.arg(2)
+    def rom_WDG_Enable(self):
+        if getattr(self, "wdg_mode", None) == 0: self.latch(self.r(UC_ARM_REG_LR) & ~1, self.r(UC_ARM_REG_LR))
     # the modelled kernel never preempts, so the real heap code's scheduler lock has nothing to do
     def rom_vTaskSuspendAll(self): pass
     def rom_xTaskResumeAll(self): return 0

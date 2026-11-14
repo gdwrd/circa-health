@@ -3,7 +3,9 @@
   python ringprobe.py plan 20 0:03 1:a10f          timed plan: each hex command t s after subscribing, every reply logged
   python ringprobe.py peek 0x20000c 4              a1 10 reads, hex dump
   python ringprobe.py dump 0x0 0x40a00 rom.bin     same into a file, 12 bytes a request; run it again to resume
-  python ringprobe.py crash [--clear]              a1 11: boot counter and crash record (--clear: a1 11 01, then read)
+  python ringprobe.py crash [--clear]              a1 11: boot counter and crash record (--clear: a1 11 01, then read),
+                                                   then on ca0004 the watchdog latch and AON 0x15 (a1 12)
+  python ringprobe.py aon 0x1c0 12                 a1 12: 16-bit AON registers 0x1c0, 0x1c2, .. (ca0004 or later)
 
 Ring address: --addr, else RING_ADDR, else 31:37:42:30:68:07.  RESP=1 writes with response, V2=1 also logs de5bf729.
 """
@@ -37,6 +39,15 @@ def decode(data: bytes) -> str:
     lines.append(f"record: {kind}  in boot {w[2]}  task (pxCurrentTCB) {w[3]:#010x}  check {'ok' if check == w[14] else 'BAD'}")
     lines.append("  " + "  ".join(f"{n} {v:#010x}" for n, v in zip(FRAME.get(w[1], [f"w{i}" for i in range(8)]), w[4:12])))
     lines.append(f"  sp {w[12]:#010x}  lr on entry {w[13]:#010x}" + ("  (frame not in RAM: zeros)" if w[1] == 1 and not any(w[4:12]) else ""))
+    return "\n".join(lines)
+
+
+def decode_aon(v: dict) -> str:
+    """AON registers 0x14 and 0x1C0..0x1D6 (16-bit values by register) as text."""
+    word = lambda lo: v[lo + 2] << 16 | v[lo]
+    lines = [f"AON 0x15 (reset-reason byte, re-armed to 1 at boot) {v[0x14] >> 8:#04x}"]
+    for name, b in (("watchdog latch", 0x1C0), ("AON watchdog latch", 0x1CC)):
+        lines.append(f"{name}: pc {word(b) << 1:#010x}  lr {word(b + 4):#010x}  psr {word(b + 8):#010x}")
     return "\n".join(lines)
 
 
@@ -95,6 +106,17 @@ class Ring:
         if d[2] != n: raise IOError(f"asked {n} bytes, got {d[2]}")
         return d[3:3 + n]
 
+    async def aon(self, reg: int, count: int) -> dict | None:
+        """{register: 16-bit value} via a1 12, 6 a request; None if the firmware does not answer a1 12 (before ca0004)."""
+        out = {}
+        for r in range(reg, reg + 2 * count, 12):
+            n = min(6, (reg + 2 * count - r) // 2)
+            try: d = (await self.ask(pkt(bytes([0xA1, 0x12]) + struct.pack("<HB", r, n)), 0x12))[0]
+            except asyncio.TimeoutError: return None
+            if d[2] == 0xFF: raise ValueError(f"ring refused {n} AON registers at {r:#x}")
+            out.update(zip(range(r, r + 2 * n, 2), struct.unpack_from(f"<{n}H", d, 3)))
+        return out
+
 
 async def read(ring: Ring, addr: int, length: int, sink, done: int = 0, tries: int = 5) -> None:
     """Read [addr + done, addr + length) in 12-byte requests into sink; reconnects and retries on errors."""
@@ -142,6 +164,7 @@ async def main() -> None:
     p = sub.add_parser("peek"); p.add_argument("addr", type=lambda s: int(s, 0)); p.add_argument("len", type=lambda s: int(s, 0))
     p = sub.add_parser("dump"); p.add_argument("addr", type=lambda s: int(s, 0)); p.add_argument("len", type=lambda s: int(s, 0)); p.add_argument("file")
     p = sub.add_parser("crash"); p.add_argument("--clear", action="store_true")
+    p = sub.add_parser("aon"); p.add_argument("reg", type=lambda s: int(s, 0)); p.add_argument("count", type=lambda s: int(s, 0))
     a = ap.parse_args()
     ring = Ring(a.ring)
     await ring.connect()
@@ -157,10 +180,16 @@ async def main() -> None:
             if done: print(f"resuming at {done} bytes")
             with open(a.file, "ab") as f:
                 await read(ring, a.addr, a.len, lambda b: (f.write(b), f.flush()), done)
+        elif a.cmd == "aon":
+            v = await ring.aon(a.reg, a.count)
+            print("a1 12 not supported (firmware before ca0004)" if v is None else "\n".join(f"{r:#05x}  {x:#06x}" for r, x in v.items()))
         else:
             got = sorted(await ring.ask(pkt(bytes([0xA1, 0x11, 1 if a.clear else 0])), 0x11, 6), key=lambda d: d[2])
             assert [d[2] for d in got] == list(range(6)), [d[2] for d in got]
             print(decode(b"".join(d[3:15] for d in got)))
+            v = await ring.aon(0x1C0, 12)
+            print("a1 12 not supported (firmware before ca0004): no watchdog latch" if v is None else
+                  decode_aon(v | (await ring.aon(0x14, 1))))
     finally:
         await ring.close()
 

@@ -59,6 +59,13 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        2 reset), boots then, task (pxCurrentTCB), 8 frame words, sp, lr on entry (EXC_RETURN / return into the ROM),
        check = XOR of the 14 words before it.  a1 11 answers 6 packets  a1 11 <seq 0..5> <12 bytes>  of CRASH+4..CRASH+76:
        boots, the stock HardFault handler, reset_reason_get() now, the record.  a1 11 01 wipes the record first.
+  FW16e a1 12 <reg lo> <reg hi> <count>  reads always-on (AON) registers through the ROM's read-only btaon_fast_read_safe
+       (AON_READ): a1 12 <count> <count x 16-bit values, LE> .. checksum, registers reg, reg+2, ..; count 1..6.  reg must be
+       even and the last register at most 0x1DE (AON_END - 2, the highest the stock code touches); anything else answers
+       a1 12 ff.  Nothing is written.  0x1C0..0x1CA = the watchdog's latch of the last restart it caused: pc >> 1 (lo, hi),
+       lr (lo, hi), psr (lo, hi); 0x1CC..0x1D6 the same for the AON watchdog; 0x14 high byte = the reset-reason byte
+       (AON "0x15", re-armed to 1 at every boot).  The stock boot keeps a latch whose lr is not 0, so no boot hook is
+       needed.  a1 10 now also reads the ROM up to ROM_END = 0x43F4C (its .data image, copied by the ROM at every boot).
   Version: the firmware texts the ring reports end in _ca<VERSION, 4 digits> (e.g. _ca0001) instead of _250117, in the
   file's wrapper too.  Builds before ca0001 were tagged _circa<one character: 0-9, then A = 10>.
 
@@ -87,14 +94,15 @@ START_SAMPLING = 0x20BA3F               # flag the motion interrupt sets; the ne
 READ_TICK = 0x82E63C                    # gsensor_read_timer_id callback; the motion interrupt calls it directly
 MOTION_ONLY = 0x10
 TAP_T, TAP_Q, TAP_LO, TAP_HI, TAP_RUN = 20, 15, 3, 8, 4     # 640 mg, 480 mg; 120..320 ms apart at 25 Hz
-VERSION = 3                             # build number, tag ca0003.  Old scheme (tag circa<n>): 1 = v4.1.0 (FW1); 2, 3 = v4.2.0,
+VERSION = 4                             # build number, tag ca0004.  Old scheme (tag circa<n>): 1 = v4.1.0 (FW1); 2, 3 = v4.2.0,
                                         # v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected taps, never fired on the ring); 5 = taps found
                                         # in the samples (v4.2.3, firm taps only); 6 = normal taps (v4.2.4); 7 = motion stream ends when
                                         # the phone leaves (FW11); 8 = numbered samples (FW12); 9 = light samples (FW7a); 10 (circaA) =
                                         # wear state (FW15b); 11 (circaB) = light samples wait for room in the send ring (FW7a).
                                         # New scheme: 1 (ca0001) = what circaB was, only the tag differs; 2 (ca0002) = the light
                                         # copy ends with the measurement and sends only the drain's own reads (FW7a); 3 (ca0003) =
-                                        # debug window: memory read, crash record, boot counter (FW16a)
+                                        # debug window: memory read, crash record, boot counter (FW16a); 4 (ca0004) = AON read
+                                        # a1 12, ROM readable to 0x43F4C (FW16e)
 LIGHT_READ = 0x830238                   # optical read helper (reg, buf, len) for I2C 0x44; its epilogue below
 LIGHT_HOOK = 0x830268                   # mov r0, r4 ; pop {r1-r7, pc}: r4 = 0 if read, r6 = len, r7 = buf, [sp] = register,
 LIGHT_EPILOGUE = bytes.fromhex("2046febd")   # [sp + 28] = the helper's return address (only the helper reaches here)
@@ -116,9 +124,10 @@ WEAR_HOOK = 0x832004                    # detector: strb r0, [r5, #1] (r0 = 0 no
 WEAR_BACK = 0x832010
 CLOCK = 0x2087B0                        # firmware clock, seconds since 2000-01-01 local; set by 01, +60 in the minute handler
 BSS_LEN = 0x824728                      # startup's .bss length literal (0x55DC), one reference (0x82445E)
-# FW16a.  Readable ranges (docs/FIRMWARE.md "Memory map"): ROM up to just past its last symbol (exit, 0x409B8), the SDK's 88 KB
-# of RAM (update_ram_layout(0x7000, 0x7400, 0) in SystemInit ends the heap there too), the SDK's 512 KB of flash.
-ROM_END = 0x40A00
+# FW16a.  Readable ranges (docs/FIRMWARE.md "Memory map"): the ROM up to the end of its .data image (FW16e: the reset handler
+# copies 0x42E6C..0x43F4C at every boot, the highest ROM address the ROM itself reads), the SDK's 88 KB of RAM
+# (update_ram_layout(0x7000, 0x7400, 0) in SystemInit ends the heap there too), the SDK's 512 KB of flash.
+ROM_END = 0x43F4C
 RAM_LO, RAM_HI = 0x200000, 0x216000
 FLASH_LO, FLASH_HI = 0x800000, 0x880000
 HARDFAULT_SLOT = 0x20000C               # RAM vector table (VTOR 0x200000, SDK AppUpdateVectorTable), entry 3
@@ -131,6 +140,9 @@ RESET_REASON_GET = 0x12B70              # ROM; the stock print_reset_reason call
 CRASH = WEAR + 8                        # 76 bytes: boot magic, boots, stock HardFault handler, reset reason, record
 REC = CRASH + 16                        # 15 words, see FW16a
 BOOT_MAGIC, REC_MAGIC = 0x544F4F42, 0x48535243     # "BOOT", "CRSH"
+# FW16e.  ROM btaon_fast_read_safe(u16 reg) -> u16: no stack, r0-r2 only, interrupts left on; restores the AON access
+# register it borrows.  Registers are 16 bits at even offsets; the stock code (ROM and app) touches 0x000..0x1DE.
+AON_READ, AON_END = 0x32F94, 0x1E0
 
 # Entered instead of the epilogue: sp is still the batch-read frame, r4 = bytes in this batch,
 # the samples sit at sp+0x11.  r5-r7 are free because the epilogue restores them.
@@ -239,6 +251,8 @@ MOTION_CMD = f"""
     cmp   r0, #0x10
     beq   debug
     cmp   r0, #0x11
+    beq   debug
+    cmp   r0, #0x12
     beq   debug
     strb  r5, [r6]
     movs  r0, #0xa1
@@ -411,12 +425,14 @@ back:
 """
 
 
-# FW16a, from MOTION_CMD: r0 = sub-type 10 or 11, r7 = the request, sp = the zeroed reply buffer.  r4-r7 are restored by
+# FW16a, from MOTION_CMD: r0 = sub-type 10, 11 or 12, r7 = the request, sp = the zeroed reply buffer.  r4-r7 are restored by
 # the handler's pop; the handler's tail at REPLY checksums and queues the buffer at sp.
 DEBUG_CMD = f"""
     mov   r4, sp
     cmp   r0, #0x11
     beq   crash
+    cmp   r0, #0x12
+    beq   aon
     ldrb  r1, [r7, #2]
     ldrb  r2, [r7, #3]
     lsls  r2, r2, #8
@@ -466,6 +482,45 @@ peeked:
     movs  r0, #0xa1
     strb  r0, [r1, #0]
     movs  r0, #0x10
+    strb  r0, [r1, #1]
+    b     reply
+aon:
+    ldrb  r5, [r7, #2]
+    ldrb  r1, [r7, #3]
+    lsls  r1, r1, #8
+    orrs  r5, r1
+    ldrb  r6, [r7, #4]
+    subs  r1, r6, #1
+    cmp   r1, #5
+    bhi   aon_refuse
+    lsls  r1, r5, #31
+    bne   aon_refuse
+    lsls  r1, r6, #1
+    adds  r1, r5, r1
+    ldr   r0, =0x{AON_END:x}
+    cmp   r1, r0
+    bhi   aon_refuse
+    strb  r6, [r4, #2]
+    adds  r4, #3
+aon_read:
+    mov   r0, r5
+    bl    0x{AON_READ:x}
+    strb  r0, [r4, #0]
+    lsrs  r0, r0, #8
+    strb  r0, [r4, #1]
+    adds  r4, #2
+    adds  r5, #2
+    subs  r6, #1
+    bne   aon_read
+    b     aon_done
+aon_refuse:
+    movs  r0, #0xff
+    strb  r0, [r4, #2]
+aon_done:
+    mov   r1, sp
+    movs  r0, #0xa1
+    strb  r0, [r1, #0]
+    movs  r0, #0x12
     strb  r0, [r1, #1]
     b     reply
 crash:

@@ -8,7 +8,7 @@ Tools for the Colmi RY02 ring's firmware (Realtek RTL8762E, image `RY02_3.00.33_
 | `patch_fw.py` | Builds `firmware/RY02_3.00.33_fullaccel.bin`: stock plus, in this order, FW1 (every accelerometer sample, `A1 05`), FW4 (motion-only stream with no gaps, `A1 07` / `A1 08`) and FW6 (double tap sent as `A1 09 <count>`). |
 | `viewer.html` | Replays a recorded run (`--trace trace.js`): spinning ring, chip-to-sensor diagram, event log. |
 | `test_ringemu.py` | End-to-end tests: heart rate, the patch, and installing the patch over the emulated Bluetooth update. |
-| `ringprobe.py` | Talks to the real ring from a PC (`bleak`): timed command plans, and on ca0003 or later `peek` / `dump` memory (`A1 10`) and `crash` (`A1 11`, boot counter and crash record). `python ringprobe.py -h`. |
+| `ringprobe.py` | Talks to the real ring from a PC (`bleak`): timed command plans, and on ca0003 or later `peek` / `dump` memory (`A1 10`) and `crash` (`A1 11`, boot counter and crash record); on ca0004 `aon` (`A1 12`) and the watchdog latch in `crash`. `python ringprobe.py -h`. |
 | `firmware/` | The stock image and the built patch. |
 | `sdk-ref/` | Reference files from Realtek's RTL8762E SDK (ROM symbol table, register header) and the public web flasher. The emulator needs `8762e/rom_symbol_gcc.axf` and `8762e/rtl876x.h`. |
 
@@ -40,8 +40,10 @@ Still modelled, and why (the boundary is the named ROM entry point):
   unicorn does not deliver. Kernel objects take their real sizes from the real heap (stack + 0x58 TCB, 0x50 + items
   a queue, 0x50 a semaphore); timers come from the ROM's pool, which is not modelled (no size limit here);
 - Bluetooth (`SystemCall_Stack`): the host stack is a flash image the dump does not contain, the controller is hardware;
-- flash, FTL, the always-on (AON) registers, the watchdog hardware (`WDG_Config` / `Enable` are no-ops; reaching
-  the spin at the end of `WDG_SystemReset` is the reset), logging (the real code drives the log UART);
+- flash, FTL, the always-on (AON) registers (16-bit, even offsets; a watchdog fire latches pc/lr/psr into
+  0x1C0..0x1CA, which survive every reset; mode 3 clears the rest), the watchdog hardware (reaching the spin at the end
+  of `WDG_SystemReset` is the reset; `WDG_Enable` in interrupt mode is the boot self-test's latch), logging (the real
+  code drives the log UART);
 - the ROM's boot itself: its `.data` image (config defaults, function pointers) lies past 0x40A00, not dumped.
   Presets stand in for the defaults the real code reads; one is a guess: a HardFault resets (0x2003C2 bit 1);
 - a spin with interrupts off (an assert, or a HardFault without that bit) is a hang: nothing runs, and a watchdog
