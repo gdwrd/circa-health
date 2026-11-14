@@ -136,14 +136,14 @@ async def plan(ring: Ring, dur: float, steps: list) -> None:
 
 async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--addr", default=os.environ.get("RING_ADDR", "31:37:42:30:68:07"))
+    ap.add_argument("--addr", dest="ring", default=os.environ.get("RING_ADDR", "31:37:42:30:68:07"))
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("plan"); p.add_argument("seconds", type=float); p.add_argument("steps", nargs="*", metavar="t:hex")
     p = sub.add_parser("peek"); p.add_argument("addr", type=lambda s: int(s, 0)); p.add_argument("len", type=lambda s: int(s, 0))
     p = sub.add_parser("dump"); p.add_argument("addr", type=lambda s: int(s, 0)); p.add_argument("len", type=lambda s: int(s, 0)); p.add_argument("file")
     p = sub.add_parser("crash"); p.add_argument("--clear", action="store_true")
     a = ap.parse_args()
-    ring = Ring(a.addr)
+    ring = Ring(a.ring)
     await ring.connect()
     print(f"connected {time.strftime('%H:%M:%S')}")
     try:
