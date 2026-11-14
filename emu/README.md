@@ -10,7 +10,7 @@ Tools for the Colmi RY02 ring's firmware (Realtek RTL8762E, image `RY02_3.00.33_
 | `test_ringemu.py` | End-to-end tests: heart rate, the patch, installing the patch over the emulated Bluetooth update, the exception layer and the real kernel. |
 | `sweep.py` | Seeded sweep of the light-stream restart scenario under the real kernel (`python sweep.py --runs 300`, `--only SEED`; `--stack real` runs the ring's own Bluetooth upper stack). |
 | `rombootprobe.py` | Runs the ROM's own reset handler and shows how far it gets (stops in the radio bring-up). |
-| `ringprobe.py` | Talks to the real ring from a PC (`bleak`): timed command plans, and on ca0003 or later `peek` / `dump` memory (`A1 10`) and `crash` (`A1 11`, boot counter and crash record); on ca0004 `aon` (`A1 12`) and the watchdog latch in `crash`. `python ringprobe.py -h`. |
+| `ringprobe.py` | Talks to the real ring from a PC (`bleak`): timed command plans, and on ca0003 or later `peek` / `dump` memory (`A1 10`) and `crash` (`A1 11`, boot counter and crash record); on ca0004 `aon` (`A1 12`) and the watchdog latch in `crash`; on ca0005 also the watchdog experiment's counters (FW16f). `python ringprobe.py -h`. |
 | `firmware/` | The stock image and the built patch. |
 | `sdk-ref/` | Reference files from Realtek's RTL8762E SDK (ROM symbol table, register header) and the public web flasher. The emulator needs `8762e/rom_symbol_gcc.axf` and `8762e/rtl876x.h`. |
 

@@ -205,7 +205,7 @@ but blank only in the emulator, and the ROM's own flash use (boot patch, `ftl_sa
 | `A1 0A` / `A1 0B`, `A1 0C nn <samples>` | FW7a | light copy on / off (echoed); while on, each read of the optical queue by the 320 ms drain (3 bytes a sample, up to 4). From ca0002 the copy turns itself off when the stock firmware stops the drain timer (every measurement end, e.g. live HR 30.5 s after `69 01`), so the phone sends `A1 0A` again with each `69 01`. On ca0001 a stock stop with the copy still on and the link up killed the real ring about 8 s later (cause not found). |
 | `A1 0F <state> <t 4>` | FW15b | wear state and the clock at its last change |
 | `A1 10 <len> <bytes>`, `A1 10 FF` | FW16a | answer to `A1 10 <addr 4 LE> <len>`: `len` (1..12) bytes from memory. `FF` = refused: the range is not wholly inside one of the readable ranges below, or len is 0 or above 12. Read only, byte loads. |
-| `A1 11 <seq> <12 bytes>` × 6 | FW16a | answer to `A1 11` (and `A1 11 01`, which wipes the record first): seq 0..5 carry the 72 bytes of the crash block from `+4` (table below). Decode with `emu/ringprobe.py crash`. |
+| `A1 11 <seq> <12 bytes>` × 6 (× 7 from ca0005) | FW16a, FW16f | answer to `A1 11` (and `A1 11 01`, which wipes the record first): seq 0..5 carry the 72 bytes of the crash block from `+4` (table below); from ca0005 seq 6 carries the watchdog experiment's counters (`0x20DD5C`..`0x20DD68`: late u32, stand-in kicks u32, longest gap u16, run u16). The packet count tells the version. Decode with `emu/ringprobe.py crash`. |
 | `A1 12 <count> <values>`, `A1 12 FF` | FW16e | answer to `A1 12 <reg lo> <reg hi> <count>`: `count` (1..6) 16-bit always-on (AON) registers `reg`, `reg+2`, …, each little-endian, read through the ROM's `btaon_fast_read_safe` (0x32F94). `FF` = refused: `reg` odd, count 0 or above 6, or a register past `0x1DE`. Read only. `0x1C0`..`0x1CA`: the watchdog latch (pc >> 1 lo/hi, lr lo/hi, psr lo/hi); `0x1CC`..`0x1D6`: the AON watchdog's; `0x14` high byte: the reset-reason byte ("AON 0x15"). Decode with `emu/ringprobe.py crash` (from ca0004). |
 
 Patch sub-types in use: 05, 07..0C, 0F, 10, 11, 12; 0D / 0E are kept for FW8c; free from 13.
@@ -219,7 +219,7 @@ Found by reading the stock image and `emu/sdk-ref` (Python one-offs), not on the
 | `0x000000`..`0x043F4C` | ROM: code the app calls by address (`memcpy` `0x3F848`, `os_sched_start` `0x131C2`; the startup calls `exit` at `0x409B8`, the last ROM symbol), strings, and its `.data` image `0x42E6C`..`0x43F4C` (vector table copy from `0x42D84`). Its vector table is at 0. | read (ca0003: to `0x40A00`) | Sure: the ROM's reset handler (`0x8D52`, `0x8D74`) reads up to `0x43F4B` at every boot, and no ROM literal points further. Whether the ROM goes on past `0x43F4C` (padding) is not known; refused. |
 | `0x200000`..`0x207400` | ROM-reserved RAM (SDK: 29 KB): RAM vector table at `0x200000` (VTOR), ROM data (`pxCurrentTCB` `0x201340`, `app_cb_wdg_reset` `0x201514`), the main stack (initial MSP `0x203800`, from the app's vector table) | read | Sure (SDK `mem_config.h`, the app's own table and writes) |
 | `0x207400`..`0x207C00` | upper-stack RAM (SDK: 2 KB) | read | SDK |
-| `0x207C00`..`0x20EC00` | app RAM, 28 KB (`update_ram_layout(0x7000, 0x7400, 0)` in SystemInit `0x824696`): `.data` from `0x207C00`, `.bss` `0x208654`..`0x20DC30`, RAM-code overlay to `0x20DCF8`, patch RAM, crash block | read | Sure |
+| `0x207C00`..`0x20EC00` | app RAM, 28 KB (`update_ram_layout(0x7000, 0x7400, 0)` in SystemInit `0x824696`): `.data` from `0x207C00`, `.bss` `0x208654`..`0x20DC30`, RAM-code overlay to `0x20DCF8`, patch RAM, crash block, FW16f counters to `0x20DD70` | read | Sure |
 | `0x20EC00`..`0x216000` | heap, 29 KB (task stacks live here) | read | Sure (same call; 88 KB of RAM in all per the SDK) |
 | `0x800000`..`0x880000` | flash, 512 KB, read through the cache (XIP) | read | Likely: the SDK's `FLASH_SIZE`, and the firmware's own history writes reach `0x87D000`. A larger chip would only be refused. |
 | `0x40000000`.. | peripherals | refused | Many registers change state when read (FIFOs, read-to-clear flags). |
@@ -236,6 +236,20 @@ except FW16a:
 | `+8` | 4 | the HardFault slot's value before the hook took it (the stock handler the hook chains to) |
 | `+12` | 4 | `reset_reason_get()` (ROM `0x12B70`), read when `A1 11` is answered |
 | `+16` | 60 | record, 15 words: magic `0x48535243` ("CRSH", 0 = none), kind (1 HardFault, 2 `WDG_SystemReset`), boot counter at the time, `pxCurrentTCB`, 8 frame words, sp, lr on entry, check = XOR of the 14 words before it |
+
+FW16f (ca0005) counters follow at `0x20DD5C`..`0x20DD70`, zeroed by the boot hook (RAM is lost at every reset anyway).
+Each is written by one context only, with one store (M0+ word and halfword stores are single bus writes, so no
+read-modify-write is shared): the TIM5 interrupt writes late, stand-in, run and ticks; the app task (its `0x19`
+handling) writes ticks-at-kick and the longest gap, and clears run.
+
+| Address | Bytes | Content | Writer |
+|---|---|---|---|
+| `0x20DD5C` | 4 | late: TIM5 ticks that found the previous `0x19` not yet handled (run ≥ 1) | TIM5 |
+| `0x20DD60` | 4 | stand-in kicks: ticks with run 1..15, where the handler restarted the watchdog for the app | TIM5 |
+| `0x20DD64` | 2 | longest gap between two app-task kicks, in ticks (1 = always on time; ≥ 2 = about 4 s or more without the app's kick: stock would have restarted) | app |
+| `0x20DD66` | 2 | run now: ticks since the app task's last kick, less the one just posted | TIM5 (app clears it) |
+| `0x20DD68` | 4 | ticks since boot | TIM5 |
+| `0x20DD6C` | 4 | ticks at the app task's last kick | app |
 
 Frame words: kind 1 = the stacked r0, r1, r2, r3, r12, lr, pc, xpsr (zeros if the stack pointer was outside RAM), sp =
 the frame's address, lr on entry = EXC_RETURN (`0xFFFFFFFD`: a task on PSP). Kind 2 = r0 mode, r1 reason, then r2..r7 as
@@ -699,7 +713,62 @@ Timer4/5 dispatcher `0x47E8`; copied from the app's flash overlay): it builds me
 stays up (and a long app-task stall would then show as late answers instead of a reset), while a real hang with
 interrupts off (assert spin, fault spin) still resets. The risk is the obvious one: it also hides a wedged app task; to
 keep evidence, count in the same handler how many TIM5 periods pass without the app task handling `0x19` and report the
-peak with `A1 12`/`A1 11`. Not implemented (this item does not change the firmware).
+peak with `A1 12`/`A1 11`. Not implemented (this item does not change the firmware). Built as FW16f, below.
+
+## Watchdog experiment (FW16f, ca0005)
+
+**Verified in the stock image and ROM (Python one-offs).** The startup `0x824448` copies `.data`:
+`memcpy(0x207C00, 0x83ED68, 0x7D8)`; app vector slot 49 (`0x83ED44`) = `0x207C01`. The TIM5 handler `0x207C00`:
+`push {r2, r3, r4, lr}` (the 8-byte message on the stack), `r4 = 0x40002064` (TIM5), read `+0xC` (end of interrupt),
+`0x8348F0(TIM5, 0)` (TIM_Cmd: control bit 0 off), message `{0x19}`, `bl 0x824890` (post to the app task) at `0x207C1C`,
+log on failure, `0x8348F0(TIM5, 1)`, `pop`. App task, message `0x19`: `0x82990A` `bl 0x129EE`, the app's only call of it
+(no literal either). ROM `WDG_Restart` `0x129EE`: `WDG_CTL (0x40006000) |= 1 << 24`, 5 instructions, r0..r2 and flags,
+no stack, no OS call, no interrupt masking; the ROM calls it from the task switch (`0xFACA`, in PendSV) when enabled.
+ROM callers `0xFACA` and `0x1111E` are gated off (`0x20037A` bit 5 clear); `0x4524` is in `0x4518`, reached only from the
+fault and assert paths (`0x4768`, `0x8D34`), where it kicks and reprograms the watchdog before the spin. The readable
+half of the patch RAM (`patch_ram.partial`) only reads WDG `+0x30` (`0x204A1E`); the other half is unknown.
+
+**What the patch does.** TIM5 handler, instead of its post call: ticks + 1; run = ticks − ticks-at-last-app-kick − 1;
+run ≥ 1: late + 1; run ≤ 15: `WDG_Restart` (run ≥ 1: stand-in + 1); then the stock post with the same message. App
+task, instead of its `bl WDG_Restart`: ticks-at-kick = ticks, run = 0, longest gap = max(longest, gap), then the stock
+`WDG_Restart`. **Deviation from the ledger's design:** the handler also kicks when the app is on time (run 0). Without
+it, a stall that starts right after an app kick meets its first overdue tick 4 s minus the app's latency later, which
+is exactly the 4 s deadline (the SDK: "31 - 4s"); the emulator's 4.000 s watchdog fires first (seen: kick 20,062 ms,
+reset 24,062 ms, same as stock). The run-0 kick changes nothing else: the watchdog is restarted a few µs before the
+app's own kick.
+
+**Why it cannot leave a ring hung with a fed watchdog.** The handler kicks only while run ≤ 15, and run is counted from
+ticks-at-kick, which only the app's own kick path writes, immediately before that same kick: once the app task stops
+kicking, the handler kicks at most 16 more times (run 0..15) and then the firmware is exactly stock with a dead app
+task, so the watchdog fires about 4 s after the last one, 34..36 s after the stall began (emulator: 36.0 s). Cases:
+TIM5 stops: no handler kicks either, stock behaviour. The handler faults: HardFault spins in handler mode, TIM5 cannot
+preempt it, the watchdog fires. Counter noise after a reset: zeroed at boot before the scheduler starts; any garbage
+run reads as > 15 (unsigned) and never kicks. The kick site missed (some other app path kicking): ruled out (one call
+site), and if it happened run would grow, the handler would stop after 15 ticks and the app's own kicks would keep the
+ring as stock. DLPS stopping TIM5 while the watchdog runs: no 0x19 either, as stock; the reverse (watchdog paused, TIM5
+running): the bound is in ticks, so still at most 16 kicks per app silence. A task-level `WDG_Config` racing the
+handler's read-modify-write of `WDG_CTL`: none at run time in app or ROM code (only boot, HCI mode, fault paths with
+interrupts off); the app's own `WDG_Restart` racing it writes the same value.
+
+**Reading the outcome on the ring** (`python ringprobe.py crash`, or `peek 0x20dd5c 20`; counters are lost at a restart,
+the latch is not):
+
+- Restarts stop and late (= stand-in) > 0 with longest gap ≥ 2: the app task went at least ~4 s without kicking (a gap
+  of g ticks is between 2(g−1) and 2(g+1) s), which stock does not survive, and the handler carried the ring through it.
+  The theory holds.
+- Restarts stop and late = 0 (longest gap 1): the app task was never 2 s late, so the handler's kicks did nothing the
+  stock app did not do; the restarts stopped for another reason (chance): more runs, or back to stock (FW16c).
+- Restarts continue: read `crash` right after one. Latch pc in a busy app or ROM loop (not `0x8D38`, `0x4782`, `0x12B08`,
+  and no cold-boot value) with lr there = a stall over 34 s or with interrupts off; pc `0x8D38` / `0x4782` = an assert or
+  fault spin (interrupts off: the handler cannot run); pc `0x12B08` = a software reset (`WDG_SystemReset`, reason byte
+  says which); a cold-boot self-test value = power loss or brown-out, not the watchdog. Either way the theory is wrong
+  for those restarts.
+
+**Emulator (`test_ringemu.py`):** a normal 60 s run with two measurements counts nothing (late 0, stand-in 0, longest 1,
+two kicks per tick); the app task held off the CPU 10 s by a priority-3 busy task (real kernel): stock restarts at 24 s,
+ca0005 does not (late 3, stand-in 3, longest 4, run 0 after, `A1 11` answered); held off for good: one restart 36 s after
+the block, 15 stand-ins, latch pc in the busy loop, counters fresh after the boot; the existing heap-exhaustion test on
+the patched image still restarts within 4 s of the hang.
 
 **Not verified.** Everything below the `hci_if` API (assumed: 8 LE buffers of 27 bytes; a packet's buffer held until
 it is sent; responses one connection event later); the encrypted patch code; the lower stack's priority-6 work and

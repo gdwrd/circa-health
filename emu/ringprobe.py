@@ -4,6 +4,7 @@
   python ringprobe.py peek 0x20000c 4              a1 10 reads, hex dump
   python ringprobe.py dump 0x0 0x40a00 rom.bin     same into a file, 12 bytes a request; run it again to resume
   python ringprobe.py crash [--clear]              a1 11: boot counter and crash record (--clear: a1 11 01, then read),
+                                                   on ca0005 the watchdog experiment's counters (a 7th packet),
                                                    then on ca0004 the watchdog latch and AON 0x15 (a1 12)
   python ringprobe.py aon 0x1c0 12                 a1 12: 16-bit AON registers 0x1c0, 0x1c2, .. (ca0004 or later)
 
@@ -27,7 +28,16 @@ def peek_request(addr: int, n: int) -> bytes:
 
 
 def decode(data: bytes) -> str:
-    """The 72 bytes of a1 11 (seq 0..5 joined) as text."""
+    """a1 11 joined in seq order as text: 72 bytes (seq 0..5), 84 from ca0005 (seq 6: the watchdog experiment)."""
+    lines = decode_record(data).split("\n")
+    if len(data) >= 84:
+        late, standin, longest, run = struct.unpack_from("<2I2H", data, 72)
+        lines.append(f"watchdog experiment: late 0x19 ticks {late}  stand-in kicks {standin}  longest gap between app kicks "
+                     f"{longest} ticks (~{2 * longest} s)  current run {run}")
+    return "\n".join(lines)
+
+
+def decode_record(data: bytes) -> str:
     boots, stock_hf, reason = struct.unpack_from("<3I", data)
     w = struct.unpack_from("<15I", data, 12)
     lines = [f"boots {boots}  stock HardFault handler {stock_hf:#010x}  reset_reason_get() {reason:#x}"]
@@ -89,13 +99,17 @@ class Ring:
     async def send(self, data: bytes) -> None:
         await self.client.write_gatt_char(WRITE, data, response=bool(os.environ.get("RESP")))
 
-    async def ask(self, data: bytes, sub: int, count: int = 1, timeout: float = 4) -> list:
-        """Send data, return the next count a1 <sub> packets (other packets are printed and skipped)."""
+    async def ask(self, data: bytes, sub: int, count: int = 1, timeout: float = 4, least: int = 0) -> list:
+        """Send data, return the next count a1 <sub> packets (other packets are printed and skipped); at least `least`
+        of them is enough once the timeout runs out."""
         while not self.rx.empty(): self.rx.get_nowait()
         await self.send(data)
         got, end = [], time.monotonic() + timeout
         while len(got) < count:
-            d = await asyncio.wait_for(self.rx.get(), max(0.01, end - time.monotonic()))
+            try: d = await asyncio.wait_for(self.rx.get(), max(0.01, end - time.monotonic()))
+            except asyncio.TimeoutError:
+                if least and len(got) >= least: break
+                raise
             if d[:2] == bytes([0xA1, sub]) and sum(d[:15]) & 0xFF == d[15]: got.append(d)
             else: print(f"  (other packet {d.hex()})")
         return got
@@ -184,8 +198,8 @@ async def main() -> None:
             v = await ring.aon(a.reg, a.count)
             print("a1 12 not supported (firmware before ca0004)" if v is None else "\n".join(f"{r:#05x}  {x:#06x}" for r, x in v.items()))
         else:
-            got = sorted(await ring.ask(pkt(bytes([0xA1, 0x11, 1 if a.clear else 0])), 0x11, 6), key=lambda d: d[2])
-            assert [d[2] for d in got] == list(range(6)), [d[2] for d in got]
+            got = sorted(await ring.ask(pkt(bytes([0xA1, 0x11, 1 if a.clear else 0])), 0x11, 7, least=6), key=lambda d: d[2])
+            assert [d[2] for d in got] == list(range(len(got))), [d[2] for d in got]     # 6 packets before ca0005, 7 from it
             print(decode(b"".join(d[3:15] for d in got)))
             v = await ring.aon(0x1C0, 12)
             print("a1 12 not supported (firmware before ca0004): no watchdog latch" if v is None else

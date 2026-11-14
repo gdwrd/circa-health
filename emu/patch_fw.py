@@ -58,7 +58,8 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        after a clear wins: a record is written only while none is held.  Record (u32 LE, at REC): magic, kind (1 fault,
        2 reset), boots then, task (pxCurrentTCB), 8 frame words, sp, lr on entry (EXC_RETURN / return into the ROM),
        check = XOR of the 14 words before it.  a1 11 answers 6 packets  a1 11 <seq 0..5> <12 bytes>  of CRASH+4..CRASH+76:
-       boots, the stock HardFault handler, reset_reason_get() now, the record.  a1 11 01 wipes the record first.
+       boots, the stock HardFault handler, reset_reason_get() now, the record (7 from ca0005, FW16f).  a1 11 01 wipes the
+       record first.
   FW16e a1 12 <reg lo> <reg hi> <count>  reads always-on (AON) registers through the ROM's read-only btaon_fast_read_safe
        (AON_READ): a1 12 <count> <count x 16-bit values, LE> .. checksum, registers reg, reg+2, ..; count 1..6.  reg must be
        even and the last register at most 0x1DE (AON_END - 2, the highest the stock code touches); anything else answers
@@ -66,6 +67,17 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        lr (lo, hi), psr (lo, hi); 0x1CC..0x1D6 the same for the AON watchdog; 0x14 high byte = the reset-reason byte
        (AON "0x15", re-armed to 1 at every boot).  The stock boot keeps a latch whose lr is not 0, so no boot hook is
        needed.  a1 10 now also reads the ROM up to ROM_END = 0x43F4C (its .data image, copied by the ROM at every boot).
+  FW16f watchdog experiment.  The watchdog (about 4 s, reset-everything) is kicked only by the app task handling message 0x19
+       (APP_KICK), which the TIM5 handler (RAM code at DATA_RAM, copied from DATA_FLASH by the startup) posts every 2 s.  Two
+       hooks: TICK replaces the handler's post call (TIM5_POST, in the .data image) and KICK_SEEN the app's kick.  Per tick:
+       ticks + 1; run = ticks since the app task's last kick, less this one (0 = the previous 0x19 was handled); run >= 1
+       counts a late tick; while run <= RUN_MAX the handler restarts the watchdog itself (run >= 1 counts a stand-in kick);
+       past that it does not, so an app task dead for good still ends in a watchdog reset about 34..36 s after it stopped.
+       The run-0 kick is needed: at the first overdue tick the app's last kick is already 4 s minus its latency old, which
+       a 4 s watchdog does not wait for.  The app's kick sets ticks-at-kick = ticks (ends the run), clears run, keeps the
+       longest gap between its kicks in ticks, then kicks as stock.  Counters at WDT (zeroed by BOOT, lost at a reset):
+       late u32, stand-in u32, longest gap u16, run u16, ticks u32, ticks at the app's last kick u32.  a1 11 answers a 7th
+       packet (seq 6) with the first 12 bytes; all are readable with a1 10.
   Version: the firmware texts the ring reports end in _ca<VERSION, 4 digits> (e.g. _ca0001) instead of _250117, in the
   file's wrapper too.  Builds before ca0001 were tagged _circa<one character: 0-9, then A = 10>.
 
@@ -94,7 +106,7 @@ START_SAMPLING = 0x20BA3F               # flag the motion interrupt sets; the ne
 READ_TICK = 0x82E63C                    # gsensor_read_timer_id callback; the motion interrupt calls it directly
 MOTION_ONLY = 0x10
 TAP_T, TAP_Q, TAP_LO, TAP_HI, TAP_RUN = 20, 15, 3, 8, 4     # 640 mg, 480 mg; 120..320 ms apart at 25 Hz
-VERSION = 4                             # build number, tag ca0004.  Old scheme (tag circa<n>): 1 = v4.1.0 (FW1); 2, 3 = v4.2.0,
+VERSION = 5                             # build number, tag ca0005.  Old scheme (tag circa<n>): 1 = v4.1.0 (FW1); 2, 3 = v4.2.0,
                                         # v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected taps, never fired on the ring); 5 = taps found
                                         # in the samples (v4.2.3, firm taps only); 6 = normal taps (v4.2.4); 7 = motion stream ends when
                                         # the phone leaves (FW11); 8 = numbered samples (FW12); 9 = light samples (FW7a); 10 (circaA) =
@@ -102,7 +114,8 @@ VERSION = 4                             # build number, tag ca0004.  Old scheme 
                                         # New scheme: 1 (ca0001) = what circaB was, only the tag differs; 2 (ca0002) = the light
                                         # copy ends with the measurement and sends only the drain's own reads (FW7a); 3 (ca0003) =
                                         # debug window: memory read, crash record, boot counter (FW16a); 4 (ca0004) = AON read
-                                        # a1 12, ROM readable to 0x43F4C (FW16e)
+                                        # a1 12, ROM readable to 0x43F4C (FW16e); 5 (ca0005) = watchdog experiment:
+                                        # bounded stand-in kick in the TIM5 handler, counters in a1 11 (FW16f)
 LIGHT_READ = 0x830238                   # optical read helper (reg, buf, len) for I2C 0x44; its epilogue below
 LIGHT_HOOK = 0x830268                   # mov r0, r4 ; pop {r1-r7, pc}: r4 = 0 if read, r6 = len, r7 = buf, [sp] = register,
 LIGHT_EPILOGUE = bytes.fromhex("2046febd")   # [sp + 28] = the helper's return address (only the helper reaches here)
@@ -143,6 +156,14 @@ BOOT_MAGIC, REC_MAGIC = 0x544F4F42, 0x48535243     # "BOOT", "CRSH"
 # FW16e.  ROM btaon_fast_read_safe(u16 reg) -> u16: no stack, r0-r2 only, interrupts left on; restores the AON access
 # register it borrows.  Registers are 16 bits at even offsets; the stock code (ROM and app) touches 0x000..0x1DE.
 AON_READ, AON_END = 0x32F94, 0x1E0
+# FW16f.  The startup (0x824448) copies .data, with the TIM5 handler's RAM code in it, from flash DATA_FLASH to DATA_RAM.
+DATA_RAM, DATA_FLASH, DATA_LEN = 0x207C00, 0x83ED68, 0x7D8
+TIM5_POST = 0x207C1C                    # TIM5 handler: bl POST_MSG (r0 = message {0x19}; r4 = TIM5, kept by the handler)
+POST_MSG = 0x824890
+APP_KICK = 0x82990A                     # app task, message 0x19: bl WDG_RESTART, the watchdog's only kick on this ring
+WDG_RESTART = 0x129EE                   # ROM: WDG_CTL (0x40006000) |= 1 << 24; r0-r2 and flags only, no stack, no OS call
+WDT = CRASH + 76                        # 20 bytes: late, stand-in (u32), longest gap, run (u16), ticks, ticks at the app's kick
+RUN_MAX = 15                            # stand-in kicks in a row at most (about 30 s), then the watchdog may fire
 
 # Entered instead of the epilogue: sp is still the batch-read frame, r4 = bytes in this batch,
 # the samples sit at sp+0x11.  r5-r7 are free because the epilogue restores them.
@@ -552,7 +573,7 @@ packet:
     movs  r2, #12
     bl    0x{MEMCPY:x}
     adds  r5, #12
-    cmp   r6, #5
+    cmp   r6, #6
     beq   reply
     mov   r0, sp
     movs  r1, #15
@@ -686,8 +707,66 @@ known:
     str   r2, [r0, #8]
     str   r3, [r1]
 start:
+    movs  r1, #0
+    str   r1, [r0, #{WDT - CRASH}]
+    str   r1, [r0, #{WDT - CRASH + 4}]
+    str   r1, [r0, #{WDT - CRASH + 8}]
+    str   r1, [r0, #{WDT - CRASH + 12}]
+    str   r1, [r0, #{WDT - CRASH + 16}]
     ldr   r3, =0x{OS_SCHED_START | 1:x}
     bx    r3
+"""
+
+# FW16f, replaces the TIM5 handler's post (interrupt context): r0 = the message (kept for the post), r4 is not touched.
+# run = ticks since the app task's last kick, less this one: 0 = the previous 0x19 was handled.  Kicks while run <= RUN_MAX,
+# run 0 too: the app's last kick can be up to 4 s old at the first overdue tick, which a 4 s watchdog does not wait for
+# (the emulator fires first).  Counts late ticks and stand-in kicks (run >= 1).  Every counter here is written by this
+# interrupt only (the app's hook below writes ticks-at-kick, the longest gap and clears run), one store each.
+TICK = f"""
+    push  {{r0, lr}}
+    ldr   r3, =0x{WDT:x}
+    ldr   r0, [r3, #12]
+    adds  r0, #1
+    str   r0, [r3, #12]
+    ldr   r1, [r3, #16]
+    subs  r0, r0, r1
+    subs  r0, #1
+    strh  r0, [r3, #10]
+    beq   kick
+    ldr   r1, [r3, #0]
+    adds  r1, #1
+    str   r1, [r3, #0]
+    cmp   r0, #{RUN_MAX}
+    bhi   post
+    ldr   r1, [r3, #4]
+    adds  r1, #1
+    str   r1, [r3, #4]
+kick:
+    bl    0x{WDG_RESTART:x}
+post:
+    pop   {{r0, r1}}
+    mov   lr, r1
+    ldr   r3, =0x{POST_MSG | 1:x}
+    bx    r3
+"""
+
+# FW16f, replaces the app task's bl WDG_Restart (message 0x19): r0-r3 are free (the caller pops r2-r4, pc next).  Ends the
+# run, keeps the longest gap in ticks, then the stock kick with the caller's lr.
+KICK_SEEN = f"""
+    ldr   r3, =0x{WDT:x}
+    ldr   r0, [r3, #12]
+    ldr   r1, [r3, #16]
+    str   r0, [r3, #16]
+    movs  r2, #0
+    strh  r2, [r3, #10]
+    subs  r1, r0, r1
+    ldrh  r2, [r3, #8]
+    cmp   r1, r2
+    bls   kick
+    strh  r1, [r3, #8]
+kick:
+    ldr   r0, =0x{WDG_RESTART | 1:x}
+    bx    r0
 """
 
 
@@ -850,7 +929,12 @@ def patch(stock: bytes) -> bytes:
     redirect(SCHED_CALL, asm(f"bl 0x{OS_SCHED_START:x}", SCHED_CALL), BOOT.replace("FAULT_HOOK", hex(fault | 1)))
     assert img[off(WDG_CB_LITERAL):off(WDG_CB_LITERAL) + 4] == struct.pack("<I", STOCK_WDG_CB | 1)
     struct.pack_into("<I", img, off(WDG_CB_LITERAL), append(RESET_SEEN.replace("SAVE", save)) | 1)
-    assert CRASH >= WEAR + 8 and REC + 60 <= 0x20EC00      # outside the zero-fill below, below the heap
+    assert struct.unpack_from("<3I", img, off(0x824710)) == (DATA_LEN, DATA_FLASH, DATA_RAM)      # FW16f: .data copy
+    tim5 = off(DATA_FLASH + TIM5_POST - DATA_RAM)
+    assert img[tim5:tim5 + 4] == asm(f"bl 0x{POST_MSG:x}", TIM5_POST)
+    img[tim5:tim5 + 4] = asm(f"bl 0x{append(TICK):x}", TIM5_POST)
+    redirect(APP_KICK, asm(f"bl 0x{WDG_RESTART:x}", APP_KICK), KICK_SEEN)
+    assert CRASH >= WEAR + 8 and REC + 60 == WDT and WDT + 20 <= 0x20EC00    # outside the zero-fill below, below the heap
     assert img[off(BSS_LEN):off(BSS_LEN) + 4] == struct.pack("<I", 0x55DC)
     # FW6, FW12, FW7a, FW15b: the startup zero-fill runs on over TAP_STATE, SEQ, LIGHT and WEAR; the overlay is copied in over its part afterwards
     struct.pack_into("<I", img, off(BSS_LEN), WEAR + 8 - 0x208654)
