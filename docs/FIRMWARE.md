@@ -365,6 +365,103 @@ happened, the ROM asserts and hangs; the ring would go silent and come back only
 
 FW6 leaves the accelerometer's registers as stock (versions 2 to 4 changed its click settings; on the ring the chip never reported a double click). Double taps are found in the samples at the end of each batch read: per sample, jolt = |dx| + |dy| + |dz| against the sample before, high bytes only (32 mg a step). A tap is a jolt of 640 mg or more after a sample below 480 mg; a second tap 3 to 8 samples (120 to 320 ms) after the first is a double tap. More than 4 samples in a row at 480 mg or more is movement and cancels. The numbers come from `emu/testdata/taps.csv`, a real recording: 22 double taps in it (2 of its 3 gentle ones, the firm ones, the rhythmic tapping), none while shaking, one while moving. Version 5 used 1280 mg and 640 mg and needed hard taps. Only while the ring samples: the tap that wakes a resting ring is not in the samples.
 
+## Measurement stop, sleep and reset (FW16b analysis)
+
+From the stock image, the `ca0003` build and the ROM dump (Python one-offs, capstone), plus emulator runs. **Code** =
+read in the disassembly; **run** = seen in the emulator; **guess** = not shown.
+
+**The stop routine `0x8321A8`** (code; 7 callers, the measurement-requester logic `0x830BC8` / `0x830C70` among them).
+In order: state byte `0x208472` = 9; `0x830658(0)` deletes the 400 ms timer `0x20BD70`; `0x83054C(0)` stops and
+deletes the 320 ms drain timer `0x20BD68` (its off branch `0x830564` is FW7a's stop hook); `0x83051A(0)` deletes the
+40 ms timer `0x20BD6C`; `0x831F12(1)` (switch through `0x837EC8`, case 1 = `0x831F38`) calls `0x8304B4`, the optical
+chip power-down: I2C `0x44` writes `0x2A = 0`, `0x2B = 0`, `0x16 = 0`, `0x01 = 1` (each through `0x830206`: mutex
+`0x2088A8`, transfer `0x82F408`); then `0x20D5A4`/`0x20D5A5` = 0 and `0x83BA20` clears `0x20850C`. No GPIO, pad or LDO
+change, no flash access, no notification, no DLPS call. Timer deletes are commands to the FreeRTOS timer task.
+
+**Who stops when (run).** Live HR (`69 01`): at 30.5 s the timer `m_heart_rate_timer_id` (`0x209920`) stops itself
+and posts to `hub`; `hub` releases its requester bit in `0x20BC84`. The sensor is stopped only when no requester is
+left. A scheduled HR measurement (requester `0x10`, started at `0x82FB28`, 1 s tick timer `0x20BD24`, callback
+`0x82FA60`) holds the sensor on: with the HR log every 5 min and `69 01` 17 s before the 5-minute mark, the live stop
+at 313.5 s stops nothing, the drain and the light copy go on, and at 315.0 s, in one burst: the tick writes the HR log
+(`0x82F9C0` → `0x827322` → `flash_write_locked` `0x878000` 4 bytes and the slot `0x8780E1`), deletes its timer, `hub`
+deletes the drain timer (light flag cleared by the stop hook) and powers the chip down, and `73 01` is queued
+(`0x82F9F6` → `0x82924C(1)` → `0x82A600`; `73 01` is sent nowhere else). Light packets flowed until that moment.
+**On the ring (run 22): last light packet 32.74 s, `73 01` 32.81 s, silent by 33.0 s.** So the ring died within about
+0.2 s of a scheduled measurement's end, which is a flash write plus the sensor power-down, not at the 30.5 s live stop.
+
+**HR log flash write (code).** `0x827322(desc 0x83E278, …, day, slot, &bpm, 1)`: if the slot bytes are blank it is a
+plain `flash_write_locked`; if they hold a different value it copies the 4 KB sector to RAM `0x2088AC`, erases it
+(`0x827014` → `flash_erase_locked(2, addr)`) and rewrites 4 KB. The day-block lookup `0x827256` also erases a sector
+when a new day block is started (`0x827236`, `0x8272E2`, `0x827308`). The ROM's flash lock `0xA3C8` sets baseband
+register `0xDA` bit 8 and then masks interrupts (`os_lock` = `vPortEnterCritical`, or `cpsid i` at `0xA464`) for the
+whole erase or write; a 4 KB erase takes tens of ms (typical SPI NOR), up to a few hundred. Guess: with the clock
+never set (PC probe runs), every restart replays the same stale time, so the first log after a restart lands in a slot
+written in an earlier epoch: erase plus 4 KB rewrite, with interrupts off, while 16 notifications wait.
+
+**Watchdog (code, settles the earlier disagreement).** The ROM boot (`0xE268`) enables it when OTP byte `0x20037A`
+bit 4 is set: `WDG_Config(div = [0x200379], limit = [0x20037A] & 0xF, mode = [0x20037A] >> 6)`. The app's SystemInit
+sets `0x200379 = 0x1F` and `0x20037A |= 0xDF`: on, divider 31, limit 15, mode 3 (RESET_ALL): the SDK's "4 s, reset
+all". It is kicked from the ROM idle hook (`0x1111E`) and on task switches (`0xFACA`), both gated by `0x20037A` bit 5
+(set), and by the app on message type `0x19` (`0x82990A`). The `WDG_Disable` at `0x833402` is the SDK's HCI-mode
+branch (`OTP->stack_en` clear), not taken in normal use. `print_reset_reason` (`0x82450A`) fires the watchdog in
+interrupt mode for 1 ms only when the latched lr (AON `0x1C4`/`0x1C6`) is 0, then restores `WDG_CTL`; the watchdog
+stays on. So a hang of about 4 s with interrupts off (an assert spin, `0x8D38`) or with the idle task starved resets the
+whole chip.
+
+**What reads 0 (code + SDK).** Decode `0x12B2C`: no magic `0x726574` in RAM word `0x203154` → 0; else AON `0x15`;
+if that is 0, RAM byte `0x203157`. The compiled `print_reset_reason` rewrites 0 to 1 when the watchdog latch is set
+(`0x824596`), so `RESET_REASON_HW` = 0 and `RESET_REASON_WDG_TIMEOUT` = 1, and the SDK's comment on that line says a
+watchdog timeout in RESET_ALL mode reads as HW. This app uses RESET_ALL. So **0 = power-on or brown-out, or a
+hardware watchdog timeout after a hang**, and very likely also any `WDG_SystemReset(3, …)` (the ROM HardFault path
+`(3, 5)`, the app's `0xD4`/`0xD5` at `0x824B9E`), since mode 3 writes no AON reason and RESET_ALL evidently loses the
+RAM magic. The FW16b reading "0 = RAM lost, 1 = watchdog after a hang" is wrong for this ring. `08` is
+`WDG_SystemReset(1, 0xD3)` (`0x824B78`): mode 1 keeps AON, hence `0xD3`. No brown-out or low-voltage reset code was
+found in the dump (the PMU is hardware; its settings and any BOD threshold are not visible).
+
+**DLPS (code + run).** On: `btmac_pm_set_power_mode(0)` at `0x824958`, `platform_pm_set_power_mode(2)` at `0x82495E`; the check
+`0x82B78E` refuses only while raw mode `0x2098B0` is 4 (`A1 04`), then asks four modules (table `0x20B800`, count
+`0x20B7FC`): `0x83E258` (pins `0x14`/`0x15`, check byte `0x20846B`), `0x83DB40` (pin `0x20`, `0x208445`), `0x83DB54`
+(pin `0x17`, `0x208446`), `0x83E244` (pin `0x16`, always yes); their enter/exit callbacks only reconfigure pads
+(`0x83366C`). `0x20846B` is cleared and set around every I2C transfer (`0x82F396`/`0x82F3FC`,
+`0x82F45E`/`0x82F4C8`), so DLPS is allowed between transfers throughout a measurement; the stop only lengthens the
+sleeps. Neither the send ring nor a measurement blocks DLPS. Wake: the reset vector `0x4EFE` reads AON register 0
+bit 1 and, if set, jumps to the restore pointer `0x2000F8` with interrupts off before any RAM fill or `.bss` clear:
+RAM is kept (the pointer's target lies past the dump).
+
+**Send path (code).** `0x82A600`: copy into ring `0x209A36 + 16 × w`, `w` wraps at 128, no room check; if busy byte
+`0x209A30` is 0, set it and post message `0xE`/`0xC` to the app task (`0x824890`). App task (`0x829B2C` →
+`0x82A634`): busy = 0; send each through `0x82A594` → `0x8356E6` (GATT notify); on a refusal wait `os_delay(20)` and
+leave, retry count `0x209A31`; after 20 refusals in a row the whole ring is dropped (`r = w`). The stack's completion
+callback `0x829970` → `0x82A5CE` re-posts while anything waits (also a second ring at `0x20A238`, 76 slots). Nothing
+is allocated, no semaphore or DLPS flag is held: an abrupt end leaves nothing unbalanced in app code. What the
+Bluetooth host stack holds per queued notification is not visible (no image).
+
+**Patch hooks in `ca0003` (code).** `0x830268` `bl 0x83FB74`: ends with the exact `mov r0, r4 ; pop {r1-r7, pc}`
+(MOV T1 sets no flags), keeps sp balanced around its 16-byte frame, reads the return address at `[sp + 0x1C]`
+(right for 7 popped registers before pc). `0x830564` `bl 0x83FC20`: returns r0 = `0x20BD68` as the replaced
+`ldr; adds #8` did, clobbers r1 and the flags; the next instruction (`bl 0x8276E0`, timer stop/delete by handle)
+reads neither, and the function saved lr at entry. Both reproduce the replaced code.
+
+**Power (code, partial).** The battery is sampled once a minute in `qc_app` (10 ADC reads, log `0x880049C`; run); the
+action on a low reading was not traced. The optical chip gets the same init sequence for live and scheduled
+measurements (I2C writes from `0x830586`: `0x16 = 0x0F`, `0x17 = 0xF5`, `0x1B = 0x5E`, `0x2A = 0x20`, `0x2B = 0x10`, …;
+run); which register sets the LED current is not known (chip not identified).
+
+**Corrections to earlier sections.** The watchdog is on (4 s, RESET_ALL), not off. Reason 0 does not mean "not a
+watchdog". The `73 01` seen at the stop is a scheduled HR-log write, not part of the live-HR stop.
+
+Ranked causes (guesses, from the above):
+
+1. A hang at the scheduled measurement's end, then the 4 s watchdog (reads 0). For: the death matches the `73 01`
+   instant to 0.2 s; flash write or erase with interrupts off while the Bluetooth stack has a full transmit backlog;
+   asserts are on and spin with interrupts off. Against: no faulting path found in app code; the stack is closed.
+2. Brown-out at that instant (reads 0): flash program/erase current plus radio TX on a small cell at 30 to 45%. For:
+   reason 0, RAM lost. Against: the LED load drops at the same moment; heavy notification streams alone never failed.
+3. A HardFault through the ROM handler with the reset bit (`0x2003C2` bit 1) → `WDG_SystemReset(3, 5)` (reads 0 if
+   mode 3 loses RAM, as above). Against: no candidate fault in app code; hooks verified.
+4. DLPS entry with a backlog. Against: DLPS happens all through every measurement already.
+5. The light hook or stop hook corrupting state. Against: verified byte by byte; the restart needs no live stop.
+
 ## Wear state (FW15a)
 
 The stock firmware has one. It decides "on the finger" from a reflection reading of the optical chip (I2C `0x44`),
