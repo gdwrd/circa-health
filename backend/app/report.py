@@ -270,7 +270,8 @@ def _today(d: date, row: dict, rows: list[dict], ctx: dict, found: list[str]) ->
         and "The ring had little data last night, so read this loosely"
     fol = _follow(d, rows, ctx)
     told = any("fell asleep" in f for f in fol)  # the follow-up already gave the fall-asleep shift
-    facts = (fol + [t for t in found if not (told and t.startswith(TIMES["bed_start"]))])[:MAX_FINDINGS]
+    slept = any("you slept" in f for f in fol)  # and the night's length
+    facts = (fol + [t for t in found if not (told and t.startswith(TIMES["bed_start"]) or slept and t.startswith("Slept"))])[:MAX_FINDINGS]
     if facts:
         return _card("today", verdict, facts + [low], advice)
     none = "Nothing unusual in your body's numbers today"
@@ -480,6 +481,8 @@ def cards(d: date, rows: list[dict], week: dict, prev: dict, ctx: dict) -> list[
     used = set(today["facts"]) if today else set()
     if any("fell asleep" in f for f in used):  # a follow-up already told the fall-asleep shift
         used |= {t for _, _, t in found if t.startswith(TIMES["bed_start"])}
+    if any("you slept" in f for f in used):
+        used |= {t for _, _, t in found if t.startswith("Slept")}
 
     def left(card: str) -> list[str] | None:
         """None when all of the card's findings went to today: not a usual day, just nothing else to say."""
