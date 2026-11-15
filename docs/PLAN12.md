@@ -1,6 +1,6 @@
 # Circa v12: reports written on the phone
 
-Status: plan (user direction, 2026-11-15). Only the trial (AI1 to AI3) is in the ledger. AI4 to AI10 go in after AI3's
+Status: plan (user direction, 2026-11-15). Only the trial (AI1 to AI3) is in the ledger. AI3b to AI10 go in after AI3's
 verdict, and the plan below assumes that verdict is "the model is good enough". Each `###` item is one ledger item / one
 session.
 
@@ -43,8 +43,8 @@ session.
 | Model files | Hugging Face `litert-community` (`gemma-4-E2B-it-litert-lm`) | same |
 | Gemini Nano (built into the Pixel) | ruled out: runs only while the app is the top foreground app (`BACKGROUND_USE_BLOCKED`), per-app quota, beta, not open | ML Kit GenAI docs |
 
-Not known, AI2 and AI3 answer them: the Maven version to pin, the library's minimum Android version (ours is 31), the
-speed and memory on the Pixel 9 Pro Fold's Tensor G4, whether a 2.6 GB model survives inside a background worker with the
+Answered by AI2: version 0.19.1, minimum Android API 24, and it needs Kotlin 2.3 (item AI3b). Not known, AI3 answers
+them: the speed and memory on the Pixel 9 Pro Fold's Tensor G4, whether a 2.6 GB model survives inside a background worker with the
 screen off, Gemma 4's licence terms, whether the download needs a Hugging Face login.
 
 ## How it fits together
@@ -139,6 +139,13 @@ external files folder, install the `ai-trial` build. Five mornings: open the tri
 fallbacks, run the background button once with the screen off. **Check:** recorded in Facts: load time, tokens a
 second and memory on CPU and GPU, background run yes / no, number-check failures out of the cards written, the
 licence and download terms, and the user's verdict: E2B, try E4B (repeat AI3 with it), or stop. STOP.
+
+### AI3b Kotlin 2.3 on main (found in AI2)
+LiteRT-LM cannot compile with Kotlin 2.0.21 (every release is built with Kotlin 2.2 or newer). `gradle/libs.versions.toml`
+(`kotlin = "2.3.21"`), `app/build.gradle.kts` (`kotlinOptions` → `kotlin { compilerOptions { jvmTarget } }`), `CLAUDE.md`
+(the Kotlin version line). No library yet: this item is the compiler alone, so a regression shows up apart from the
+feature. It worked unchanged on `ai-trial`. **Check:** `.\gradlew.bat :app:compileDebugKotlin`, `:app:testDebugUnitTest`,
+`assembleRelease` with cert `3c236b22`, and one sync on the real phone before anything else lands on top.
 
 ### AI4 Backend: graphs in the report
 `report.py`, `test_report.py`: the `chart` object for each card (types `bars`, `line`, `stages`, `range`), built from
