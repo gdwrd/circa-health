@@ -31,6 +31,25 @@ session.
 - Not doing: chat, questions to the model, the model reading raw samples, a cloud model, a model on the homelab,
   fine-tuning, languages other than English, voice.
 
+## Changed by the trial (2026-11-15)
+
+The first runs on the phone and the user's reading of them replaced parts of the design below. Where they differ, this
+section wins; the measured numbers are in the ledger's Facts.
+
+- **No scores in the text** (user): the app already shows them. Cards carry no score numbers; a score's level appears
+  only in words.
+- **Facts are observations with their meaning attached** ("HRV 43 ms, 9 % above your usual: a sign your body is well
+  rested"), up to 12 a card, from every input the day row holds, changed ones first. The model connects them; it does
+  not interpret raw numbers.
+- **Each card has an `advice` list** (at most 3), decided by rules. The model words it and may give no other advice.
+- **Longer notes:** 5 to 7 sentences for `today`, 3 to 5 for the others, one paragraph.
+- **Prompt:** role, length, focus per card and rules in a system instruction; facts and advice in the message;
+  temperature 0.4, top-k 40, top-p 0.9. Numbers are copied as digits (the first prompt's "do not add numbers" made the
+  model spell them out).
+- **Checks:** digits against facts + advice, and number words not present in the facts.
+- **CPU, not GPU:** the same speed on this phone at a third of the memory.
+- **Kotlin 2.3 is needed on `main`** before the library can land there (item AI3b).
+
 ## What we know (research 2026-11-15, nothing run on the phone yet)
 
 | Thing | Value | Source |
