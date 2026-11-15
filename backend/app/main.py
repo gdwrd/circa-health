@@ -657,7 +657,7 @@ def get_report(day: str | None = Query(None, alias="date")) -> dict:
            "need_min": db.setting("sleep_need_min"), "plan": notify.tonight(d), "window": notify.bedtime_window(d),
            "debt": debt(d), "target": cardio.target(ready, m) if cfg["birth_year"] else None, "cardio_base": m,
            "moments": _moments(d - timedelta(1)), "because": notify.because(d - timedelta(1), d),
-           "explain": notify.explain(d),
+           "explain": notify.explain(d), "tz": samples.tz(),
            "closed": next((e for i in range(3) if (e := insights.closed_today(eps, d - timedelta(i)))), None)}
     return {"date": d.isoformat(), "cards": report.cards(d, rows, _week(d - timedelta(1)), _week(d - timedelta(8)), ctx)}
 
