@@ -15,7 +15,7 @@ Ring firmware work lives in `emu/` (emulator `ringemu.py`, patch builder `patch_
 - Secrets (`API_TOKEN`, keystore passwords) live in gitignored files only; never print or commit them.
 
 ## Kotlin / Android Rules
-- Kotlin 2.0.21, AGP 8.13.2, minSdk 31, targetSdk 35, JVM 17. Versions go in `gradle/libs.versions.toml`, never inline.
+- Kotlin 2.3.21, AGP 8.13.2, minSdk 31, targetSdk 35, JVM 17. Versions go in `gradle/libs.versions.toml`, never inline.
 - Check a change: `.\gradlew.bat :app:compileDebugKotlin` (PowerShell; `./gradlew.bat` from Git Bash). The compile is the main check. The only app tests are Robolectric UI tests in `app/src/test` (`.\gradlew.bat :app:testDebugUnitTest`, JVM, no device); run them when `ui/Theme.kt` or `ui/App.kt` changes.
 - Release build (only when the ledger item is a release): `.\gradlew.bat assembleRelease` → `app/build/outputs/apk/release/app-release.apk`, then
   `& "$env:LOCALAPPDATA\Android\Sdk\build-tools\35.0.0\apksigner.bat" verify --print-certs app\build\outputs\apk\release\app-release.apk`.
