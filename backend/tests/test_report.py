@@ -187,6 +187,113 @@ def test_body_card() -> None:
     assert back["verdict"] == "back" and back["facts"] == ["Back in your usual range after 3 nights"] and back["advice"] == []
 
 
+BED = _ts(MON, 22, 45)
+
+
+def _upd(h: int, since_h: int = 12, given: tuple[str, ...] = (), calm: bool = False, bed: float | None = BED,
+         **day: object) -> dict:
+    day = {"moments": [], "workouts": [], "steps_today": 6000.0, "steps_since": 0.0, "stressed_min": 0.0,
+           "hr_since": None, "hr_usual": None} | day
+    u = report.update(_ts(MON, h, 0), _ts(MON, since_h, 0), day, list(given),
+                      {"calm": calm, "tz": timezone.utc, "step_goal": 8000.0, "bed": bed})
+    assert set(u) == {"at", "nothing_new", "evening", "facts", "advice", "fallback"}
+    text = " ".join(u["facts"] + u["advice"]) + u["fallback"]
+    assert not re.search(r"medic|dose|pill|score|oura", text.lower()), text
+    return u
+
+
+WALK = {"kind": "walk", "minutes": 40, "start": _ts(MON, 13, 0)}
+COFFEE = [{"kind": "coffee", "ts": _ts(MON, 8, 0)}, {"kind": "coffee", "ts": _ts(MON, 10, 0)}]
+
+
+def test_update_nothing_new() -> None:
+    u = _upd(13)
+    assert u["nothing_new"] and not u["evening"] and u["advice"] == [] and u["at"] == _ts(MON, 13, 0)
+    assert "Walked 0 steps since 12:00: a still stretch" in u["facts"]
+    assert not _upd(13, steps_since=900.0)["nothing_new"]
+
+
+def test_update_effort_goes_easy() -> None:
+    u = _upd(15, workouts=[WALK], steps_since=3000.0)
+    assert not u["nothing_new"] and "A walk at 13:00 for 40 min" in u["facts"]
+    assert u["advice"] == ["Keep the rest of the day easy after a walk"]
+
+
+def test_update_coffee() -> None:
+    assert _upd(11, moments=COFFEE)["advice"] == []  # two before the cut-off: fine
+    assert "Coffee 2 times today" in _upd(11, moments=COFFEE)["facts"]
+    late = _upd(15, moments=COFFEE)
+    assert late["advice"] == ["No more coffee today: it can push your sleep later"]  # past 14:00
+    third = COFFEE + [{"kind": "coffee", "ts": _ts(MON, 12, 30)}]
+    assert _upd(13, moments=third)["advice"] == ["No more coffee today: it can push your sleep later"]
+
+
+def test_update_stress_and_move() -> None:
+    s = _upd(13, stressed_min=90.0)
+    assert "Stressed for 1 h 30 min since 12:00: a demanding stretch" in s["facts"]
+    assert s["advice"] == ["Take a short walk or do the breathing exercise"]
+    assert _upd(15, steps_today=2000.0)["advice"] == ["Fit in a brisk walk while there is time before bed"]
+    assert _upd(13, steps_today=2000.0)["advice"] == []  # not afternoon yet
+    assert _upd(20, steps_today=2000.0)["advice"] == []  # under 3 h to bed: too late to move
+
+
+def test_update_evening_wind_down_only() -> None:
+    u = _upd(21, moments=COFFEE, stressed_min=90.0, steps_today=2000.0)
+    assert u["evening"] and not u["nothing_new"]
+    assert u["advice"] == ["Start winding down: dim the lights and put screens away", "Be in bed by 22:45"]
+    assert "Your planned bedtime is 22:45, about 1 h 45 min from now" in u["facts"]
+    assert not _upd(21, bed=None)["evening"]
+
+
+def test_update_no_repeat() -> None:
+    line = "No more coffee today: it can push your sleep later"
+    assert _upd(16, since_h=15, moments=COFFEE, given=(line,))["advice"] == []  # same state: not again
+    again = COFFEE + [{"kind": "coffee", "ts": _ts(MON, 15, 30)}]
+    assert _upd(16, since_h=15, moments=again, given=(line,))["advice"] == [line]  # a new coffee: state changed
+    stress = "Take a short walk or do the breathing exercise"
+    assert _upd(16, since_h=15, stressed_min=60.0, given=(stress,))["advice"] == [stress]  # stressed again since
+
+
+def test_update_heart_rate_and_calm() -> None:
+    u = _upd(15, hr_since=82.0, hr_usual=74.0)
+    assert "Heart rate 82 bpm since 12:00, 8 bpm above your usual: your body has been busier than usual" in u["facts"]
+    c = _upd(21, calm=True, moments=COFFEE, workouts=[WALK], stressed_min=90.0, hr_since=82.0, hr_usual=74.0)
+    assert c["advice"] and not re.search(r"\d", " ".join(c["facts"] + c["advice"]) + c["fallback"])
+
+
+def test_timeline() -> None:
+    ev = report.timeline({"start": _ts(MON, 0, 0) - 3600, "end": _ts(MON, 7, 5)}, [WALK],
+                         [{"kind": "coffee", "ts": _ts(MON, 8, 0)}], [_ts(MON, 9, 0)])
+    assert [(e["kind"], e["label"]) for e in ev] == [("wake", "Woke"), ("coffee", "Coffee"), ("dose", "Dose"),
+                                                     ("walk", "Walk · 40 min")]
+
+
+def test_timeline_and_update_endpoints() -> None:
+    from conftest import load
+    from app import samples
+    now = datetime.now(samples.tz())
+    d = now.date()
+    db.save_day(d, (80, 75, 70), {"inputs": {}, "signals": CALM_SIG, "workouts": [], "session":
+                                  {"start": now.timestamp() - 40000, "end": now.timestamp() - 10000}}, {})
+    t = now.timestamp() - 60
+    load({"moment_coffee": {t: 1.0}})
+    db.add_journal(d.isoformat(), "medication", "00:00", None, int(t))
+    with TestClient(app) as c:
+        assert c.get("/timeline").status_code == 401
+        j = c.get(f"/timeline?date={d.isoformat()}", headers=H).json()
+        assert j["date"] == d.isoformat() and {"wake", "coffee", "dose"} <= {e["kind"] for e in j["events"]}
+        assert [e["t"] for e in j["events"]] == sorted(e["t"] for e in j["events"])
+        bad = [{"since": "x"}, {"since": int(t), "given": "x"}, {"since": int(t), "moves": [{"kind": "swim"}]},
+               {"since": int(now.timestamp()) + 999}]
+        assert all(c.post("/report/update", json=b, headers=H).status_code == 422 for b in bad)
+        u = c.post("/report/update", headers=H, json={"since": int(t) - 600, "given": [], "moves": [
+            {"start": int(t) - 300, "end": int(t) - 60, "kind": "ride"}]}).json()
+        assert not u["nothing_new"] and any(f.startswith("You noted coffee") for f in u["facts"])
+        assert any(f.startswith("A ride") for f in u["facts"])
+        quiet = c.post("/report/update", headers=H, json={"since": int(now.timestamp()) - 1}).json()
+    assert quiet["nothing_new"] or quiet["advice"]  # advice alone (time of day) still counts as new
+
+
 def test_report_endpoint() -> None:
     d = date.today()
     for i in range(7):

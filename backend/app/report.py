@@ -421,6 +421,83 @@ def _body(row: dict, ctx: dict) -> dict | None:
     return None
 
 
+LABEL = {"wake": "Woke", "tired": "Tired", "flat": "Flat", "wired": "Wired", "good": "Good", "coffee": "Coffee",
+         "alcohol": "Alcohol", "meal": "Meal", "dose": "Dose"}
+WIND_DOWN_MIN = 120  # inside 2 h of the planned bedtime: wind-down lines only
+MOVE_ROOM_MIN = 180  # "move" needs at least 3 h before the planned bedtime
+EFFORT_MIN = 30  # a walk, ride or workout this long today is effort: go easy after it
+COFFEE_MAX = 3  # this many coffees, or any coffee once past the cut-off: no more coffee
+COFFEE_CUTOFF_H = 14  # scoring.derived's caffeine_late hour
+STRESS_LONG_MIN = 60  # stressed this long since the last note: a walk or the breathing exercise
+MOVE_SHARE = 0.4  # under this share of the step goal by the afternoon is little movement
+AFTERNOON_H = 14
+STILL_STEPS = 500  # under this many steps since the last note is no movement (scoring.still_hours' hour)
+
+
+def timeline(session: dict | None, workouts: list[dict], moments: list[dict], doses: list[float]) -> list[dict]:
+    """The day's recorded events in time order: the night's end, workouts (the phone's moves included), moments, doses."""
+    ev = [{"t": w["start"], "kind": w["kind"], "label": f"{w['kind'].capitalize()} · {_duration(w['minutes'])}"}
+          for w in workouts]
+    ev += [{"t": m["ts"], "kind": m["kind"], "label": LABEL[m["kind"]]} for m in moments]
+    ev += [{"t": t, "kind": "dose", "label": LABEL["dose"]} for t in doses]  # shown only, never advised on
+    if session and "end" in session:
+        ev.append({"t": session["end"], "kind": "wake", "label": LABEL["wake"]})
+    return sorted(ev, key=lambda e: e["t"])
+
+
+def update(now: float, since: float, day: dict, given: list[str], ctx: dict) -> dict:
+    """What changed since the last note and the advice that fits now (PLAN13 DT2). day: moments and workouts of today
+    (main's shapes), steps_today, steps_since, stressed_min (since), hr_since and hr_usual (mean bpm or None).
+    ctx: calm, tz, step_goal, bed (planned bedtime, epoch s, or None). Medication is never read, so never advised on."""
+    calm, tz = ctx["calm"], ctx["tz"]
+    at = "since the last note" if calm else f"since {datetime.fromtimestamp(since, tz):%H:%M}"
+    ws = [w for w in day["workouts"] if w["start"] >= since]
+    ms = [m for m in day["moments"] if m["ts"] >= since and m["kind"] in NOTED]
+    coffee = [m["ts"] for m in day["moments"] if m["kind"] == "coffee"]
+    hour, bed = datetime.fromtimestamp(now, tz).hour, ctx["bed"]
+    to_bed = None if bed is None else (bed - now) / 60
+    evening = to_bed is not None and to_bed <= WIND_DOWN_MIN
+    steps, goal, stressed, hr, usual = day["steps_since"], ctx["step_goal"], day["stressed_min"], day["hr_since"], day["hr_usual"]
+    facts = [
+        *[_workout(w, tz, calm) for w in ws], *[_noted(m, tz, calm) for m in ms],
+        len(coffee) >= 2 and ("Coffee more than once today" if calm else f"Coffee {len(coffee)} times today"),
+        ("You moved " if steps >= STILL_STEPS else "Little movement ") + at if calm
+        else f"Walked {round(steps):,} steps {at}" + ("" if steps >= STILL_STEPS else ": a still stretch"),
+        not calm and f"{round(day['steps_today']):,} steps today, your goal is {round(goal):,}",
+        stressed >= 30 and (f"Stressed for a while {at}" if calm else f"Stressed for {_duration(stressed)} {at}")
+        + ": a demanding stretch",
+        hr is not None and usual is not None and (
+            f"Heart rate {at} about the same as your usual" if abs(hr - usual) < 5 else
+            f"Heart rate {at} {'higher' if hr > usual else 'lower'} than your usual" if calm else
+            f"Heart rate {round(hr)} bpm {at}, {round(abs(hr - usual))} bpm {'above' if hr > usual else 'below'} your usual")
+        + ("" if abs(hr - usual) < 5 else ": your body has been busier than usual" if hr > usual else ": a calm stretch"),
+        to_bed is not None and (("Bedtime is close" if evening else "Some hours left before bedtime") if calm else
+                                f"Your planned bedtime is {datetime.fromtimestamp(bed, tz):%H:%M}" + (
+                                    f", about {_duration(to_bed)} from now" if to_bed > 0 else ", already past"))]
+    # (line, fresh): a fresh line rests on something since the last note, so it may return even if already given
+    rules: list[tuple[str, bool]] = []
+    if evening:
+        rules += [("Start winding down: dim the lights and put screens away", False),
+                  ("Go to bed at your planned time" if calm else f"Be in bed by {datetime.fromtimestamp(bed, tz):%H:%M}", False)]
+    else:
+        effort = [w for w in day["workouts"] if w["minutes"] >= EFFORT_MIN]
+        if effort:
+            rules.append((f"Keep the rest of the day easy after {GUESS.get(effort[-1]['kind'], 'a workout')}",
+                          effort[-1]["start"] >= since))
+        if len(coffee) >= COFFEE_MAX or coffee and hour >= COFFEE_CUTOFF_H:
+            rules.append(("No more coffee today: it can push your sleep later", coffee[-1] >= since))
+        if stressed >= STRESS_LONG_MIN:
+            rules.append(("Take a short walk or do the breathing exercise", True))
+        if not effort and hour >= AFTERNOON_H and day["steps_today"] < MOVE_SHARE * goal \
+                and (to_bed is None or to_bed >= MOVE_ROOM_MIN):
+            rules.append(("Fit in a brisk walk while there is time before bed", False))
+    advice = [a for a, fresh in rules if fresh or a not in given]
+    c = _card("update", None, facts, advice)
+    new = ws or ms or steps >= STILL_STEPS or stressed >= 30
+    return {"at": int(now), "nothing_new": not (new or advice), "evening": evening,
+            **{k: c[k] for k in ("facts", "advice", "fallback")}}
+
+
 def cards(d: date, rows: list[dict], week: dict, prev: dict, ctx: dict) -> list[dict]:
     """rows: db.days(d - 13, d); week / prev: main._week ending d - 1 and d - 8; ctx: calm, guess_pending, need_min,
     plan (notify.tonight), window (notify.bedtime_window), debt, target (cardio.target), cardio_base, moments and

@@ -662,6 +662,53 @@ def get_report(day: str | None = Query(None, alias="date")) -> dict:
     return {"date": d.isoformat(), "cards": report.cards(d, rows, _week(d - timedelta(1)), _week(d - timedelta(8)), ctx)}
 
 
+@api.get("/timeline")
+def get_timeline(day: str | None = Query(None, alias="date")) -> dict:
+    """The day's recorded events for the Reports page's timeline (report.timeline decides the shape)."""
+    d = _day(day)
+    row = next(iter(db.days(d, d)), {"c": {}})
+    doses = [samples.midnight(d).replace(hour=int(e["value"][:2]), minute=int(e["value"][3:])).timestamp()
+             for e in db.journal(d.isoformat()) if e["kind"] == "medication" and e["date"] == d.isoformat() and e["value"]]
+    return {"date": d.isoformat(),
+            "events": report.timeline(row["c"].get("session"), row["c"].get("workouts") or [], _moments(d), doses)}
+
+
+def _move_ok(m: object) -> bool:
+    return isinstance(m, dict) and m.get("kind") in ("walk", "ride", "run") and _int(m.get("start"), 0, 2**40) \
+        and _int(m.get("end"), m["start"] + 1, m["start"] + 12 * 3600)
+
+
+@api.post("/report/update")
+def report_update(body: dict = Body(...)) -> dict:
+    """'Update me': what changed since the last note (since, epoch s) and the advice that fits now; given = advice lines
+    already given today, moves = the phone's walks and rides ({start, end, kind}) not yet synced."""
+    now = time.time()
+    since, given, moves = body.get("since"), body.get("given", []), body.get("moves", [])
+    if not _int(since, 0, int(now)) or not isinstance(given, list) or len(given) > 50 \
+            or not all(isinstance(g, str) and len(g) <= 300 for g in given) \
+            or not isinstance(moves, list) or len(moves) > 50 or not all(_move_ok(m) for m in moves):
+        raise HTTPException(422, "bad since, given or moves")
+    d, cfg = _today(), db.settings()
+    row = next(iter(db.days(d, d)), {"c": {}})
+    ws = row["c"].get("workouts") or []
+    ws = sorted(ws + [{"start": m["start"], "end": m["end"], "minutes": (m["end"] - m["start"]) // 60,
+                       "kind": "workout" if m["kind"] == "run" else m["kind"]}
+                      for m in moves if not any(w["start"] < m["end"] and m["start"] < w["end"] for w in ws)],
+                key=lambda w: w["start"])
+    steps, mid = _hourly("biometric_steps", d), samples.midnight(d)
+    hr = [v for v in samples.raw("biometric_hr_bpm", _dt(since), _dt(now)).values() if v > 0]
+    usual = list(_day_hr(db.days(d - timedelta(14), d - timedelta(1)), d - timedelta(14), d - timedelta(1)).values())
+    p = notify.tonight(d)
+    # shortcut: steps are hourly, so only hours starting after the note count; the note's own hour is left out
+    day_ = {"moments": _moments(d), "workouts": ws, "steps_today": sum(steps.values()),
+            "steps_since": sum(v for h, v in steps.items() if (mid + timedelta(hours=h)).timestamp() >= since),
+            "stressed_min": 30 * sum(v > 75 for v in samples.raw("biometric_stress", _dt(since), _dt(now)).values()),
+            "hr_since": mean(hr) if hr else None, "hr_usual": mean(usual) if usual else None}
+    ctx = {"calm": cfg["calm"] == "1", "tz": samples.tz(), "step_goal": float(cfg["step_goal"]),
+           "bed": p and (mid + timedelta(hours=12, minutes=p["in_bed_by_min"])).timestamp()}
+    return report.update(now, since, day_, given, ctx)
+
+
 EXPORT = ("sleep_min", "nap_min", "rhr", "hrv", "spo2_min", "steps", "cardio_load", "stress_load")
 
 
