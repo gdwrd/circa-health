@@ -51,7 +51,7 @@ screen off, Gemma 4's licence terms, whether the download needs a Hugging Face l
 
 ```
 ring -> SyncWorker -> backend scores the day
-                      backend GET /api/v1/report  ->  cards: kind, verdict, facts, fallback, chart
+                      backend GET /report  ->  cards: kind, verdict, facts, fallback, chart
 SyncWorker (after the notifications fetch)
    new card facts + model present  ->  ReportWriter writes each card  ->  reports.json on the phone
    morning notification            ->  body = today's written text, tap opens Reports
@@ -119,14 +119,14 @@ Facts:
 ## Items
 
 ### AI1 Backend: report facts (trial)
-`backend/app/report.py` (pure functions: rows in, cards out, no I/O), `main.py` (`GET /api/v1/report?date=`),
+`backend/app/report.py` (pure functions: rows in, cards out, no I/O), `main.py` (`GET /report?date=`),
 `backend/tests/test_report.py`. All seven cards with `kind`, `verdict`, `facts`, `fallback`; no `chart` yet. Calm and
 guess rules as above. **Check:** `python -m compileall -q backend/app && python -m pytest backend/tests -q`; tests
 cover each verdict, a calm-mode card with no digits, and a quiet day with no `body` card.
 
 ### AI2 App: trial screen (trial, branch `ai-trial`, not merged)
 `gradle/libs.versions.toml` + `app/build.gradle.kts` (LiteRT-LM, version pinned), `AndroidManifest.xml` (the two
-native-library lines), `Api.kt` (`report`), `ui/SettingsScreen.kt` (one row "Report trial"), new
+native-library lines), `ui/Api.kt` (`report`), `ui/SettingsScreen.kt` (one row "Report trial"), new
 `ui/ReportTrialScreen.kt`. The screen loads `getExternalFilesDir(null)/model.litertlm`, fetches `/report`, runs every
 card through the prompt above on CPU and on GPU, and shows per card: the text, the fallback, seconds, tokens a second,
 number check pass or fail; on top: load time and the app's memory. A second button runs the same from a one-off

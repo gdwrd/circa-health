@@ -15,7 +15,7 @@ from statistics import mean, median
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from . import cardio, db, insights, notify, samples, scoring
+from . import cardio, db, insights, notify, report, samples, scoring
 from .notify import debt
 
 log = logging.getLogger("ring")
@@ -644,6 +644,22 @@ def _week(end: date) -> dict:
 def week(end: str | None = None) -> dict:
     e = _day(end)
     return {**_week(e), "previous": _week(e - timedelta(7))}
+
+
+@api.get("/report")
+def get_report(day: str | None = Query(None, alias="date")) -> dict:
+    """Report cards for the on-phone writer: report.py decides, this only gathers what /today and /week already use."""
+    d, cfg = _day(day), db.settings()
+    rows = db.days(d - timedelta(13), d)
+    ready = next((r["readiness_score"] for r in rows if r["date"] == d), None)
+    m, eps = notify.cardio_base(d)[0], notify.episodes(d)[0]
+    ctx = {"calm": cfg["calm"] == "1", "guess_pending": cfg["guess"] == "1" and d.isoformat() not in db.guesses(d, d),
+           "need_min": db.setting("sleep_need_min"), "plan": notify.tonight(d), "window": notify.bedtime_window(d),
+           "debt": debt(d), "target": cardio.target(ready, m) if cfg["birth_year"] else None, "cardio_base": m,
+           "moments": _moments(d - timedelta(1)), "because": notify.because(d - timedelta(1), d),
+           "explain": notify.explain(d),
+           "closed": next((e for i in range(3) if (e := insights.closed_today(eps, d - timedelta(i)))), None)}
+    return {"date": d.isoformat(), "cards": report.cards(d, rows, _week(d - timedelta(1)), _week(d - timedelta(8)), ctx)}
 
 
 EXPORT = ("sleep_min", "nap_min", "rhr", "hrv", "spo2_min", "steps", "cardio_load", "stress_load")
