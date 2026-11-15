@@ -17,19 +17,40 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.unit.dp
+import kotlin.math.abs
 
 /** Readings shown: 6 s of the pulse channel at 25.1 a second. */
 private const val WINDOW = 150
 
+/** Readings in the running mean the beats are measured against: 1 s. */
+private const val MEAN = 25
+
+/** Counts between two readings above which the level stepped (a beat is about 3 000 and rises over several readings). */
+private const val JUMP = 10_000
+
 /**
- * The last [WINDOW] readings, oldest first, scaled to the window's own range: 0 = its lowest, 1 = its highest
- * (the mean drops out of that scaling). A flat window is all 0.5; an empty list stays empty.
+ * The last [WINDOW] readings, oldest first, as beats: each reading's distance below its 1 s running mean (the raw
+ * level drifts and steps far more than a beat moves it), smoothed over 3 neighbours, scaled between the window's
+ * 2nd and 98th percentile and clamped to 0..1 (a stray spike then clips, instead of shrinking every beat).
+ * Flipped because light falls as blood fills the finger, so the upstroke points up.
+ * A flat window is all 0.5; an empty list stays empty.
  */
 internal fun pulseWave(samples: List<Int>): List<Float> {
-    val w = samples.takeLast(WINDOW)
-    val lo = w.minOrNull() ?: return emptyList()
-    val range = (w.max() - lo).toFloat()
-    return w.map { if (range == 0f) 0.5f else (it - lo) / range }
+    val x = samples.takeLast(WINDOW + MEAN).map { it.toDouble() }
+    // A jump of more than JUMP between two readings is the sensor changing its light level: restart the mean there,
+    // or its 1 s lag leaves a dip that the percentiles cannot trim and the beats shrink for the whole window.
+    var start = 0
+    val d = x.indices.map { i ->
+        if (i > 0 && abs(x[i] - x[i - 1]) > JUMP) start = i
+        x.subList(maxOf(start, i - MEAN + 1), i + 1).average() - x[i]
+    }
+    val s = d.indices.map { i -> d.subList(maxOf(0, i - 1), minOf(d.size, i + 2)).average() }
+    val w = s.takeLast(WINDOW)
+    if (w.isEmpty()) return emptyList()
+    val sorted = w.sorted()
+    val lo = sorted[Math.round((w.size - 1) * 0.02).toInt()]
+    val hi = sorted[Math.round((w.size - 1) * 0.98).toInt()]
+    return w.map { if (hi == lo) 0.5f else ((it - lo) / (hi - lo)).toFloat().coerceIn(0f, 1f) }
 }
 
 /**

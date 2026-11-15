@@ -16,6 +16,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -38,6 +39,15 @@ class PulseWaveTest {
         (70_000 + 3_000 * sin(p) + 1_000 * sin(2 * p + 1)).toInt()
     }
 
+    // Synthetic ring: beats of about 3 000 (light dips as blood fills) on a level that drifts 30 000 over 150
+    // readings and steps up 23 000 at reading STEP (the sensor changing its light level).
+    private val STEP = 120
+    private fun ring(n: Int) = List(n) { i ->
+        val p = 2 * PI * 2.0 * i / 25.1
+        val level = 100_000 - 30_000 * i / 150 + if (i >= STEP) 23_000 else 0
+        (level - 1_500 * sin(p) - 500 * sin(2 * p + 1)).toInt()
+    }
+
     @Test fun empty() = assertEquals(emptyList<Float>(), pulseWave(emptyList()))
 
     @Test fun flat() = assertEquals(List(10) { 0.5f }, pulseWave(List(10) { 71848 }))
@@ -48,10 +58,27 @@ class PulseWaveTest {
         assertEquals(1f, w.max(), 0f)
     }
 
-    @Test fun onlyLast150() {
-        val s = beat(200)
+    @Test fun onlyLast175() {
+        val s = beat(250)
         assertEquals(150, pulseWave(s).size)
-        assertEquals(pulseWave(s.takeLast(150)), pulseWave(s))
+        assertEquals(pulseWave(s.takeLast(175)), pulseWave(s))
+    }
+
+    @Test fun beatsSurviveDriftAndStep() {
+        val n = 200
+        val w = pulseWave(ring(n))
+        val first = n - w.size // input index of w[0]
+        for (a in 0..w.size - 25) {
+            val at = first + a
+            if (at + 25 > STEP - 1 && at < STEP + 26) continue // the second after the step (plus smoothing) may clip
+            val stretch = w.subList(a, a + 25)
+            assertTrue("1 s from reading $at spans ${stretch.max() - stretch.min()}", stretch.max() - stretch.min() >= 0.6f)
+        }
+    }
+
+    @Test fun fallingReadingRises() {
+        val w = pulseWave(List(200) { 70_000 } + List(5) { 70_000 - 600 * (it + 1) })
+        assertTrue(w.last() > w[w.size - 10])
     }
 
     @Test fun light() = render(false)
@@ -66,7 +93,7 @@ class PulseWaveTest {
                 val c = AppTheme.colors
                 Box(Modifier.width(360.dp).background(c.background).padding(AppSpace.l)) {
                     Box(Modifier.fillMaxWidth().clip(AppShape.card).background(c.card).padding(AppSpace.l)) {
-                        PulseWave(beat(200), Modifier.fillMaxWidth().height(56.dp))
+                        PulseWave(ring(200), Modifier.fillMaxWidth().height(56.dp))
                     }
                 }
             }
