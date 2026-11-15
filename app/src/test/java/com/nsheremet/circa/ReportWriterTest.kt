@@ -68,4 +68,10 @@ class ReportDaysTest {
         val kept = keepDays(mapOf("2026-11-15/today" to x, "2026-11-02/week" to x, "2026-11-01/today" to x), LocalDate.parse("2026-11-15"))
         assertEquals(setOf("2026-11-15/today", "2026-11-02/week"), kept.keys)
     }
+
+    @Test fun dropsOnlyThatDay() {
+        val x = JsonPrimitive(1)
+        val kept = dropDay(mapOf("2026-11-15/today" to x, "2026-11-15/week" to x, "2026-11-14/today" to x), "2026-11-15")
+        assertEquals(setOf("2026-11-14/today"), kept.keys)
+    }
 }

@@ -6,8 +6,14 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -15,6 +21,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -30,6 +38,7 @@ import androidx.compose.material.icons.rounded.DirectionsWalk
 import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.MonitorHeart
 import androidx.compose.material.icons.rounded.NightsStay
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.WbSunny
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -39,14 +48,21 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
@@ -80,8 +96,8 @@ import kotlin.math.roundToInt
 
 // AI6: the Reports page. Each `/report` card shows its written note (reports.json, when its hash still matches) or its fallback.
 
-/** [written] is the model's note, null when the card shows its [fallback]. */
-internal class ReportCard(val kind: String, val verdict: String?, val advice: List<String>, val fallback: String, val written: String?) {
+/** [written] is the model's note, null when the card shows its [fallback]; [pending]: reports.json has no current entry (not written yet). */
+internal data class ReportCard(val kind: String, val verdict: String?, val advice: List<String>, val fallback: String, val written: String?, val pending: Boolean) {
     val note get() = written ?: fallback
 }
 
@@ -103,7 +119,7 @@ internal fun reportCards(ctx: Context, reply: JsonElement?): List<ReportCard> {
         val fallback = (c["fallback"] as? JsonPrimitive)?.content.orEmpty()
         val e = saved?.get("$date/$kind") as? JsonObject
         val fresh = (e?.get("hash") as? JsonPrimitive)?.content == reportHash(name, verdict, strs("facts"), strs("advice"))
-        ReportCard(kind, verdict, strs("advice"), fallback, (e?.get("text") as? JsonPrimitive)?.content?.takeIf { fresh && it != fallback })
+        ReportCard(kind, verdict, strs("advice"), fallback, (e?.get("text") as? JsonPrimitive)?.content?.takeIf { fresh && it != fallback }, !fresh)
     }.sortedBy { if (it.kind == "body" && it.verdict == "watch") 0.5 else pageOrder.indexOf(it.kind).let { i -> if (i < 0) 99.0 else i.toDouble() } }
 }
 
@@ -153,9 +169,33 @@ private fun wash(verdict: String?): Color = AppTheme.colors.run {
     when (verdict) { "push" -> pushWash; "easy" -> easyWash; "rest" -> restWash; else -> steadyWash }
 }
 
-/** One card. [onOpen] set = the compact form on Today: verdict word and the note's first two sentences, a chevron, no advice. */
+/** Loading bars in place of a note: [lines] rounded bars one note line apart, the last shorter, a highlight sweeping across. */
 @Composable
-internal fun ReportCardView(card: ReportCard, modifier: Modifier = Modifier, onOpen: (() -> Unit)? = null) {
+private fun NoteSkeleton(lines: Int) {
+    val base = AppTheme.colors.emptySegment
+    val shine = base.copy(alpha = base.alpha * 0.35f)
+    val reduce = LocalReduceMotion.current
+    val sweep by rememberInfiniteTransition(label = "shimmer")
+        .animateFloat(-0.5f, 1.5f, infiniteRepeatable(tween(1400, easing = LinearEasing)), label = "sweep")
+    val lineH = with(LocalDensity.current) { AppType.note.lineHeight.toDp() }
+    Canvas(Modifier.fillMaxWidth().height(lineH * lines)) {
+        val bar = 11.dp.toPx()
+        val x = (if (reduce) -1f else sweep) * size.width
+        val brush = Brush.linearGradient(listOf(base, shine, base), Offset(x - size.width * 0.3f, 0f), Offset(x + size.width * 0.3f, 0f))
+        repeat(lines) { i ->
+            val w = size.width * if (i == lines - 1) 0.6f else 1f
+            drawRoundRect(brush, Offset(0f, i * lineH.toPx() + (lineH.toPx() - bar) / 2), Size(w, bar), CornerRadius(bar / 2))
+        }
+    }
+}
+
+/**
+ * One card. [onOpen] set = the compact form on Today: verdict word and the note's first two sentences, a chevron, no advice.
+ * [writing]: a write is running, so a [ReportCard.pending] card shows loading bars until its note lands.
+ */
+@Composable
+internal fun ReportCardView(card: ReportCard, modifier: Modifier = Modifier, onOpen: (() -> Unit)? = null, writing: Boolean = false) {
+    val skeleton = writing && card.pending && onOpen == null
     val c = AppTheme.colors
     val a = accent(card)
     val haptic = LocalHapticFeedback.current
@@ -176,15 +216,15 @@ internal fun ReportCardView(card: ReportCard, modifier: Modifier = Modifier, onO
                 if (onOpen != null) Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Open report", tint = c.secondaryLabel)
             }
             if (hero) Text(card.verdict.orEmpty().replaceFirstChar { it.titlecase(Locale.getDefault()) }, style = AppType.largeTitle, color = a, modifier = Modifier.padding(top = AppSpace.m))
-            // While writing: the fallback first, the written note cross-fades in.
+            // While writing: loading bars (null) first, the written note cross-fades in.
             Crossfade(
-                if (onOpen != null) card.note.split(Regex("(?<=[.!?])\\s+")).take(2).joinToString(" ") else card.note,
+                if (skeleton) null else if (onOpen != null) card.note.split(Regex("(?<=[.!?])\\s+")).take(2).joinToString(" ") else card.note,
                 // Capped measure: the full-width hero on an unfolded screen would run ~100 characters a line.
                 Modifier.padding(top = if (hero) AppSpace.xs else AppSpace.m).widthIn(max = 640.dp).animateContentSize(spring(stiffness = Spring.StiffnessMediumLow)),
                 spring(stiffness = Spring.StiffnessMediumLow), label = "note",
-            ) { Text(it, style = AppType.note) }
+            ) { if (it == null) NoteSkeleton(if (hero) 5 else 4) else Text(it, style = AppType.note) }
             // The fallback already ends with the advice lines: show a row only for a line it does not contain.
-            val advice = card.advice.filter { card.written != null || !card.fallback.contains(it.trim().removeSuffix("."), ignoreCase = true) }
+            val advice = card.advice.filter { card.written != null || skeleton || !card.fallback.contains(it.trim().removeSuffix("."), ignoreCase = true) }
             if (onOpen == null && advice.isNotEmpty()) {
                 Hairline(Modifier.padding(top = AppSpace.l, bottom = AppSpace.m))
                 Column(verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
@@ -309,24 +349,55 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
         if (backend == false) item { InsetCard { EmptyState(Icons.Rounded.CloudOff, "Reports need the backend", "Set the server URL and token in Settings.") } }
     }
     var cards by remember { mutableStateOf<List<ReportCard>?>(null) }
+    var report by remember { mutableStateOf<JsonElement?>(null) }
     var loaded by remember { mutableStateOf(false) }
-    var off by remember { mutableStateOf(false) } // writer off or no model: every card shows its fallback
+    var off by remember { mutableStateOf(true) } // writer off or no model: every card shows its fallback
+    var writing by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    // Writes the notes, re-reading reports.json as they land; a model that fails to load ends it like a finished write.
+    suspend fun write(r: JsonElement, force: Boolean) {
+        writing = true
+        try {
+            coroutineScope {
+                val job = launch(Dispatchers.Default) { runCatching { writeReports(ctx, force) } }
+                while (job.isActive) {
+                    delay(1500)
+                    cards = withContext(Dispatchers.IO) { reportCards(ctx, r) }
+                }
+            }
+            cards = withContext(Dispatchers.IO) { reportCards(ctx, r) }
+        } finally { writing = false }
+    }
     LaunchedEffect(Unit) {
         val r = loadReport(ctx)
+        off = withContext(Dispatchers.IO) { reportsOff(ctx) }
+        report = r?.first
         cards = r?.second
         loaded = true
-        off = withContext(Dispatchers.IO) { reportsOff(ctx) }
-        // The worker may have been killed before it wrote: write the missing notes now, re-reading reports.json as they land.
-        if (r == null || off || r.second.all { it.written != null }) return@LaunchedEffect
-        val job = launch(Dispatchers.Default) { runCatching { writeReports(ctx) } }
-        while (job.isActive) {
-            delay(1500)
-            cards = withContext(Dispatchers.IO) { reportCards(ctx, r.first) }
-        }
-        cards = withContext(Dispatchers.IO) { reportCards(ctx, r.first) }
+        // The worker may have been killed before it wrote: write the missing notes now.
+        if (r != null && !off && r.second.any { it.pending }) write(r.first, false)
     }
     val wide = LocalConfiguration.current.screenWidthDp >= 600
-    LargeTitleScaffold("Reports", back = back) {
+    val haptic = LocalHapticFeedback.current
+    val regenerate: @Composable () -> Unit = {
+        val color = if (writing) c.secondaryLabel else c.tint
+        Row(
+            Modifier.heightIn(min = 44.dp).clip(AppShape.small).clickable(enabled = !writing, role = Role.Button) {
+                haptic.tick()
+                report?.let { r ->
+                    cards = cards?.map { it.copy(written = null, pending = true) } // bars at once, before the writer drops the file's entries
+                    scope.launch { write(r, true) }
+                }
+            }.padding(horizontal = AppSpace.s),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val turn = if (writing) rememberInfiniteTransition(label = "spin")
+                .animateFloat(0f, 360f, infiniteRepeatable(tween(1000, easing = LinearEasing)), label = "turn").value else 0f
+            Icon(Icons.Rounded.Refresh, null, tint = color, modifier = Modifier.size(20.dp).rotate(turn))
+            Text(if (writing) "Writing…" else "Regenerate", style = AppType.body, color = color, modifier = Modifier.padding(start = AppSpace.xs))
+        }
+    }
+    LargeTitleScaffold("Reports", back = back, action = regenerate.takeIf { !off && !cards.isNullOrEmpty() }) {
         item {
             Text(
                 LocalDate.now().format(DateTimeFormatter.ofPattern("EEEE d MMMM", Locale.getDefault())), style = AppType.subhead, color = c.secondaryLabel,
@@ -338,18 +409,18 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
             if (loaded) item { InsetCard { EmptyState(Icons.Rounded.AutoAwesome, "No report yet", if (list == null) "It appears once the server can be reached." else "It fills in after the next sync.") } }
             return@LargeTitleScaffold
         }
-        item(key = list.first().kind) { ReportCardView(list.first(), Modifier.hero()) }
+        item(key = list.first().kind) { ReportCardView(list.first(), Modifier.hero(), writing = writing) }
         val rest = list.drop(1)
         // 600 dp and wider: the small cards flow in two columns under the full-width hero.
         if (wide) item {
             Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.l)) {
                 listOf(0, 1).forEach { col ->
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(AppSpace.l)) {
-                        rest.filterIndexed { i, _ -> i % 2 == col }.forEach { ReportCardView(it) }
+                        rest.filterIndexed { i, _ -> i % 2 == col }.forEach { ReportCardView(it, writing = writing) }
                     }
                 }
             }
-        } else rest.forEach { card -> item(key = card.kind) { ReportCardView(card) } }
+        } else rest.forEach { card -> item(key = card.kind) { ReportCardView(card, writing = writing) } }
         if (off) item {
             val open = LocalOpenSettings.current
             InsetCard {

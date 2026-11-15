@@ -103,6 +103,9 @@ internal fun checkedNote(reply: String, facts: List<String>, advice: List<String
 internal fun keepDays(reports: Map<String, JsonElement>, date: LocalDate) =
     reports.filterKeys { it.substringBefore('/') >= date.minusDays(13).toString() }
 
+/** `reports.json` entries without [date]'s: Regenerate rewrites every card of that day. */
+internal fun dropDay(reports: Map<String, JsonElement>, date: String) = reports.filterKeys { !it.startsWith("$date/") }
+
 /** The first two sentences of [text]: a notification body. */
 internal fun firstSentences(text: String): String = text.trim().split(Regex("(?<=[.!?])\\s+")).take(2).joinToString(" ")
 
@@ -112,11 +115,12 @@ private val writing = Mutex()
 /**
  * Writes the notes of today's `/report` cards whose hash changed into `filesDir/reports.json`
  * (`{"date/kind": {"hash", "text"}}`; text is the card's fallback when a check failed).
+ * [force] drops today's entries first, so every card is written again.
  * Returns the Sync log line, or null when the writer is off, the model is missing or nothing changed. Blocks for seconds a card.
  */
-internal suspend fun writeReports(ctx: Context): String? = writing.withLock { writeLocked(ctx) }
+internal suspend fun writeReports(ctx: Context, force: Boolean = false): String? = writing.withLock { writeLocked(ctx, force) }
 
-private suspend fun writeLocked(ctx: Context): String? {
+private suspend fun writeLocked(ctx: Context, force: Boolean): String? {
     if (!ctx.reportWriter) return null
     runCatching { checkDownload(ctx, ctx.getSystemService(DownloadManager::class.java)) } // a download that ended while Settings was closed
     val model = reportModel(ctx)
@@ -124,7 +128,11 @@ private suspend fun writeLocked(ctx: Context): String? {
     val reply = Api.report(ctx, LocalDate.now()) as? JsonObject ?: return null
     val date = (reply["date"] as? JsonPrimitive)?.content ?: return null
     val file = File(ctx.filesDir, "reports.json")
-    val reports = keepDays(runCatching { Json.parseToJsonElement(file.readText()).jsonObject }.getOrDefault(JsonObject(emptyMap())), LocalDate.parse(date)).toMutableMap()
+    val reports = keepDays(runCatching { Json.parseToJsonElement(file.readText()).jsonObject }.getOrDefault(JsonObject(emptyMap())), LocalDate.parse(date))
+        .let { if (force) dropDay(it, date) else it }.toMutableMap()
+    // Through a rename: a killed worker keeps what it wrote and the page never reads half a file.
+    val save = { File(ctx.filesDir, "reports.json.tmp").apply { writeText(JsonObject(reports).toString()) }.renameTo(file) }
+    if (force) save() // the page shows a placeholder for every card until its note lands
     val name = ctx.reportName
     val todo = (reply["cards"] as? JsonArray).orEmpty().map { it.jsonObject }.filter { c ->
         val h = reportHash(name, (c["verdict"] as? JsonPrimitive)?.contentOrNull, c.strings("facts"), c.strings("advice"))
@@ -146,8 +154,7 @@ private suspend fun writeLocked(ctx: Context): String? {
             val note = engine.createConversation(cfg).use { checkedNote(it.sendMessage(reportPrompt(verdict, facts, advice, fallback)).toString(), facts, advice) }
             if (note == null) fallbacks++
             reports["$date/$kind"] = JsonObject(mapOf("hash" to JsonPrimitive(reportHash(name, verdict, facts, advice)), "text" to JsonPrimitive(note ?: fallback)))
-            // Saved after every card, through a rename: a killed worker keeps what it wrote and the page never reads half a file.
-            File(ctx.filesDir, "reports.json.tmp").apply { writeText(JsonObject(reports).toString()) }.renameTo(file)
+            save() // after every card
         }
     }
     return String.format(Locale.ROOT, "Reports: wrote %d cards for %s in %.1f s, %d fallbacks",
