@@ -26,11 +26,23 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bedtime
+import androidx.compose.material.icons.rounded.Bolt
+import androidx.compose.material.icons.rounded.Coffee
+import androidx.compose.material.icons.rounded.DirectionsBike
+import androidx.compose.material.icons.rounded.FitnessCenter
+import androidx.compose.material.icons.rounded.HorizontalRule
+import androidx.compose.material.icons.rounded.Medication
+import androidx.compose.material.icons.rounded.Restaurant
+import androidx.compose.material.icons.rounded.Update
+import androidx.compose.material.icons.rounded.WbTwilight
+import androidx.compose.material.icons.rounded.WineBar
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.DateRange
@@ -53,12 +65,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -68,15 +82,23 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
+import androidx.work.WorkManager
+import com.nsheremet.circa.SyncWorker
 import com.nsheremet.circa.Prefs.reportWriter
 import com.nsheremet.circa.Prefs.sleepNeedHours
 import com.nsheremet.circa.writeReports
+import com.nsheremet.circa.updateSince
+import com.nsheremet.circa.updates
+import com.nsheremet.circa.writeUpdate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -107,7 +129,7 @@ internal fun reportsOff(ctx: Context) = !ctx.reportWriter || !reportModel(ctx).e
 internal fun reportCards(ctx: Context, reply: JsonElement?): List<ReportCard> {
     val o = reply as? JsonObject ?: return emptyList()
     val date = (o["date"] as? JsonPrimitive)?.content ?: return emptyList()
-    val saved = if (reportsOff(ctx)) null else runCatching { Json.parseToJsonElement(File(ctx.filesDir, "reports.json").readText()) as JsonObject }.getOrNull()
+    val saved = if (reportsOff(ctx)) null else savedReports(ctx)
     return (o["cards"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.map { c ->
         val kind = (c["kind"] as? JsonPrimitive)?.content.orEmpty()
         val fallback = (c["fallback"] as? JsonPrimitive)?.content.orEmpty()
@@ -187,9 +209,13 @@ private fun NoteSkeleton(lines: Int) {
 /**
  * One card. [onOpen] set = the compact form on Today: verdict word and the note's first two sentences, a chevron, no advice.
  * [writing]: a write is running, so a [ReportCard.pending] card shows loading bars until its note lands.
+ * [rail] (DT4, the page's hero): the note becomes the timeline's morning node written at [morningAt]; [after] draws the rest of the rail.
  */
 @Composable
-internal fun ReportCardView(card: ReportCard, modifier: Modifier = Modifier, onOpen: (() -> Unit)? = null, writing: Boolean = false) {
+internal fun ReportCardView(
+    card: ReportCard, modifier: Modifier = Modifier, onOpen: (() -> Unit)? = null, writing: Boolean = false,
+    rail: Boolean = false, morningAt: Long? = null, after: (@Composable (Color) -> Unit)? = null,
+) {
     val skeleton = writing && card.pending && onOpen == null
     val c = AppTheme.colors
     val a = accent(card)
@@ -202,7 +228,9 @@ internal fun ReportCardView(card: ReportCard, modifier: Modifier = Modifier, onO
                 .then(if (onOpen != null) Modifier.clickable(role = Role.Button) { haptic.tick(); onOpen() } else Modifier)
                 .padding(AppSpace.l),
         ) {
-            val (name, icon) = title(card.kind)
+            val (title, icon) = title(card.kind)
+            // DT4: an earlier day's first card is named by its weekday, not "Today".
+            val name = if (hero && card.date != LocalDate.now()) card.date.dayOfWeek.getDisplayName(java.time.format.TextStyle.FULL, Locale.getDefault()) else title
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(26.dp).background(a.copy(alpha = 0.16f), RoundedCornerShape(7.dp)), contentAlignment = Alignment.Center) {
                     Icon(icon, null, tint = a, modifier = Modifier.size(16.dp))
@@ -211,6 +239,26 @@ internal fun ReportCardView(card: ReportCard, modifier: Modifier = Modifier, onO
                 if (onOpen != null) Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Open report", tint = c.secondaryLabel)
             }
             if (hero) Text(card.verdict.orEmpty().replaceFirstChar { it.titlecase(Locale.getDefault()) }, style = AppType.largeTitle, color = a, modifier = Modifier.padding(top = AppSpace.m))
+            if (rail) {
+                // DT4: the morning note is the rail's first node; [after] adds the day's events, updates and the pill.
+                RailRow(a, first = true, last = after == null, node = 28.dp, nodeTop = 0.dp, dot = {
+                    Box(Modifier.size(28.dp).background(a, CircleShape), contentAlignment = Alignment.Center) { Icon(Icons.Rounded.WbSunny, null, tint = onTint(), modifier = Modifier.size(16.dp)) }
+                }) {
+                    Column {
+                        NodeHeader(morningAt?.toDouble(), "Morning", a)
+                        CardBody(card, a, onOpen, skeleton, hero)
+                    }
+                }
+                after?.invoke(a)
+            } else CardBody(card, a, onOpen, skeleton, hero)
+        }
+    }
+}
+
+@Composable
+private fun CardBody(card: ReportCard, a: Color, onOpen: (() -> Unit)?, skeleton: Boolean, hero: Boolean) {
+    val c = AppTheme.colors
+    Column {
             // While writing: loading bars (null) first, the written note cross-fades in.
             Crossfade(
                 if (skeleton) null else if (onOpen != null) card.note.split(Regex("(?<=[.!?])\\s+")).take(2).joinToString(" ") else card.note,
@@ -222,14 +270,7 @@ internal fun ReportCardView(card: ReportCard, modifier: Modifier = Modifier, onO
             val advice = card.advice.filter { card.written != null || skeleton || !card.fallback.contains(it.trim().removeSuffix("."), ignoreCase = true) }
             if (onOpen == null && advice.isNotEmpty()) {
                 Hairline(Modifier.padding(top = AppSpace.l, bottom = AppSpace.m))
-                Column(verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
-                    advice.forEach { line ->
-                        Row {
-                            Icon(Icons.Rounded.CheckCircle, null, tint = a, modifier = Modifier.size(20.dp))
-                            Text(line, style = AppType.subhead.copy(fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(start = AppSpace.s))
-                        }
-                    }
-                }
+                AdviceRows(advice, a)
             }
             // Fixed text from the app, never the model's (PLAN12: Body signals keeps today's rules).
             if (onOpen == null && card.kind == "body" && card.verdict == "watch") Text(
@@ -244,9 +285,149 @@ internal fun ReportCardView(card: ReportCard, modifier: Modifier = Modifier, onO
                     g(a)
                 }
             }
+    }
+}
+
+@Composable
+private fun AdviceRows(advice: List<String>, a: Color, modifier: Modifier = Modifier) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
+        advice.forEach { line ->
+            Row {
+                Icon(Icons.Rounded.CheckCircle, null, tint = a, modifier = Modifier.size(20.dp))
+                Text(line, style = AppType.subhead.copy(fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(start = AppSpace.s))
+            }
         }
     }
 }
+
+/** White on the accent in both themes, as the Today screen's filled chips. */
+@Composable
+private fun onTint() = AppTheme.colors.run { if (background.luminance() < 0.5f) label else card }
+
+/**
+ * One timeline entry: a 28 dp gutter holding [dot] ([node] tall, [nodeTop] down) on the rail, then [content].
+ * Rows touch, so each draws its own rail segments above and below its node and the rail reads as one line.
+ */
+@Composable
+private fun RailRow(a: Color, first: Boolean, last: Boolean, node: Dp, nodeTop: Dp, dot: @Composable () -> Unit, content: @Composable () -> Unit) {
+    val gap = if (first) 0.dp else AppSpace.l
+    val rail = a.copy(alpha = 0.3f)
+    Row(
+        Modifier.fillMaxWidth().drawBehind {
+            val x = 14.dp.toPx()
+            val top = (gap + nodeTop).toPx()
+            val pad = 4.dp.toPx()
+            if (!first) drawLine(rail, Offset(x, 0f), Offset(x, top - pad), 2.dp.toPx())
+            if (!last) drawLine(rail, Offset(x, top + node.toPx() + pad), Offset(x, size.height), 2.dp.toPx()) // butt ends: segments meet without darker seams
+        }.padding(top = gap),
+    ) {
+        Box(Modifier.width(28.dp).padding(top = nodeTop), contentAlignment = Alignment.TopCenter) { dot() }
+        Box(Modifier.weight(1f).padding(start = AppSpace.m)) { content() }
+    }
+}
+
+/** A note's first line, 28 dp tall to sit level with its node: the time in the time column, then what it is. */
+@Composable
+private fun NodeHeader(at: Double?, what: String, a: Color) {
+    Row(Modifier.height(28.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (at != null) TimeCol(at)
+        Text(what, style = AppType.footnote.copy(fontWeight = FontWeight.SemiBold), color = a)
+    }
+}
+
+@Composable
+private fun TimeCol(at: Double) =
+    Text(clock(at), style = AppType.footnote.copy(fontFeatureSettings = "tnum"), color = AppTheme.colors.secondaryLabel, modifier = Modifier.width(if (clock(0.0).length > 5) 68.dp else 48.dp)) // "12:55 PM" needs more than "12:55"
+
+private fun JsonObject.t() = this["t"].num() ?: 0.0
+
+/** `/timeline` events in rows: an event within half an hour of a row's first event joins that row. */
+internal fun halfHours(events: List<JsonObject>): List<List<JsonObject>> =
+    events.sortedBy { it.t() }.fold(mutableListOf<MutableList<JsonObject>>()) { rows, e ->
+        if (rows.isNotEmpty() && e.t() - rows.last().first().t() < 1800) rows.last() += e else rows += mutableListOf(e)
+        rows
+    }
+
+/** The tinted chip the Today screen uses for that kind: a disc in its colour, intakes a quiet rounded square. */
+@Composable
+private fun EventChip(kind: String) {
+    val c = AppTheme.colors
+    val (icon, color) = when (kind) {
+        "tired" -> Icons.Rounded.Bedtime to c.sleep
+        "flat" -> Icons.Rounded.HorizontalRule to c.stageCore
+        "wired" -> Icons.Rounded.Bolt to c.stageAwake
+        "good" -> Icons.Rounded.WbSunny to c.readiness
+        "wake" -> Icons.Rounded.WbTwilight to c.sleep
+        "walk" -> Icons.Rounded.DirectionsWalk to c.activity
+        "ride" -> Icons.Rounded.DirectionsBike to c.activity
+        "workout" -> Icons.Rounded.FitnessCenter to c.activity
+        "coffee" -> Icons.Rounded.Coffee to null
+        "alcohol" -> Icons.Rounded.WineBar to null
+        "meal" -> Icons.Rounded.Restaurant to null
+        "dose" -> Icons.Rounded.Medication to null
+        else -> Icons.Rounded.HorizontalRule to null
+    }
+    Box(
+        Modifier.size(24.dp).background((color ?: c.secondaryLabel).copy(alpha = 0.14f), if (color != null) CircleShape else RoundedCornerShape(6.dp)),
+        contentAlignment = Alignment.Center,
+    ) { Icon(icon, null, tint = color ?: c.label, modifier = Modifier.size(14.dp)) }
+}
+
+/** One quiet row: time, the chips, the labels. */
+@Composable
+private fun EventRow(row: List<JsonObject>) {
+    Row(Modifier.heightIn(min = 28.dp), verticalAlignment = Alignment.CenterVertically) {
+        TimeCol(row.first().t())
+        Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.xs)) { row.forEach { EventChip((it["kind"] as? JsonPrimitive)?.content.orEmpty()) } }
+        Text(
+            row.joinToString(", ") { (it["label"] as? JsonPrimitive)?.content.orEmpty() },
+            style = AppType.subhead, color = AppTheme.colors.secondaryLabel, modifier = Modifier.padding(start = AppSpace.s),
+        )
+    }
+}
+
+/** An update entry; no `text` = being written (loading bars), the note cross-fades in when it lands. */
+@Composable
+private fun UpdateEntry(u: JsonObject, a: Color) {
+    Column {
+        NodeHeader(u["at"].num() ?: (System.currentTimeMillis() / 1000.0), "Update", a)
+        Crossfade(
+            (u["text"] as? JsonPrimitive)?.content,
+            Modifier.padding(top = AppSpace.xs).widthIn(max = 640.dp).animateContentSize(spring(stiffness = Spring.StiffnessMediumLow)),
+            spring(stiffness = Spring.StiffnessMediumLow), label = "update",
+        ) { if (it == null) NoteSkeleton(3) else Text(it, style = AppType.note) }
+        val advice = (u["advice"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.content }
+        if (advice.isNotEmpty()) AdviceRows(advice, a, Modifier.padding(top = AppSpace.m))
+    }
+}
+
+/** "Now": a dot in the accent with a soft ring breathing out of it; still under reduce-motion. */
+@Composable
+private fun NowDot(a: Color) {
+    val reduce = LocalReduceMotion.current
+    val p = if (reduce) 0f else rememberInfiniteTransition(label = "now")
+        .animateFloat(0f, 1f, infiniteRepeatable(tween(1800, easing = LinearEasing)), label = "pulse").value
+    Canvas(Modifier.size(10.dp)) {
+        if (!reduce) drawCircle(a.copy(alpha = 0.35f * (1 - p)), radius = size.minDimension / 2 * (1 + 1.4f * p))
+        drawCircle(a)
+    }
+}
+
+/** Ring sync first, as Settings' "Sync now" ([SyncWorker.runNow]), then wait for that run to end, at most 90 s. */
+private suspend fun syncAndWait(ctx: Context) {
+    val wm = WorkManager.getInstance(ctx)
+    val flow = wm.getWorkInfosForUniqueWorkFlow("ring_sync")
+    val before = flow.first().map { it.id }.toSet()
+    SyncWorker.runNow(ctx)
+    withTimeoutOrNull(90_000) {
+        val mine = flow.first { l -> l.any { it.id !in before } }.filter { it.id !in before }
+        // Two new runs: ours already ended and chained the next one (its REPLACE deletes ours, hence null).
+        if (mine.size == 1) wm.getWorkInfoByIdFlow(mine[0].id).first { it == null || it.state.isFinished }
+    }
+}
+
+private fun savedReports(ctx: Context): JsonObject =
+    runCatching { Json.parseToJsonElement(File(ctx.filesDir, "reports.json").readText()) as JsonObject }.getOrDefault(JsonObject(emptyMap()))
 
 private val GRAPH = 120.dp
 
@@ -353,12 +534,42 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
     var date by remember { mutableStateOf(LocalDate.now()) }
     val isToday = date == LocalDate.now()
     val scope = rememberCoroutineScope()
+    // DT4: the timeline's events (`/timeline`) and reports.json (update entries, the morning note's time).
+    var events by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
+    var saved by remember { mutableStateOf(JsonObject(emptyMap())) }
+    var updating by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf<String?>(null) }
+    suspend fun loadDay(d: LocalDate) {
+        val ev = (Api.timeline(ctx, d)?.get("events") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+        val s = withContext(Dispatchers.IO) { if (reportsOff(ctx)) JsonObject(emptyMap()) else savedReports(ctx) }
+        if (date == d) { events = ev; saved = s }
+    }
+    // "Update me": a ring sync, then one update note; a quiet line when there is nothing new or no answer.
+    fun update() = scope.launch {
+        updating = true
+        status = null
+        try {
+            syncAndWait(ctx)
+            val r = withContext(Dispatchers.Default) { runCatching { writeUpdate(ctx) }.getOrNull() }
+            val day = LocalDate.now()
+            loadDay(day)
+            status = when {
+                r == null -> "Could not update just now."
+                (r["nothing_new"] as? JsonPrimitive)?.content == "true" -> "Nothing new since " + clock(updateSince(saved, day.toString()).toDouble())
+                else -> null
+            }
+        } finally { updating = false }
+    }
     // Writes today's notes, re-reading reports.json as they land; a model that fails to load ends it like a finished write.
     suspend fun write(r: JsonElement, force: Boolean) {
         writing = true
         try {
             // Only while today is shown: the user may have stepped to an earlier day meanwhile.
-            suspend fun reread() { val l = withContext(Dispatchers.IO) { reportCards(ctx, r) }; if (date == LocalDate.now()) cards = l }
+            suspend fun reread() {
+                val l = withContext(Dispatchers.IO) { reportCards(ctx, r) }
+                val s = withContext(Dispatchers.IO) { savedReports(ctx) }
+                if (date == LocalDate.now()) { cards = l; saved = s }
+            }
             coroutineScope {
                 val job = launch(Dispatchers.Default) { runCatching { writeReports(ctx, force) } }
                 while (job.isActive) {
@@ -372,11 +583,15 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
     LaunchedEffect(date) {
         cards = null
         loaded = false
+        events = emptyList()
+        saved = JsonObject(emptyMap())
+        status = null
         val r = loadReport(ctx, date)
         off = withContext(Dispatchers.IO) { reportsOff(ctx) }
         report = r?.first
         cards = r?.second
         loaded = true
+        loadDay(date)
         // Today only, once the night is in: the worker may have been killed before it wrote the missing notes. Earlier days never write.
         if (r != null && isToday && !off && r.second.any { it.kind == "night" } && r.second.any { it.pending }) write(r.first, false)
     }
@@ -413,7 +628,42 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
             return@LargeTitleScaffold
         }
         val writing = writing && isToday
-        item(key = list.first().kind) { ReportCardView(list.first(), Modifier.hero(), writing = writing) }
+        val hero = list.first()
+        if (hero.kind != "today") item(key = hero.kind) { ReportCardView(hero, Modifier.hero(), writing = writing) }
+        else item(key = hero.kind) {
+            val day = date.toString()
+            val morningAt = (saved["$day/today"] as? JsonObject)?.get("at").num()?.toLong()
+            // Event rows and update entries by time, newest last; while updating, an entry with no text holds the loading bars.
+            // Events before the morning note are left out: it is written once the night is in, so it already covers them.
+            val entries: List<Pair<Double, Any>> = (halfHours(events.filter { it.t() >= (morningAt ?: 0L) }).map { it.first().t() to it } + updates(saved, day).map { (it["at"].num() ?: 0.0) to it })
+                .sortedBy { it.first } + if (updating && isToday) listOf(0.0 to JsonObject(emptyMap())) else emptyList()
+            val pill = isToday && !off
+            ReportCardView(hero, Modifier.hero(), writing = writing, rail = true, morningAt = morningAt, after = (@Composable { a: Color ->
+                entries.forEachIndexed { i, (_, e) ->
+                    val last = !pill && i == entries.lastIndex
+                    if (e is JsonObject) RailRow(a, false, last, 28.dp, 0.dp, dot = {
+                        Box(Modifier.size(28.dp).background(a.copy(alpha = 0.16f), CircleShape), contentAlignment = Alignment.Center) { Icon(Icons.Rounded.Update, null, tint = a, modifier = Modifier.size(16.dp)) }
+                    }) { UpdateEntry(e, a) }
+                    else RailRow(a, false, last, 8.dp, 10.dp, dot = { Box(Modifier.size(8.dp).background(a.copy(alpha = 0.55f), CircleShape)) }) {
+                        @Suppress("UNCHECKED_CAST") EventRow(e as List<JsonObject>)
+                    }
+                }
+                if (pill) RailRow(a, false, true, 10.dp, 17.dp, dot = { NowDot(a) }) {
+                    Column {
+                        val busy = updating || writing
+                        Row(
+                            Modifier.heightIn(min = 44.dp).clip(RoundedCornerShape(50)).background(if (busy) a.copy(alpha = 0.55f) else a)
+                                .clickable(enabled = !busy, role = Role.Button) { haptic.tick(); update() }.padding(horizontal = AppSpace.xl),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(Icons.Rounded.AutoAwesome, null, tint = onTint(), modifier = Modifier.size(18.dp))
+                            Text(if (updating) "Updating…" else "Update me", style = AppType.headline, color = onTint(), modifier = Modifier.padding(start = AppSpace.s))
+                        }
+                        status?.let { Text(it, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s)) }
+                    }
+                }
+            }).takeIf { entries.isNotEmpty() || pill })
+        }
         val rest = list.drop(1)
         // 600 dp and wider: the small cards flow in two columns under the full-width hero.
         if (wide) item {
