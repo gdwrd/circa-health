@@ -38,6 +38,8 @@ object Prefs {
     private const val KEY_MARK_NAMES      = "mark_names"
     private const val KEY_PHONE_MOVES     = "phone_moves"
     private const val KEY_OPEN_MOVE       = "open_move"
+    private const val KEY_REPORT_WRITER   = "report_writer"
+    private const val KEY_REPORT_NAME     = "report_name"
 
     private fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -110,6 +112,16 @@ object Prefs {
     var Context.openMove: String
         get() = prefs(this).getString(KEY_OPEN_MOVE, "") ?: ""
         set(v) = prefs(this).edit().putString(KEY_OPEN_MOVE, v).apply()
+
+    /** Settings › Reports switch; off (default) = the on-phone model writes nothing, the cards show their template text. */
+    var Context.reportWriter: Boolean
+        get() = prefs(this).getBoolean(KEY_REPORT_WRITER, false)
+        set(v) = prefs(this).edit().putBoolean(KEY_REPORT_WRITER, v).apply()
+
+    /** Settings › Reports name the notes address; "" = no name. */
+    var Context.reportName: String
+        get() = prefs(this).getString(KEY_REPORT_NAME, "") ?: ""
+        set(v) = prefs(this).edit().putString(KEY_REPORT_NAME, v).apply()
 
     /** Notification access, granted by the user in system Settings; needed to see what is playing. */
     val Context.notificationAccess: Boolean

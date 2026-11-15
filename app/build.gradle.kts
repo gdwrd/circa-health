@@ -75,6 +75,7 @@ dependencies {
     implementation(libs.haze)
     implementation(libs.androidx.glance.appwidget)
     implementation(libs.play.services.location)
+    implementation(libs.litertlm.android)
 
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)

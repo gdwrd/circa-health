@@ -113,6 +113,8 @@ import com.nsheremet.circa.Prefs.usageAccess
 import com.nsheremet.circa.Prefs.holdPlace
 import com.nsheremet.circa.Prefs.notificationAccess
 import com.nsheremet.circa.Prefs.phoneSensor
+import com.nsheremet.circa.Prefs.reportName
+import com.nsheremet.circa.Prefs.reportWriter
 import com.nsheremet.circa.Prefs.lastScreenMs
 import com.nsheremet.circa.Prefs.stepGoal
 import com.nsheremet.circa.Prefs.syncIntervalMin
@@ -164,6 +166,9 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     }
     var notifyGranted by remember { mutableStateOf(notifyOk()) }
     var car by remember { mutableStateOf(ctx.carName) }
+    var writerOn by remember { mutableStateOf(ctx.reportWriter) }
+    var reportName by remember { mutableStateOf(ctx.reportName) }
+    var offerModel by remember { mutableStateOf(false) }
     var pickCar by remember { mutableStateOf<List<BluetoothDevice>?>(null) } // the bonded devices while the Car dialog is open
     var driveNow by remember { mutableStateOf(System.currentTimeMillis()) }
     var pickInterval by remember { mutableStateOf(false) }
@@ -470,6 +475,20 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                         }
                     }
                 }
+            }
+        }
+        item {
+            Section("Reports", "Circa can write each report card as a short note, on this phone, with an open model (Gemma 4). " +
+                "Nothing you write or measure leaves the phone for it. Without the model the cards show their plain text.") {
+                SwitchRow("Write reports", writerOn) { on ->
+                    haptic.tick()
+                    ctx.reportWriter = on; writerOn = on
+                    offerModel = on
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                FieldRow("Your name", reportName, "Not set") { reportName = it.take(24); ctx.reportName = reportName }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ReportModelRows(offerModel) { offerModel = false }
             }
         }
         item {
