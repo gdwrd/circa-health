@@ -1,210 +1,207 @@
 # Circa v12: reports written on the phone
 
-Status: plan (user direction, 2026-11-15). Only the trial (AI1 to AI3) is in the ledger. AI3b to AI10 go in after AI3's
-verdict, and the plan below assumes that verdict is "the model is good enough". Each `###` item is one ledger item / one
-session.
+Status: plan, trial passed (user, 2026-11-15: "I tested everything with my name included there, and it looks good").
+Items AI3b to AI10 are in the ledger; each `###` item below is one ledger item / one session. The trial's measured
+numbers are in the ledger's Facts. The trial code is on branch `ai-trial` (last commit `7809960`), never merged: items
+copy from it with `git show ai-trial:<path>`.
 
 ## Context and decisions
 
-- Goal (user, 2026-11-15): a small open model running on the phone that tells you in plain words how yesterday and the
-  last week went and what to do today, tonight and next week, by name. A Reports screen made of cards, each with a short
-  text and a graph. A notification about 30 minutes after waking. A short body-signals (illness) report when there is
-  something to say.
-- Decisions (user, same day):
+- Goal (user, 2026-11-15): a small open model running on the phone that tells you in plain words, by name, how your
+  body is doing: how yesterday, the night and the last week went, and what to do today, tonight and next week, plus a
+  short body-signals (illness) report when there is something to say. A Reports page made of cards, each with a
+  written note and a graph. A notification about 30 minutes after waking.
+- Decisions (user):
   - **No chat.** The model writes reports and nothing else.
-  - **The smaller model first** (Gemma 4 E2B); the bigger one (E4B) only if the trial says the writing is too weak.
-  - Every card has a graph, drawn from numbers the backend or the app already has.
+  - **Gemma 4 E2B** (the smaller model). It passed the trial; E4B stays a download option.
+  - **No scores in the text.** The app already shows them. The notes give recommendations and say how the body is
+    doing and how today is likely to go.
+  - **Longer notes**, not one sentence.
+  - **Every card has a graph**, reused from what the app already draws where possible.
+  - **The page must look designed** (2026-11-15): the Apple Health / Fitness feel of the rest of the app, with our own
+    character and extra colors. Not a list of grey boxes.
 - Decisions (mine, change them if you disagree):
-  - **The model writes, the backend decides.** Small models get numbers wrong and invent health advice. `report.py`
-    computes each card's facts and its verdict (push / steady / easy / rest, usual bedtime / earlier, next week's one
-    focus) from the same rows the scores and notifications use. The model only turns them into sentences.
-  - **Graphs never come from the model.** Each card's series is in the `/report` reply and drawn with Vico, as the
-    other screens do.
-  - **Every card works without the model.** `/report` carries a template text per card (`fallback`). No model file,
-    a failed run or a failed number check shows the fallback, so the screen is never empty and the app still works
-    with the feature off.
-  - **Reports is a pushed screen, not a sixth tab.** A card at the top of Today opens it, and so does the morning
-    notification.
+  - **The model writes, the backend decides.** `report.py` computes each card's verdict, its observations with their
+    meaning attached, and the only advice the model may give. The model connects them into a note.
+  - **Graphs never come from the model**, and not from `/report` either: the Reports page fetches the same endpoints
+    the Sleep, Activity, Stress and Trends screens use and draws their existing charts.
+  - **Advice is shown twice on purpose:** woven into the note by the model, and as fixed rows under it straight from
+    the backend, so a suggestion the model drops is still on the card.
+  - **Every card works without the model.** `/report` carries a template text per card (`fallback`). No model file, a
+    failed run or a failed check shows the fallback.
+  - **Where it lives:** a hero card at the top of Today (the verdict word and the first lines of today's note) opens
+    the full Reports page; the morning and weekly notifications open the same page. Not a sixth tab.
+  - **Notes are set in the platform serif** (no bundled font), everything else stays in the app's sans. It marks
+    "written for you" apart from data. This is the page's main character trait; drop it in AI6 if it reads wrong.
+  - **CPU, not GPU:** the same speed on the Pixel 9 Pro Fold at a third of the memory.
   - **English only.** The name is a phone setting and never leaves the phone.
-  - **Body signals keeps today's rules:** the copy says "may", never names an illness, and the line "see a doctor if
-    you feel unwell" is fixed text added by the app, not written by the model.
+  - **Body signals keeps today's rules:** the copy says "may", never names an illness, and "see a doctor if you feel
+    unwell" is fixed text added by the app, not written by the model.
 - Not doing: chat, questions to the model, the model reading raw samples, a cloud model, a model on the homelab,
-  fine-tuning, languages other than English, voice.
+  fine-tuning, other languages, voice, an archive browser for old reports (the last 14 days are kept on the phone but
+  only today's are shown).
 
-## Changed by the trial (2026-11-15)
+## What we know (measured on the real phone, 2026-11-15)
 
-The first runs on the phone and the user's reading of them replaced parts of the design below. Where they differ, this
-section wins; the measured numbers are in the ledger's Facts.
+| Thing | Value |
+|---|---|
+| Library | LiteRT-LM `com.google.ai.edge.litertlm:litertlm-android` 0.19.1, minimum Android API 24 |
+| Kotlin | the library needs Kotlin 2.3 (every release is built with 2.2 or newer); 2.3.21 worked on `ai-trial` with one forced change, `kotlinOptions { jvmTarget }` → `kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }` |
+| App size | the release APK grows to about 108 MB (native code); the model is not in the APK |
+| Use | `Engine(EngineConfig(modelPath, backend = Backend.CPU())).use { it.initialize(); it.createConversation(ConversationConfig(systemInstruction = Contents.of(...), samplerConfig = SamplerConfig(topK = 40, topP = 0.9, temperature = 0.4))).use { c -> c.sendMessage(text).toString() } }` |
+| Model | Gemma 4 E2B, `https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm`, 2588147712 bytes, Apache-2.0, no login. E4B: `.../gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm`, 3659530240 bytes |
+| Speed | CPU: load 0.9 s, 634 MB, 17 to 18 tokens a second, 6 to 12 s for a 3 to 5 sentence note, 43 s for five cards |
+| Writing | with the second prompt: numbers copied exactly, no scores, 3 to 5 sentences. Faults seen: a "can" hardened to "is", one invented adjective ("a low 57 bpm"), one of two advice lines dropped, a stiff style ("indicating", "suggesting") |
+| Download | `DownloadManager`, Wi-Fi only, to `model.download`, renamed to `model.litertlm` at the expected size: worked |
 
-- **No scores in the text** (user): the app already shows them. Cards carry no score numbers; a score's level appears
-  only in words.
-- **Facts are observations with their meaning attached** ("HRV 43 ms, 9 % above your usual: a sign your body is well
-  rested"), up to 12 a card, from every input the day row holds, changed ones first. The model connects them; it does
-  not interpret raw numbers.
-- **Each card has an `advice` list** (at most 3), decided by rules. The model words it and may give no other advice.
-- **Longer notes:** 5 to 7 sentences for `today`, 3 to 5 for the others, one paragraph.
-- **Prompt:** role, length, focus per card and rules in a system instruction; facts and advice in the message;
-  temperature 0.4, top-k 40, top-p 0.9. Numbers are copied as digits (the first prompt's "do not add numbers" made the
-  model spell them out).
-- **Checks:** digits against facts + advice, and number words not present in the facts.
-- **CPU, not GPU:** the same speed on this phone at a third of the memory.
-- **Kotlin 2.3 is needed on `main`** before the library can land there (item AI3b).
-
-## What we know (research 2026-11-15, nothing run on the phone yet)
-
-| Thing | Value | Source |
-|---|---|---|
-| Library | LiteRT-LM, Kotlin API stable, `com.google.ai.edge.litertlm:litertlm-android` | Google's LiteRT-LM Android guide |
-| Use | `Engine(EngineConfig(modelPath, backend))`, `initialize()` (up to about 10 s, off the main thread), `createConversation().sendMessage(text)` or `sendMessageAsync` as a Flow | same |
-| GPU backend | needs `<uses-native-library>` for `libvndksupport.so` and `libOpenCL.so`, both `required="false"` | same |
-| Gemma 4 E2B | 2583 MB; Samsung S26 Ultra: 47 tokens/s on CPU, 52 on GPU; first token 1.8 s CPU / 0.3 s GPU; peak memory 1733 MB CPU / 676 MB GPU | LiteRT-LM overview table |
-| Gemma 4 E4B | 3654 MB; same phone: 18 tokens/s CPU, 22 GPU | same |
-| Model files | Hugging Face `litert-community` (`gemma-4-E2B-it-litert-lm`) | same |
-| Gemini Nano (built into the Pixel) | ruled out: runs only while the app is the top foreground app (`BACKGROUND_USE_BLOCKED`), per-app quota, beta, not open | ML Kit GenAI docs |
-
-Answered by AI2: version 0.19.1, minimum Android API 24, and it needs Kotlin 2.3 (item AI3b). Not known, AI3 answers
-them: the speed and memory on the Pixel 9 Pro Fold's Tensor G4, whether a 2.6 GB model survives inside a background worker with the
-screen off, Gemma 4's licence terms, whether the download needs a Hugging Face login.
+Not known: whether the 43-second run survives inside a background worker with the screen off (started once, result
+never read). AI5 settles it.
 
 ## How it fits together
 
 ```
 ring -> SyncWorker -> backend scores the day
-                      backend GET /report  ->  cards: kind, verdict, facts, fallback, chart
+        backend GET /report  ->  cards: kind, verdict, facts, advice, fallback
 SyncWorker (after the notifications fetch)
-   new card facts + model present  ->  ReportWriter writes each card  ->  reports.json on the phone
-   morning notification            ->  body = today's written text, tap opens Reports
-ReportScreen: card = written text (or fallback) + chart from the reply
+   card facts changed + writer on + model present  ->  ReportWriter writes each card  ->  reports.json
+   morning / weekly notification                   ->  body = the written note's first sentences, tap opens Reports
+Today: hero card (verdict word + start of today's note)  ->  Reports page
+Reports page: card = note (written or fallback) + advice rows + a graph from the screen that owns that data
 ```
 
-### `/report` reply (AI1, charts added in AI4)
+### `/report` (done: AI1, AI1b)
 
-```json
-{"date": "2026-11-16", "cards": [
-  {"kind": "today", "verdict": "easy",
-   "facts": ["Readiness 58, your usual is 74", "Slept 5 h 40 min, 1 h 20 min under your usual", "..."],
-   "fallback": "Take it easy today. You slept 5 h 40 min, ...",
-   "chart": {"type": "bars", "label": "Readiness, last 7 days", "x": ["Mon", "..."], "y": [74, "..."], "mark": 6}}
-]}
-```
-
-- `facts` are finished English phrases with the numbers already rounded and worded, at most 8 a card. The model never
-  sees raw JSON or a number it has to compute with.
-- A card is left out when it has nothing to say (`body` on a calm day, `week` with under 3 scored days).
-- Calm mode: facts carry words ("lower than usual"), no scores. Guess first: `today` is left out until today's guess
-  is in.
+`{"date", "cards": [{"kind", "verdict", "facts", "advice", "fallback"}]}`. No score numbers anywhere; `facts` are
+observations with meanings ("HRV 43 ms, 9 % above your usual: a sign your body is well rested"), at most 12, changed
+ones first; `advice` at most 3, decided by rules. A card with nothing to say is left out. Calm mode: no digits. Guess
+first: `today` is left out until today's guess is in.
 
 ### Cards
 
-| Kind | Size | When | Verdict (decided in `report.py`) | Facts from | Graph |
-|---|---|---|---|---|---|
-| `today` | big | every day with a scored night | `push` / `steady` / `easy` / `rest` | readiness and its contributors, last night, sleep debt, body signals level, `cardio.target` | readiness, last 7 days, today marked |
-| `yesterday` | small | every day | none | yesterday's scores, steps, workouts, moments, `because` | yesterday's heart rate by hour with workouts marked |
-| `night` | small | every day with a night | none | asleep, stages, score, times, `because` | sleep stages strip |
-| `tonight` | small | every day | `usual` / `earlier` | `notify.tonight`, `debt`, `bedtime_window` | last 7 bedtimes against the window |
-| `week` | small | every day, 3+ scored days | none | `_week(end)` against `previous`: means, best and worst night, steps | three scores a day, 7 days |
-| `next_week` | small | Monday to Wednesday | one focus: `sleep` / `regular` / `move` / `keep` | the week's sleep against need, bedtime spread, cardio load against the base | sleep a night against the need line |
-| `body` | small | body signals above calm, or an episode closed in the last 3 days | `watch` / `back` | `signals` flags, deltas, streak, `notify.explain`, lead time, `closed_today` | strain index, last 14 days |
+| Kind | Verdict | Accent | Graph (existing component, data it already takes) |
+|---|---|---|---|
+| `today` (hero) | `push` / `steady` / `easy` / `rest` | by verdict: push = activity, steady = readiness, easy = breathe, rest = sleep | readiness, last 7 days, today marked: `MiniChart` (StressScreen) over `/week` days |
+| `night` | none | sleep | `Hypnogram` (SleepScreen) from `/sleep` |
+| `yesterday` | none | activity | `ThroughTheDay` (StressScreen) from `/stress?date=`; `HourlySteps` (ActivityScreen) from `/activity?date=` when there are no stress samples |
+| `tonight` | `usual` / `earlier` | sleepLight | `Bedtime` (SleepScreen): last bedtimes against the window and tonight's plan |
+| `week` | none | tint | two `MiniChart`s side by side: sleep a night and steps a day, from `/week` days |
+| `next_week` | `sleep` / `regular` / `move` / `keep` | breathe | by focus: `regular` = `Regularity` (SleepScreen); otherwise `MiniChart` of sleep a night with the need as a `dashedLine` (`move`: cardio load a day from `/trends`) |
+| `body` | `watch` / `back` | heart | strain index, last 14 days: `MiniChart` over `/trends` (or two `/week` replies if `/trends` has no strain metric) |
 
-Verdict rules reuse what exists (`notify._word` bands, `_strain`'s "above calm for 2+ nights", `notify.tonight`,
-`cardio.target`); thresholds that do not exist yet are set in AI1 from the real days and written in its test.
+Page order: `today`, `night`, `yesterday`, `tonight`, then `week` and `next_week`; `body` moves to second place when
+its verdict is `watch`.
 
-### Prompt (one call a card)
+### Prompt and checks (from the trial, `ai-trial:app/src/main/java/com/nsheremet/circa/ui/ReportTrialScreen.kt`)
 
-```
-You write one short note for {name} about their own health data. Second person, plain words, {N} sentences at most.
-Use only the facts below. Do not add numbers, causes or medical advice. Do not name an illness.
-Start with the advice: {verdict phrase}.
-Facts:
-- ...
-```
-
-- **Number check:** every number in the output must appear in the card's facts, else the fallback is shown. Same for
-  a short banned-word list (illness names, "diagnos", "Oura").
-- Length: `today` 3 sentences, the others 2. Output over 400 characters is cut at a sentence end.
-- One fresh conversation a card, so one card's facts cannot leak into another.
+- System instruction: role (a short personal note to {name} about how their body is doing), length (`today` 5 to 7
+  sentences, the others 3 to 5, one paragraph), "do not list the facts one by one; connect them, say what that means,
+  then the advice", a focus line per kind, and the rules: only the facts and advice given, numbers and times copied
+  exactly as digits, never a score, no medical advice, no illness names, no invented advice.
+- User message: `Main message:` (the verdict's lead sentence), `Facts:`, `Advice to give, in your own words:`.
+- To add in AI5, from the faults seen: "keep words like 'can', 'may' and 'likely' as they are", "plain short
+  sentences, no 'indicating' or 'suggesting'", "give every advice line".
+- Checks, any failure shows the fallback: every run of digits in the note is in the facts or advice; no spelled-out
+  number (two … twelve, teens, tens, hundred, thousand) unless that word is in the facts; no "score"; no banned word
+  (illness names, "diagnos", "Oura"); at least 2 sentences; at most 900 characters, cut at a sentence end.
+- One fresh conversation a card. Temperature 0.4, top-k 40, top-p 0.9.
 
 ### On the phone
 
-- `ReportWriter` (new file): loads the engine once per run, writes the cards whose facts changed (hash of verdict +
-  facts), closes the engine. Runs inside `SyncWorker` after the notifications fetch, never on the main thread.
-- `reports.json` in `filesDir`: `date/kind -> {hash, text}`, last 14 days kept. The screen reads only this and the
-  `/report` reply.
-- Model file in `filesDir/models/`, downloaded on Wi-Fi from Settings, about 2.6 GB, with a delete button. Off by
-  default. `Prefs`: `reportWriter` on / off, `reportName`.
-- Morning notification: the backend's `morning` rule stays as it is. When today's `today` card is written, the app
-  shows its text as the body and the tap opens Reports; otherwise the notification is unchanged.
+- `ReportWriter` (new file): loads the engine once per run on CPU, writes the cards whose facts changed (hash of
+  verdict + facts + advice + name), closes the engine. Never on the main thread.
+- `reports.json` in `filesDir`: `date/kind -> {hash, text}`, last 14 days kept.
+- Model in `getExternalFilesDir(null)/model.litertlm` (the trial's path, so the downloaded file is reused).
+- `Prefs`: `reportWriter` on / off (off by default), `reportName`.
+
+## The page (design brief for AI6 and AI7)
+
+The rest of the app is Apple Health in feel: grouped background, white inset cards, large collapsing title, score
+rings, hairlines, `ui/Theme.kt` tokens only. The Reports page keeps all of that and adds its own character:
+
+- **Hero card (`today`).** The verdict as one large word ("Steady", "Push", "Easy", "Rest") in the large-title weight,
+  in the verdict's accent color, over a soft top-to-bottom wash of that accent (about 12 % to 0 %) that fades into the
+  card. Under it the note, then the advice rows, then the 7-day readiness chart. The same card, cut to the verdict word
+  and the note's first two sentences, sits at the top of Today and expands into the page (shared-element transition;
+  Compose 1.7.6 has `SharedTransitionLayout`).
+- **Notes in serif.** `FontFamily.Serif` at the body size with slightly looser line height, in the label color. One
+  new type token in `Theme.kt` (`AppType.note`). Everything else on the card stays in the app's sans.
+- **Advice rows.** Under the note, one row an advice line: a filled round check-style icon in the card's accent, the
+  text in the headline weight. From the backend's `advice`, never from the model.
+- **Accent per card** from the table above: a small rounded icon and the card's title in the accent (Health's
+  "Highlights" pattern), and the graph drawn in the same accent. New tokens only where a color does not exist yet
+  (verdict washes); no inline colors.
+- **Graphs sit inside the card**, under the note, about 120 dp high, with no axis clutter beyond what the reused
+  component already draws; a hairline separates note and graph.
+- **Written-on-this-phone mark:** a footnote at the bottom of the page, "Written on this phone by Gemma. Nothing left
+  the device.", and nothing on each card. A card showing the fallback has no mark and no apology.
+- **While writing:** the fallback is shown first; when the written note arrives it cross-fades in (spring, as the app's
+  other transitions). No typewriter effect, no spinner over text.
+- **Unfolded Fold and tablets:** at 600 dp and wider the small cards flow in two columns under the full-width hero.
+- **Empty and off states:** writer off or no model: the page still shows every card with its fallback and graph, plus
+  one quiet row at the bottom, "Turn on written reports", opening Settings.
+- **Calm mode:** no numbers in notes or advice (the backend already sends none); graphs follow the rule each reused
+  component already has.
 
 ## Items
 
-### AI1 Backend: report facts (trial)
-`backend/app/report.py` (pure functions: rows in, cards out, no I/O), `main.py` (`GET /report?date=`),
-`backend/tests/test_report.py`. All seven cards with `kind`, `verdict`, `facts`, `fallback`; no `chart` yet. Calm and
-guess rules as above. **Check:** `python -m compileall -q backend/app && python -m pytest backend/tests -q`; tests
-cover each verdict, a calm-mode card with no digits, and a quiet day with no `body` card.
+### AI3b Kotlin 2.3 on main
+`gradle/libs.versions.toml` (`kotlin = "2.3.21"`), `app/build.gradle.kts` (`kotlinOptions` → `kotlin { compilerOptions
+{ jvmTarget.set(JvmTarget.JVM_17) } }`), `CLAUDE.md` (the Kotlin version line). The compiler alone, no library, so a
+regression shows apart from the feature. It worked unchanged on `ai-trial`. **Check:** `.\gradlew.bat
+:app:compileDebugKotlin`, `:app:testDebugUnitTest`.
 
-### AI2 App: trial screen (trial, branch `ai-trial`, not merged)
-`gradle/libs.versions.toml` + `app/build.gradle.kts` (LiteRT-LM, version pinned), `AndroidManifest.xml` (the two
-native-library lines), `ui/Api.kt` (`report`), `ui/SettingsScreen.kt` (one row "Report trial"), new
-`ui/ReportTrialScreen.kt`. The screen loads `getExternalFilesDir(null)/model.litertlm`, fetches `/report`, runs every
-card through the prompt above on CPU and on GPU, and shows per card: the text, the fallback, seconds, tokens a second,
-number check pass or fail; on top: load time and the app's memory. A second button runs the same from a one-off
-`WorkManager` job and writes the result to the Sync log, to see whether it survives in the background. **Check:**
-`.\gradlew.bat :app:compileDebugKotlin`; the minimum Android version and the pinned version recorded in Facts.
+### AI4 App: settings and model download
+`gradle/libs.versions.toml` + `app/build.gradle.kts` (LiteRT-LM 0.19.1), `AndroidManifest.xml` (the two
+`uses-native-library` lines), `Prefs.kt` (`reportWriter`, `reportName`), `ui/SettingsScreen.kt` (section "Reports":
+on / off, name, model row). New `ui/ReportModel.kt`: the download, size check, rename, cancel and delete from the
+trial screen, with Gemma 4 E2B as the default and E4B as the second choice. The row shows not downloaded / progress /
+installed (which model) / delete. Turning the writer on with no model offers the download. **Check:** compile; JVM
+test for the progress text (from `ai-trial`); on the emulator the section shows its states.
 
-### AI3 Trial on the phone (trial, user-driven)
-Deploy AI1 to the homelab after a circa.db backup. Download `gemma-4-E2B-it-litert-lm`, `adb push` it to the app's
-external files folder, install the `ai-trial` build. Five mornings: open the trial screen, read the texts next to the
-fallbacks, run the background button once with the screen off. **Check:** recorded in Facts: load time, tokens a
-second and memory on CPU and GPU, background run yes / no, number-check failures out of the cards written, the
-licence and download terms, and the user's verdict: E2B, try E4B (repeat AI3 with it), or stop. STOP.
+### AI5 App: the writer
+New `ReportWriter.kt` (prompt, checks, cut, `reports.json`, from the trial plus the three prompt lines and the
+number-word fix above), `ui/Api.kt` (`report`), `SyncWorker.kt` (after the notifications fetch: when the writer is on
+and the model is there, write the cards whose hash changed; one Sync log line with cards written, seconds and
+fallbacks used). JVM tests for the checks and the hash. **Check:** compile and `:app:testDebugUnitTest`; then on the
+real phone (user-driven, the one open question of the trial): a sync with the screen off writes today's cards, seen
+as the Sync log line. If the worker is killed, the fallback is writing when the page is opened (AI6 covers it).
 
-### AI3b Kotlin 2.3 on main (found in AI2)
-LiteRT-LM cannot compile with Kotlin 2.0.21 (every release is built with Kotlin 2.2 or newer). `gradle/libs.versions.toml`
-(`kotlin = "2.3.21"`), `app/build.gradle.kts` (`kotlinOptions` → `kotlin { compilerOptions { jvmTarget } }`), `CLAUDE.md`
-(the Kotlin version line). No library yet: this item is the compiler alone, so a regression shows up apart from the
-feature. It worked unchanged on `ai-trial`. **Check:** `.\gradlew.bat :app:compileDebugKotlin`, `:app:testDebugUnitTest`,
-`assembleRelease` with cert `3c236b22`, and one sync on the real phone before anything else lands on top.
+### AI6 App: the Reports page
+New `ui/ReportScreen.kt`, `ui/App.kt` (route `reports`), `ui/TodayScreen.kt` (the hero card on top), `ui/Theme.kt`
+(`AppType.note`, verdict wash tokens). Everything in "The page" except the graphs: hero, serif notes, advice rows,
+accents, order, two columns at 600 dp, fallback and off states, cross-fade, the footnote, the doctor line on `body`.
+If a card has no written note when the page opens and the writer is on, write it then. **Check:** compile,
+`:app:testDebugUnitTest` (`Theme.kt` and `App.kt` change), emulator screenshots light and dark, phone and unfolded
+width, against a seeded local stack, looked at before calling it done.
 
-### AI4 Backend: graphs in the report
-`report.py`, `test_report.py`: the `chart` object for each card (types `bars`, `line`, `stages`, `range`), built from
-the rows already loaded. **Check:** backend check; each card kind has a chart with equal-length `x` and `y`.
+### AI7 App: a graph in every card
+`ui/ReportScreen.kt`, and `SleepScreen.kt`, `StressScreen.kt`, `ActivityScreen.kt` only to make `Hypnogram`,
+`Bedtime`, `Regularity`, `ThroughTheDay`, `MiniChart`, `HourlySteps` `internal` and, where needed, take an accent
+color and a height; their own screens must look the same afterwards. The page fetches the endpoints those screens
+already use (through `Api`, which caches) and feeds each component the shape it takes today; where a shape differs,
+adapt at the call, not in the component. Graphs per the Cards table. **Check:** compile, `:app:testDebugUnitTest`,
+emulator screenshots of the page and of Sleep, Stress and Activity (unchanged), light and dark.
 
-### AI5 App: model download and settings
-`Prefs.kt` (`reportWriter`, `reportName`), `ui/SettingsScreen.kt` (section "Reports": on / off, name, download with
-progress and size, delete), `DownloadManager` on Wi-Fi only into `filesDir/models/`, size check after the download.
-**Check:** compile; on the emulator the row shows the states not downloaded / downloading / ready.
+### AI8 Morning and weekly notifications
+`backend/app/notify.py` (`_morning` and `_weekly`: `open` = `reports`), `backend/tests/test_notify.py`, `SyncWorker.kt`
+(pending-notification loop: write first; for `morning` the body becomes the first two sentences of today's written
+note, for `weekly` of the `week` note; unchanged when nothing is written), `ui/App.kt` (the `reports` link target).
+**Check:** backend check; compile; on the emulator a seeded morning opens the page from the notification.
 
-### AI6 App: the writer
-New `ReportWriter.kt` (prompt, number check, cut, `reports.json`), `SyncWorker.kt` (call after the notifications
-fetch when the setting is on and the file is there), merged LiteRT-LM dependency from `ai-trial`. One JVM test for
-the number check and the cut. **Check:** `.\gradlew.bat :app:compileDebugKotlin` and `:app:testDebugUnitTest`.
-
-### AI7 App: Reports screen
-New `ui/ReportScreen.kt`, `ui/App.kt` (route `reports`), `ui/TodayScreen.kt` (one card on top: today's text, tap
-opens Reports), `ui/Theme.kt` tokens only. Big `today` card, then the small ones in the table's order, each with its
-text and Vico graph; "written on this phone" footnote; fallback text when nothing is written. **Check:** compile,
-`:app:testDebugUnitTest`, emulator screenshots light and dark against a seeded local stack.
-
-### AI8 App: morning notification
-`SyncWorker.kt` (pending-notification loop): for kind `morning`, write first, then body = today's written text and
-the tap opens `reports`; unchanged when nothing is written. **Check:** compile; on the emulator a seeded morning
-shows the written body.
-
-### AI9 Week and next week on Monday
-`notify.py` (`_weekly` tap opens `reports`), `SyncWorker.kt` (the same body swap for kind `weekly`, from the `week`
-and `next_week` cards). **Check:** backend check and compile.
+### AI9 Polish on the real phone
+User-driven start: the build on the Pixel 9 Pro Fold for two mornings. Then one pass over what the user reports and
+what the screenshots show: spacing, the serif size, wash strength, graph heights, folded and unfolded, light and dark,
+calm mode, a day with a `body` card (seeded on the emulator). `ui/ReportScreen.kt`, `ui/Theme.kt` only. **Check:**
+compile, `:app:testDebugUnitTest`, before / after screenshots.
 
 ### AI10 Release and homelab deploy
 R39's pattern: version bump, `assembleRelease`, cert `3c236b22`, deploy the backend after a circa.db backup, GitHub
-release by hand. The APK grows by the library's native code, not by the model. **Check:** `apksigner verify
---print-certs`.
+release by hand. The trial screen is not in it (it never left `ai-trial`). **Check:** `apksigner verify --print-certs`.
 
 ## Risks
 
-- The model writes something false or alarming about health. Held by: verdicts and facts from the backend, the number
-  check, the banned words, the fixed doctor line, no free questions.
-- Too slow or killed in the background on the Tensor G4. AI3 measures it; the way out is writing when the app is
-  opened instead of in the worker.
-- 2.6 GB on the phone for a few sentences a day. The download is a choice in Settings, and the feature is judged
-  against the fallback texts in AI3.
+- The model writes something false or alarming about health. Held by: verdicts, meanings and advice from the backend,
+  the checks, the fixed doctor line, advice rows that do not depend on the model, no free questions.
+- Killed in the background before it finishes. AI5 measures it; the way out is writing when the page is opened.
+- 2.6 GB on the phone and a 108 MB app for a few paragraphs a day. The download is a choice in Settings.
+- Kotlin 2.3 on `main` changes the compiler for the whole app. It is its own item, checked before anything lands on it.
