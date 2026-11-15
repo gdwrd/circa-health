@@ -31,8 +31,8 @@ copy from it with `git show ai-trial:<path>`.
     failed run or a failed check shows the fallback.
   - **Where it lives:** a hero card at the top of Today (the verdict word and the first lines of today's note) opens
     the full Reports page; the morning and weekly notifications open the same page. Not a sixth tab.
-  - **Notes are set in the platform serif** (no bundled font), everything else stays in the app's sans. It marks
-    "written for you" apart from data. This is the page's main character trait; drop it in AI6 if it reads wrong.
+  - **Notes are set in the app's own font** with looser lines. The platform serif was built in AI6 and dropped the
+    same day (user: "The font for text is terrible, use the default font for the app").
   - **CPU, not GPU:** the same speed on the Pixel 9 Pro Fold at a third of the memory.
   - **English only.** The name is a phone setting and never leaves the phone.
   - **Body signals keeps today's rules:** the copy says "may", never names an illness, and "see a doctor if you feel
@@ -123,8 +123,8 @@ rings, hairlines, `ui/Theme.kt` tokens only. The Reports page keeps all of that 
   card. Under it the note, then the advice rows, then the 7-day readiness chart. The same card, cut to the verdict word
   and the note's first two sentences, sits at the top of Today and expands into the page (shared-element transition;
   Compose 1.7.6 has `SharedTransitionLayout`).
-- **Notes in serif.** `FontFamily.Serif` at the body size with slightly looser line height, in the label color. One
-  new type token in `Theme.kt` (`AppType.note`). Everything else on the card stays in the app's sans.
+- **Notes.** The app's body font at the body size with slightly looser line height, in the label color. One
+  type token in `Theme.kt` (`AppType.note`); no serif (dropped, see Decisions).
 - **Advice rows.** Under the note, one row an advice line: a filled round check-style icon in the card's accent, the
   text in the headline weight. From the backend's `advice`, never from the model.
 - **Accent per card** from the table above: a small rounded icon and the card's title in the accent (Health's
@@ -168,7 +168,7 @@ as the Sync log line. If the worker is killed, the fallback is writing when the 
 
 ### AI6 App: the Reports page
 New `ui/ReportScreen.kt`, `ui/App.kt` (route `reports`), `ui/TodayScreen.kt` (the hero card on top), `ui/Theme.kt`
-(`AppType.note`, verdict wash tokens). Everything in "The page" except the graphs: hero, serif notes, advice rows,
+(`AppType.note`, verdict wash tokens). Everything in "The page" except the graphs: hero, notes, advice rows,
 accents, order, two columns at 600 dp, fallback and off states, cross-fade, the footnote, the doctor line on `body`.
 If a card has no written note when the page opens and the writer is on, write it then. **Check:** compile,
 `:app:testDebugUnitTest` (`Theme.kt` and `App.kt` change), emulator screenshots light and dark, phone and unfolded
@@ -190,7 +190,7 @@ note, for `weekly` of the `week` note; unchanged when nothing is written), `ui/A
 
 ### AI9 Polish on the real phone
 User-driven start: the build on the Pixel 9 Pro Fold for two mornings. Then one pass over what the user reports and
-what the screenshots show: spacing, the serif size, wash strength, graph heights, folded and unfolded, light and dark,
+what the screenshots show: spacing, the note size, wash strength, graph heights, folded and unfolded, light and dark,
 calm mode, a day with a `body` card (seeded on the emulator). `ui/ReportScreen.kt`, `ui/Theme.kt` only. **Check:**
 compile, `:app:testDebugUnitTest`, before / after screenshots.
 

@@ -261,8 +261,8 @@ object AppType {
     val subhead = TextStyle(fontSize = 15.sp, lineHeight = 20.sp)
     val footnote = TextStyle(fontSize = 13.sp, lineHeight = 18.sp)
     val tab = TextStyle(fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.Medium)
-    /** Reports notes: platform serif at body size, looser lines; marks "written for you" apart from data. */
-    val note = TextStyle(fontFamily = FontFamily.Serif, fontSize = 17.sp, lineHeight = 25.sp)
+    /** Reports notes: the app's body font with looser lines (the serif was dropped, user 2026-11-15). */
+    val note = TextStyle(fontSize = 17.sp, lineHeight = 25.sp)
 }
 
 // shortcut: read when AppTheme composes; a 12/24 h switch shows on the next app start, fine for a rarely changed setting.
