@@ -233,9 +233,17 @@ fun lightFile(dir: File, time: LocalDateTime): File {
 }
 
 /**
+ * True when light samples that were flowing (last one at [lastSampleMs], 0 = none yet) have stopped for 1 s
+ * and no restart was sent since that sample ([restarted]), so a silent ring gets one restart, not one per loop.
+ */
+fun lightRestartDue(now: Long, lastSampleMs: Long, restarted: Boolean): Boolean =
+    lastSampleMs > 0 && !restarted && now - lastSampleMs >= 1_000
+
+/**
  * Runs live heart rate the way Breathe does (runLiveHr's long mode: `69 01`, again after 30 s without a valid reading,
  * `69 02` at the end) so the ring measures, turns the light copy on (`A1 0A`) after each `69 01`, and writes every `A1 0C` optical sample
- * to [out] as CSV until cancelled. [onUpdate] gets the sample count. Returns null on a normal stop, else what went wrong.
+ * to [out] as CSV until cancelled. When samples stop for 1 s (the ring ended its measurement) it restarts at once ([lightRestartDue]).
+ * [onUpdate] gets the sample count. Returns null on a normal stop, else what went wrong.
  */
 suspend fun recordLight(ctx: Context, address: String, out: File, onUpdate: (Int) -> Unit): String? {
     val conn = ColmiConnection(ctx, address)
@@ -254,18 +262,26 @@ suspend fun recordLight(ctx: Context, address: String, out: File, onUpdate: (Int
             conn.writePacket(ColmiProtocol.lightOnRequest())
             started = true
             var lastLock = System.currentTimeMillis() // last start request or valid reading, as in runLiveHr
+            var lastSample = 0L
+            var restarted = false
             var n = 0
             while (currentCoroutineContext().isActive) {
-                if (System.currentTimeMillis() - lastLock >= 30_000) {
+                val silent = lightRestartDue(System.currentTimeMillis(), lastSample, restarted)
+                // 30 s rule kept for a ring that never sends samples (not worn)
+                if (silent || System.currentTimeMillis() - lastLock >= 30_000) {
                     conn.writePacket(ColmiProtocol.liveHrStartRequest())
                     conn.writePacket(ColmiProtocol.lightOnRequest()) // ca0002 turns the copy off at each measurement end
                     lastLock = System.currentTimeMillis()
+                    restarted = true
                 }
-                val p = withTimeoutOrNull(5_000) { conn.notifyV1.receive() } ?: continue
+                // short wait so 1 s of silence is seen within about 1.2 s
+                val p = withTimeoutOrNull(200) { conn.notifyV1.receive() } ?: continue
                 if (ColmiProtocol.parseLiveHrPacket(p)?.let { it.error == 0 && it.bpm > 0 } == true) lastLock = System.currentTimeMillis()
                 if (p.size >= 2 && p[0] == ColmiProtocol.CMD_RAW_STREAM && p[1] == 0xFF.toByte()) return "This firmware has no light samples: install the built-in patch"
                 val values = ColmiProtocol.parseLightPacket(p) ?: continue
                 val now = System.currentTimeMillis()
+                lastSample = now
+                restarted = false
                 values.forEach { w.write("${n++},$now,$it\n") }
                 onUpdate(n)
             }

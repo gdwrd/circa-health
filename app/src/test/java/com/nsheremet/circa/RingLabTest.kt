@@ -64,6 +64,21 @@ class RingLabTest {
         assertEquals("circa-light-20261113-0905.csv", lightFile(java.io.File("nowhere"), java.time.LocalDateTime.of(2026, 11, 13, 9, 5)).name)
     }
 
+    @Test fun lightRestartAfterOneSecondOfSilence() {
+        assertTrue(lightRestartDue(11_000, 10_000, false))
+        assertTrue(lightRestartDue(15_000, 10_000, false))
+    }
+
+    @Test fun lightRestartNotBeforeOneSecond() {
+        assertFalse(lightRestartDue(10_999, 10_000, false))
+        assertFalse(lightRestartDue(50_000, 0, false)) // no sample yet: the 30 s rule handles it
+    }
+
+    @Test fun lightRestartNotRepeatedWhileSilent() {
+        assertFalse(lightRestartDue(12_000, 10_000, true))
+        assertFalse(lightRestartDue(25_000, 10_000, true))
+    }
+
     @Test fun wearPacketFromPatchedFirmware() {
         // captured from the emulated patched firmware (circaA), clock set to 2025-01-20 06:00
         fun at(h: Int, m: Int) = java.time.LocalDateTime.of(2025, 1, 20, h, m).atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
