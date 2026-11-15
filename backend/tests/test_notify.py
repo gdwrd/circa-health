@@ -895,3 +895,44 @@ def test_evening_not_after_bedtime_or_without_plan(monkeypatch) -> None:
     at(monkeypatch, 22)
     notify.evaluate(set())
     assert eve()[0]["body"] == "Bedtime is close. Time to wind down."
+
+
+def off() -> list[tuple[str, str]]:
+    return [(n["title"], n["body"]) for n in notify.pending() if n["kind"] == "ringoff"]
+
+
+def worn(h: int, m: int, v: float) -> None:
+    load({"ring_worn": {datetime(D.year, D.month, D.day, h, m).timestamp(): v}})
+
+
+def test_ringoff_once_in_window_after_20_min(monkeypatch) -> None:
+    """Wake 07:00: in bed by 23:15 → window 22:15-23:45."""
+    db.set_settings({"wake_weekday": "07:00"})
+    worn(21, 0, 1.0)
+    worn(21, 30, 0.0)
+    at(monkeypatch, 22, 10)  # off 40 min, before the window
+    notify.evaluate(set())
+    assert off() == []
+    at(monkeypatch, 22, 20)
+    notify.evaluate(set())
+    at(monkeypatch, 22, 40)
+    notify.evaluate(set())
+    assert off() == [("Ring is off", "Off since 21:30. Put it on before bed to track tonight.")]
+
+
+def test_ringoff_quiet_when_worn_short_off_late_or_muted(monkeypatch) -> None:
+    db.set_settings({"wake_weekday": "07:00"})
+    worn(22, 0, 1.0)
+    at(monkeypatch, 22, 30)
+    notify.evaluate(set())  # worn
+    worn(22, 20, 0.0)
+    notify.evaluate(set())  # off 10 min
+    at(monkeypatch, 23, 50)
+    notify.evaluate(set())  # off 90 min, after the window
+    at(monkeypatch, 23, 0)
+    db.set_settings({"muted": "ringoff"})
+    notify.evaluate(set())
+    assert off() == []
+    db.set_settings({"muted": ""})
+    notify.evaluate(set())
+    assert off() == [("Ring is off", "Off since 22:20. Put it on before bed to track tonight.")]

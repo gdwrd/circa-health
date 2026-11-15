@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
-from app import cardio, db, main, scoring, samples
+from app import cardio, db, main, notify, scoring, samples
 from app.main import app
 from conftest import load
 
@@ -233,7 +233,7 @@ def test_sleep_depth_naps_regularity_spo2_wear(tmp_path, monkeypatch) -> None:
     assert c["activity"]["inactive_hours"] == 100  # 1 inactive worn hour; counting ring-off hours would give 0
     monkeypatch.setattr(main, "_today", lambda: d)
     monkeypatch.setattr(main, "_vitals", lambda: {})
-    monkeypatch.setattr(main, "_off_since", lambda: None)
+    monkeypatch.setattr(notify, "off_since", lambda now: None)
     with TestClient(app) as cl:
         s = cl.get(f"/sleep?date={d}", headers=H).json()
         assert s["naps"] == x["naps"] and len(s["hr"]) == 7 and s["hr_low"] == {"t": t0 + 600, "bpm": 52.0}
@@ -755,13 +755,13 @@ def test_vitals_drop_nonpositive() -> None:
 def test_off_since_ring_worn_zero_wins() -> None:
     now = time.time() // 60 * 60
     load({"biometric_hr_bpm": {now - 900: 62.0}, "ring_worn": {now - 1800: 1.0, now - 600: 0.0}})
-    assert main._off_since() == now - 600
+    assert notify.off_since(datetime.now(samples.tz())) == now - 600
 
 
 def test_off_since_hr_fallback_is_last_worn_reading() -> None:
     now = time.time() // 60 * 60
     load({"biometric_hr_bpm": {now - 1800: 64.0, now - 900: 0.0, now - 60: 0.0}})
-    assert main._off_since() == now - 1800
+    assert notify.off_since(datetime.now(samples.tz())) == now - 1800
     with TestClient(app) as cl:
         assert cl.get("/today", headers=H).json()["wear"]["off_since"] == now - 1800
 
@@ -769,13 +769,13 @@ def test_off_since_hr_fallback_is_last_worn_reading() -> None:
 def test_off_since_back_on_after_ring_worn_zero() -> None:
     now = time.time() // 60 * 60
     load({"ring_worn": {now - 1800: 0.0}, "biometric_hr_bpm": {now - 2400: 60.0, now - 300: 66.0}})
-    assert main._off_since() is None
+    assert notify.off_since(datetime.now(samples.tz())) is None
 
 
 def test_off_since_no_data_is_none() -> None:
-    assert main._off_since() is None
+    assert notify.off_since(datetime.now(samples.tz())) is None
     load({"biometric_hr_bpm": {time.time() - 300: 0.0}})  # off with no worn reading in 24 h: no evidence of when
-    assert main._off_since() is None
+    assert notify.off_since(datetime.now(samples.tz())) is None
 
 
 def test_off_gap_longest_hr_zero_run_or_ring_worn() -> None:

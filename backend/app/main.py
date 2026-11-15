@@ -394,19 +394,6 @@ def _vitals() -> dict:
     return out
 
 
-def _off_since() -> float | None:
-    """Since when the ring is off (epoch s), over _vitals' 24 h; None while worn or with no evidence."""
-    now = datetime.now(samples.tz())
-    hr, rw = (samples.raw(k, now - timedelta(hours=24), now) for k in ("biometric_hr_bpm", "ring_worn"))
-    last_on = max([t for t, v in hr.items() if v > 0] + [t for t, v in rw.items() if v > 0], default=None)
-    off = max((t for t, v in rw.items() if v <= 0), default=None)
-    if off is not None and (last_on is None or off > last_on):
-        return off
-    if last_on is not None and hr and list(hr.values())[-1] <= 0 and list(hr)[-1] > last_on:
-        return last_on
-    return None
-
-
 def _off_gap(s: datetime, e: datetime) -> dict | None:
     """Longest ring-off stretch inside a night: ring_worn rows when present, else a run of >= 2 HR 0 readings
     bounded by the HR > 0 readings around it (or the night's edges)."""
@@ -514,7 +501,7 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
         "resilience": scoring.resilience([r["inputs"].get("stress_load") for r in rows],
                                          [r["readiness_score"] for r in rows]),
         "vitals": _vitals(),
-        "wear": {**(row["c"].get("wear") or {}), "off_since": _off_since() if d == _today() else None},
+        "wear": {**(row["c"].get("wear") or {}), "off_since": notify.off_since(datetime.now(samples.tz())) if d == _today() else None},
         "moments": _moments(d), "now": _now(d) if d == _today() else None,
         "because": {"today": _because(d), "yesterday": _because(d - timedelta(1))} if d == _today() else None,
         "signals": {**sig, "status": "learning" if sig["reason"] else "ok", "explain": notify.explain(_today())},

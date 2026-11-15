@@ -162,20 +162,58 @@ def _bedtime(now: datetime, dates: set[date]) -> None:
             _add("bedtime", "Wind down", f"In bed by {at('in_bed_by_min')} to be rested for {at('wake_min')}.{extra}"
                  f"{_because_line(noon.date(), d)}", now)
         return
-    if _fired("bedtime", now):
+    if _fired("bedtime", now) or not (u := _usual_bed(d, noon)):
         return
-    w = bedtime_window(d)
-    if w["status"] == "ok":
-        target = noon + timedelta(minutes=w["start_min"])
-        title, body = "Wind down", f"Your best nights start around {target:%H:%M}."
-    else:
-        starts = [r["c"]["session"]["start"] for r in db.days(d - timedelta(13), d) if r["c"].get("session")]
-        if len(starts) < 5:
-            return
-        target = noon + timedelta(minutes=median(_after_noon(s) for s in starts))
-        title, body = "Bedtime soon", f"Your usual bedtime is {target:%H:%M}."
+    target, best = u
+    title, body = ("Wind down", f"Your best nights start around {target:%H:%M}.") if best else \
+        ("Bedtime soon", f"Your usual bedtime is {target:%H:%M}.")
     if target - timedelta(minutes=30) <= now < target:
         _add("bedtime", title, body + _because_line(noon.date(), d), now)
+
+
+def _usual_bed(d: date, noon: datetime) -> tuple[datetime, bool] | None:
+    """Bedtime without a plan: best window start (True) when ok, else the 14-day median start (False) from 5 nights."""
+    w = bedtime_window(d)
+    if w["status"] == "ok":
+        return noon + timedelta(minutes=w["start_min"]), True
+    starts = [r["c"]["session"]["start"] for r in db.days(d - timedelta(13), d) if r["c"].get("session")]
+    if len(starts) < 5:
+        return None
+    return noon + timedelta(minutes=median(_after_noon(s) for s in starts)), False
+
+
+def off_since(now: datetime) -> float | None:
+    """Since when the ring is off (epoch s), over the last 24 h; None while worn or with no evidence."""
+    hr, rw = (samples.raw(k, now - timedelta(hours=24), now) for k in ("biometric_hr_bpm", "ring_worn"))
+    last_on = max([t for t, v in hr.items() if v > 0] + [t for t, v in rw.items() if v > 0], default=None)
+    off = max((t for t, v in rw.items() if v <= 0), default=None)
+    if off is not None and (last_on is None or off > last_on):
+        return off
+    if last_on is not None and hr and list(hr.values())[-1] <= 0 and list(hr)[-1] > last_on:
+        return last_on
+    return None
+
+
+def _ringoff(now: datetime, dates: set[date]) -> None:
+    """Once per evening, from 1 h before to 30 min after tonight's bedtime, when the ring has been off 20+ min."""
+    noon = samples.midnight(now.date()) + timedelta(hours=12)
+    if now < noon:
+        noon -= timedelta(1)
+    if _fired("ringoff", now, noon):
+        return
+    p = tonight(noon.date())
+    if p:
+        target = noon + timedelta(minutes=p["in_bed_by_min"])
+    elif u := _usual_bed(now.date(), noon):
+        target = u[0]
+    else:
+        return
+    if not target - timedelta(minutes=60) <= now < target + timedelta(minutes=30):
+        return
+    off = off_since(now)
+    if off is not None and off <= now.timestamp() - 1200:  # 20 min: a shower is not a forgotten ring
+        _add("ringoff", "Ring is off", f"Off since {datetime.fromtimestamp(off, samples.tz()):%H:%M}. "
+             "Put it on before bed to track tonight.", now)
 
 
 def _evening(now: datetime, dates: set[date]) -> None:
@@ -439,7 +477,7 @@ def _receipt(now: datetime, dates: set[date]) -> None:
 
 
 KINDS = ("readiness", "bedtime", "bedtime_soon", "inactivity", "strain", "checkin", "weekly", "morning", "monthly", "stillup",
-         "experiment", "workout", "receipt", "evening")
+         "experiment", "workout", "receipt", "evening", "ringoff")
 
 
 def evaluate(dates: set[date]) -> None:
@@ -448,7 +486,8 @@ def evaluate(dates: set[date]) -> None:
     for rule, kind in ((_bedtime, "bedtime"), (_inactivity, "inactivity"),
                        (_weekly, "weekly"), (_strain, "strain"), (_checkin, "checkin"), (_morning, "morning"),
                        (_monthly, "monthly"), (_stillup, "stillup"), (_experiment, "experiment"),
-                       (_workout, "workout"), (_receipt, "receipt"), (_evening, "evening")):
+                       (_workout, "workout"), (_receipt, "receipt"), (_evening, "evening"),
+                       (_ringoff, "ringoff")):
         if kind in muted:
             continue
         try:
