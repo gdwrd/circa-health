@@ -44,14 +44,14 @@ BODY: dict[str, tuple[str, str, float, str | None, str | None]] = {
     "cardio_load": ("Cardio load", "load", 0.0, "a heavier day than usual for your heart",
                     "a lighter day than usual for your heart"),
 }
-# unit: (value, gap from the reference, calm word when higher, when lower)
-UNITS: dict[str, tuple[Callable[[float], str], Callable[[float, float], str], str, str]] = {
-    "bpm": (lambda v: f"{round(v)} bpm", lambda d, u: f"{round(abs(d))} bpm", "higher", "lower"),
-    "ms": (lambda v: f"{round(v)} ms", lambda d, u: f"{round(abs(100 * d / u))} %", "higher", "lower"),
-    "min": (_duration, lambda d, u: _duration(abs(d)), "longer", "shorter"),
-    "%": (lambda v: f"{round(v)} %", lambda d, u: f"{round(abs(d))} %", "higher", "lower"),
-    "steps": (lambda v: f"{round(v):,} steps", lambda d, u: f"{round(abs(d)):,} steps", "more", "less"),
-    "load": (lambda v: f"{round(v)}", lambda d, u: f"{round(abs(100 * d / u))} %", "higher", "lower"),
+# unit: (gap from the reference, word when higher, when lower)
+UNITS: dict[str, tuple[Callable[[float, float], str], str, str]] = {
+    "bpm": (lambda d, u: f"{round(abs(d))} bpm", "higher", "lower"),
+    "ms": (lambda d, u: f"{round(abs(100 * d / u))} %", "higher", "lower"),
+    "min": (lambda d, u: _duration(abs(d)), "longer", "shorter"),
+    "%": (lambda d, u: f"{round(abs(d))} %", "higher", "lower"),
+    "steps": (lambda d, u: f"{round(abs(d)):,} steps", "more", "less"),
+    "load": (lambda d, u: f"{round(abs(100 * d / u))} %", "higher", "lower"),
 }
 GET: dict[str, Callable[[dict], float | None]] = {
     **{k: (lambda r, k=k: r["inputs"].get(k)) for k in ("rhr", "hrv", "sleep_min", "awake", "spo2", "steps",
@@ -116,23 +116,6 @@ def _gap(key: str, x: float | None, ref: float | None) -> int:
     return 1 if x > ref else -1
 
 
-def _cmp(key: str, x: float | None, ref: float | None, calm: bool, what: str = "your usual") -> str | None:
-    """'Resting heart rate 52 bpm, 4 bpm below your usual: a sign of good recovery' (calm: no numbers)."""
-    if x is None:
-        return None
-    noun, unit, _, up, down = BODY[key]
-    val, gap, more, less = UNITS[unit]
-    if ref is None:
-        return None if calm else f"{noun} {val(x)}"
-    g = _gap(key, x, ref)
-    if not g:
-        return f"{noun} about the same as {what}" if calm else f"{noun} {val(x)}, about the same as {what}"
-    meaning = up if g > 0 else down
-    s = f"{noun} {more if g > 0 else less} than {what}" if calm \
-        else f"{noun} {val(x)}, {gap(x - ref, ref)} {'above' if g > 0 else 'below'} {what}"
-    return s + (f": {meaning}" if meaning else "")
-
-
 def _dev(key: str, rows: list[dict], day: date) -> tuple[float, float, float] | None:
     """(reading - usual, the "about the same" band, usual) for one day, or None without both."""
     x, u = GET[key](_on(rows, day)), _usual(rows, day, GET[key])
@@ -164,7 +147,7 @@ def _findings(d: date, rows: list[dict], calm: bool) -> list[tuple[float, str, s
                 s = f"{TIMES[key]} {w if calm else f'about {_duration(abs(dx))} {w}'} than usual{streak}"
             else:
                 noun, unit, _, hi, lo = BODY[key]
-                gap, more, less = UNITS[unit][1:]
+                gap, more, less = UNITS[unit]
                 s = f"{noun} {'' if calm else gap(dx, u) + ' '}{more if up else less} than your usual" \
                     + (" yesterday" if card == "yesterday" else "") + streak
                 s += f": {m}" if (m := hi if up else lo) else ""
@@ -348,29 +331,24 @@ def _week(d: date, rows: list[dict], week: dict, prev: dict, calm: bool) -> dict
         v = [x for r in rs if (x := GET[k](r)) is not None]
         return mean(v) if len(v) >= 3 else None
 
-    a, b = week["sleep_avg_min"], prev["sleep_avg_min"]
-    sa, sb = week["steps_total"], prev["steps_total"]
-    ws = [w for r in this for w in r["c"].get("workouts") or []]
-    nights = []
-    for word, n in (("Best", week["best_night"]), ("Worst", week["worst_night"])):
-        if n and week["best_night"] != week["worst_night"]:
-            t = date.fromisoformat(n["date"])
-            nights.append(f"{word} night {t:%A}" + ("" if calm else f" {t.day} {t:%B}"))
-    lvl = scoring.resilience([r["inputs"].get("stress_load") for r in rows], [r["readiness_score"] for r in rows])
-    return _card("week", None, [
-        a is not None and (b and "Slept " + _than(a, b, "the week before", "more", "less") if calm
-                           else f"Slept {_duration(a)} a night on average" + (
-                               f", {_duration(abs(a - b))} {'more' if a > b else 'less'} than the week before"
-                               if b and abs(a - b) >= 15 else "")),
-        _spread_fact(_spread(rows, d), calm),
-        _cmp("rhr", avg(this, "rhr"), avg(before, "rhr"), calm, "the week before"),
-        _cmp("hrv", avg(this, "hrv"), avg(before, "hrv"), calm, "the week before"),
-        sa is not None and (sb and "Walked " + _than(sa, sb, "the week before", "more", "less") if calm
-                            else f"{round(sa):,} steps in total" + (f", {round(sb):,} the week before" if sb else "")),
-        ws and ("Worked out this week" if calm else
-                f"{len(ws)} workout{'s' if len(ws) > 1 else ''}, {_duration(sum(w['minutes'] for w in ws))} in all"),
-        *nights,
-        lvl and f"Stress resilience over the last two weeks: {lvl}"])
+    # only the differences from the week before: totals, workouts and best nights are on the Trends page
+    a, b, sa, sb, spread = week["sleep_avg_min"], prev["sleep_avg_min"], week["steps_total"], prev["steps_total"], _spread(rows, d)
+    full = prev["scored_days"] >= 3  # a week the ring was mostly off is no reference
+    facts = [full and a is not None and b and abs(a - b) >= 15
+             and f"Slept {'' if calm else _duration(abs(a - b)) + ' '}{'more' if a > b else 'less'} a night than the week before"]
+    for k in ("rhr", "hrv"):
+        x, ref = avg(this, k), avg(before, k)
+        if g := _gap(k, x, ref):
+            noun, unit, _, hi, lo = BODY[k]
+            gap, more, less = UNITS[unit]
+            facts.append(f"{noun} {'' if calm else gap(x - ref, ref) + ' '}{more if g > 0 else less} than the week before: "
+                         + (hi if g > 0 else lo))
+    facts += [full and sa is not None and sb and abs(sa - sb) > SAME * sb
+              and f"Walked {'' if calm else f'{round(100 * abs(sa - sb) / sb)} % '}{'more' if sa > sb else 'less'} than the week before",
+              spread is not None and spread > SPREAD_MAX_MIN and _spread_fact(spread, calm)]
+    facts = [f for f in facts if f][:3]
+    line = "Nothing stood out this week"
+    return _card("week", None, facts) if facts else _card("week", None, [line], (), line + ".")
 
 
 def _next_week(d: date, rows: list[dict], week: dict, ctx: dict) -> dict | None:
@@ -457,23 +435,16 @@ def update(now: float, since: float, day: dict, given: list[str], ctx: dict) -> 
     hour, bed = datetime.fromtimestamp(now, tz).hour, ctx["bed"]
     to_bed = None if bed is None else (bed - now) / 60
     evening = to_bed is not None and to_bed <= WIND_DOWN_MIN
-    steps, goal, stressed, hr, usual = day["steps_since"], ctx["step_goal"], day["stressed_min"], day["hr_since"], day["hr_usual"]
-    facts = [
+    goal, stressed, hr, usual = ctx["step_goal"], day["stressed_min"], day["hr_since"], day["hr_usual"]
+    dhr = 0 if hr is None or usual is None or abs(hr - usual) < 5 else hr - usual
+    # only what no page shows: events since the last note, and stretches that left the usual (as the difference)
+    news = [
         *[_workout(w, tz, calm) for w in ws], *[_noted(m, tz, calm) for m in ms],
-        len(coffee) >= 2 and ("Coffee more than once today" if calm else f"Coffee {len(coffee)} times today"),
-        ("You moved " if steps >= STILL_STEPS else "Little movement ") + at if calm
-        else f"Walked {round(steps):,} steps {at}" + ("" if steps >= STILL_STEPS else ": a still stretch"),
-        not calm and f"{round(day['steps_today']):,} steps today, your goal is {round(goal):,}",
+        now - since >= 3600 and day["steps_since"] < STILL_STEPS and f"Little movement {at}: a still stretch",
         stressed >= 30 and (f"Stressed for a while {at}" if calm else f"Stressed for {_duration(stressed)} {at}")
         + ": a demanding stretch",
-        hr is not None and usual is not None and (
-            f"Heart rate {at} about the same as your usual" if abs(hr - usual) < 5 else
-            f"Heart rate {at} {'higher' if hr > usual else 'lower'} than your usual" if calm else
-            f"Heart rate {round(hr)} bpm {at}, {round(abs(hr - usual))} bpm {'above' if hr > usual else 'below'} your usual")
-        + ("" if abs(hr - usual) < 5 else ": your body has been busier than usual" if hr > usual else ": a calm stretch"),
-        to_bed is not None and (("Bedtime is close" if evening else "Some hours left before bedtime") if calm else
-                                f"Your planned bedtime is {datetime.fromtimestamp(bed, tz):%H:%M}" + (
-                                    f", about {_duration(to_bed)} from now" if to_bed > 0 else ", already past"))]
+        dhr and f"Heart rate {'' if calm else f'{round(abs(dhr))} bpm '}{'higher' if dhr > 0 else 'lower'} than your usual {at}"
+        + (": your body has been busier than usual" if dhr > 0 else ": a calm stretch")]
     # (line, fresh): a fresh line rests on something since the last note, so it may return even if already given
     rules: list[tuple[str, bool]] = []
     if evening:
@@ -492,9 +463,10 @@ def update(now: float, since: float, day: dict, given: list[str], ctx: dict) -> 
                 and (to_bed is None or to_bed >= MOVE_ROOM_MIN):
             rules.append(("Fit in a brisk walk while there is time before bed", False))
     advice = [a for a, fresh in rules if fresh or a not in given]
-    c = _card("update", None, facts, advice)
-    new = ws or ms or steps >= STILL_STEPS or stressed >= 30
-    return {"at": int(now), "nothing_new": not (new or advice), "evening": evening,
+    # the coffee count is the reason for the coffee advice, not news on its own
+    c = _card("update", None, news + [len(coffee) >= 2 and ("Coffee more than once today" if calm
+                                                           else f"Coffee {len(coffee)} times today")], advice)
+    return {"at": int(now), "nothing_new": not (any(news) or advice), "evening": evening,
             **{k: c[k] for k in ("facts", "advice", "fallback")}}
 
 

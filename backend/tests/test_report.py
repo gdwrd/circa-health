@@ -127,7 +127,7 @@ def test_quiet_cards() -> None:
     assert cs["night"] == {"kind": "night", "verdict": None, "facts": ["A usual night for you"], "advice": [], "quiet": True,
                            "fallback": "A usual night for you."}
     assert cs["yesterday"]["quiet"] and cs["yesterday"]["fallback"] == "A usual day for you."
-    assert not cs["week"]["quiet"] and not cs["next_week"]["quiet"]
+    assert cs["week"]["quiet"] and not cs["next_week"]["quiet"]
     no_session = _rows()[:-1] + [_row(MON) | {"c": {"signals": CALM_SIG}}]
     assert "night" not in _cards(no_session)
     off = _row(MON - timedelta(1))
@@ -238,9 +238,27 @@ def test_yesterday_and_week_wording() -> None:
     assert y["verdict"] is None and y["advice"] == [] and not y["quiet"]
     assert y["facts"] == ["Walked 4,000 steps more than your usual yesterday: a more active day than usual",
                           "Cardio load 75 % higher than your usual yesterday: a heavier day than usual for your heart"]
+
+
+
+def test_week_differences_only() -> None:
     w = _cards()["week"]
-    assert "63,801 steps in total, 63,801 the week before" in w["facts"]
-    assert "averaged" not in _text(w) and "Best night Thursday 12 November" in w["facts"] and w["advice"] == []
+    assert w == {"kind": "week", "verdict": None, "facts": ["Nothing stood out this week"], "advice": [], "quiet": True,
+                 "fallback": "Nothing stood out this week."}
+    one = _cards(week=_week(asleep=400.0))["week"]
+    assert not one["quiet"] and one["facts"] == ["Slept 50 min less a night than the week before"]
+    assert _cards(week=_week(asleep=440.0))["week"]["quiet"]  # under 15 min: not a difference
+    hr = [_row(MON - timedelta(i), rhr=60.0 if i <= 7 else 55.0) for i in range(13, 0, -1)] + [_row(MON)]
+    steps = _week() | {"steps_total": 50000.0}
+    many = _cards(hr, week=steps | {"sleep_avg_min": 400.0})["week"]
+    assert many["facts"] == ["Slept 50 min less a night than the week before",
+                             "Resting heart rate 5 bpm higher than the week before: can mean your body is still recovering",
+                             "Walked 22 % less than the week before"]
+    assert not re.search(r"63,801|50,000|7 h|60|workout|Best|resilience", _text(many)), _text(many)
+    calm = _cards(hr, week=steps, calm=True)["week"]
+    assert calm["facts"] == ["Resting heart rate higher than the week before: can mean your body is still recovering",
+                             "Walked less than the week before"]
+    assert not re.search(r"\d", _text(calm)) and not re.search(r"\d", _text(_cards(calm=True)["week"]))
 
 
 def test_next_week_focus() -> None:
@@ -308,10 +326,20 @@ COFFEE = [{"kind": "coffee", "ts": _ts(MON, 8, 0)}, {"kind": "coffee", "ts": _ts
 
 
 def test_update_nothing_new() -> None:
-    u = _upd(13)
-    assert u["nothing_new"] and not u["evening"] and u["advice"] == [] and u["at"] == _ts(MON, 13, 0)
-    assert "Walked 0 steps since 12:00: a still stretch" in u["facts"]
-    assert not _upd(13, steps_since=900.0)["nothing_new"]
+    u = _upd(13, steps_since=900.0, hr_since=76.0, hr_usual=74.0)  # an ordinary stretch: nothing a page lacks
+    assert u["nothing_new"] and not u["evening"] and u["advice"] == [] and u["facts"] == [] and u["at"] == _ts(MON, 13, 0)
+    still = _upd(13)
+    assert not still["nothing_new"] and still["facts"] == ["Little movement since 12:00: a still stretch"]
+    assert _upd(13, since_h=13)["nothing_new"]  # no time passed: not a still stretch
+    two = _upd(11, moments=COFFEE, steps_since=900.0)  # the count alone, no advice: nothing new
+    assert two["nothing_new"] and two["facts"] == ["Coffee 2 times today"]
+
+
+def test_update_drops_what_pages_show() -> None:
+    u = _upd(21, steps_since=900.0, steps_today=7000.0, hr_since=76.0, hr_usual=74.0)
+    assert u["facts"] == [] and not re.search(r"steps|goal|bedtime|22:45|7,000|900|76|74", " ".join(u["facts"]))
+    assert u["advice"] and not u["nothing_new"]
+    assert u["fallback"] == "Start winding down: dim the lights and put screens away."  # advice alone: still a sentence
 
 
 def test_update_effort_goes_easy() -> None:
@@ -331,7 +359,8 @@ def test_update_coffee() -> None:
 
 def test_update_stress_and_move() -> None:
     s = _upd(13, stressed_min=90.0)
-    assert "Stressed for 1 h 30 min since 12:00: a demanding stretch" in s["facts"]
+    assert s["facts"] == ["Little movement since 12:00: a still stretch",
+                          "Stressed for 1 h 30 min since 12:00: a demanding stretch"]
     assert s["advice"] == ["Take a short walk or do the breathing exercise"]
     assert _upd(15, steps_today=2000.0)["advice"] == ["Fit in a brisk walk while there is time before bed"]
     assert _upd(13, steps_today=2000.0)["advice"] == []  # not afternoon yet
@@ -342,7 +371,7 @@ def test_update_evening_wind_down_only() -> None:
     u = _upd(21, moments=COFFEE, stressed_min=90.0, steps_today=2000.0)
     assert u["evening"] and not u["nothing_new"]
     assert u["advice"] == ["Start winding down: dim the lights and put screens away", "Be in bed by 22:45"]
-    assert "Your planned bedtime is 22:45, about 1 h 45 min from now" in u["facts"]
+    assert not any("bedtime" in f for f in u["facts"])
     assert not _upd(21, bed=None)["evening"]
 
 
@@ -356,10 +385,15 @@ def test_update_no_repeat() -> None:
 
 
 def test_update_heart_rate_and_calm() -> None:
-    u = _upd(15, hr_since=82.0, hr_usual=74.0)
-    assert "Heart rate 82 bpm since 12:00, 8 bpm above your usual: your body has been busier than usual" in u["facts"]
+    u = _upd(15, steps_since=900.0, hr_since=82.0, hr_usual=74.0)
+    assert u["facts"] == ["Heart rate 8 bpm higher than your usual since 12:00: your body has been busier than usual"]
+    assert _upd(15, steps_since=900.0, hr_since=66.0, hr_usual=74.0)["facts"] == ["Heart rate 8 bpm lower than your usual since 12:00: a calm stretch"]
+    assert not re.search(r"(82|74)", _text(u))
     c = _upd(21, calm=True, moments=COFFEE, workouts=[WALK], stressed_min=90.0, hr_since=82.0, hr_usual=74.0)
     assert c["advice"] and not re.search(r"\d", " ".join(c["facts"] + c["advice"]) + c["fallback"])
+    assert "Heart rate higher than your usual since the last note: your body has been busier than usual" in c["facts"]
+    q = _upd(13, calm=True, steps_today=500.0)
+    assert q["facts"] == ["Little movement since the last note: a still stretch"] and not re.search(r"\d", _text(q))
 
 
 def test_timeline() -> None:
