@@ -25,7 +25,10 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import java.io.File
 import java.security.MessageDigest
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 // AI5: Gemma on the phone turns each /report card into a note; reports.json keeps them for the Reports page.
@@ -157,7 +160,9 @@ private suspend fun writeLocked(ctx: Context, force: Boolean): String? {
                 samplerConfig = SamplerConfig(topK = 40, topP = 0.9, temperature = 0.4))
             val note = engine.createConversation(cfg).use { checkedNote(it.sendMessage(reportPrompt(verdict, facts, advice, fallback)).toString(), facts, advice) }
             if (note == null) fallbacks++
-            reports["$date/$kind"] = JsonObject(mapOf("hash" to JsonPrimitive(reportHash(name, verdict, facts, advice)), "text" to JsonPrimitive(note ?: fallback)))
+            // at and advice (DT3): an update's `since` and `given` start from the morning card.
+            reports["$date/$kind"] = JsonObject(mapOf("hash" to JsonPrimitive(reportHash(name, verdict, facts, advice)), "text" to JsonPrimitive(note ?: fallback),
+                "at" to JsonPrimitive(System.currentTimeMillis() / 1000), "advice" to JsonArray(advice.map { JsonPrimitive(it) })))
             save() // after every card
         }
     }
@@ -165,5 +170,91 @@ private suspend fun writeLocked(ctx: Context, force: Boolean): String? {
         todo.size, date, (SystemClock.elapsedRealtime() - t0) / 1000.0, fallbacks)
 }
 
+/** DT3: [date]'s update entries (`date/update-<epoch s>`), oldest first. */
+internal fun updates(reports: Map<String, JsonElement>, date: String): List<JsonObject> =
+    reports.filterKeys { it.startsWith("$date/update-") }.values.map { it.jsonObject }.sortedBy { it.long("at") }
+
+/** The last note's time: the latest update, else when the `today` card was written, else [date]'s start. */
+internal fun updateSince(reports: Map<String, JsonElement>, date: String): Long =
+    updates(reports, date).lastOrNull()?.long("at") ?: (reports["$date/today"] as? JsonObject)?.long("at")
+        ?: LocalDate.parse(date).atStartOfDay(ZoneId.systemDefault()).toEpochSecond()
+
+/** Advice lines already given on [date], exactly as the backend sent them: the `today` card's, then every update's. */
+internal fun givenAdvice(reports: Map<String, JsonElement>, date: String): List<String> =
+    ((reports["$date/today"] as? JsonObject)?.strings("advice").orEmpty() + updates(reports, date).flatMap { it.strings("advice") }).distinct()
+
+internal fun updateEntry(at: Long, text: String, advice: List<String>, evening: Boolean) = JsonObject(mapOf(
+    "at" to JsonPrimitive(at), "text" to JsonPrimitive(text), "advice" to JsonArray(advice.map { JsonPrimitive(it) }), "evening" to JsonPrimitive(evening)))
+
+/** System instruction for an update note; [since] and [now] are `HH:mm`. */
+internal fun updateSystem(name: String, since: String, now: String, evening: Boolean) = buildString {
+    val who = name.trim().ifEmpty { "the user" }
+    append("You write a short update to $who about their day so far, based on what their ring and phone measured. Write to them as \"you\".\n")
+    append("It is $now. Say what changed since $since and what to do now")
+    append(if (evening) ", to wind down for the night.\n" else ".\n")
+    append("Length: 2 to 4 sentences in one paragraph. No lists, no headings, no markdown.\n")
+    append("The earlier notes of today are given for context only: do not repeat them or their advice.\n")
+    append("Use plain short sentences, no 'indicating' or 'suggesting'. Keep words like 'can', 'may' and 'likely' as they are.\n")
+    append("Rules: use only the facts and advice given. When you use a number or a time, copy it exactly as written, in digits. ")
+    append("Never mention a score. No medical advice, no illness names, nothing about medication. Do not invent advice. Give every advice line. ")
+    append("If no advice is given, end with an observation, not a suggestion.")
+}
+
+/** User message for an update: today's earlier notes and advice as context, then what is new. */
+internal fun updatePrompt(earlier: List<String>, given: List<String>, facts: List<String>, advice: List<String>) = buildString {
+    if (earlier.isNotEmpty()) {
+        append("Earlier notes today (context, do not repeat):\n")
+        earlier.forEach { append("- $it\n") }
+    }
+    if (given.isNotEmpty()) {
+        append("Advice already given today (do not repeat):\n")
+        given.forEach { append("- $it\n") }
+    }
+    append("New since the last note:\n")
+    facts.forEach { append("- $it\n") }
+    if (advice.isNotEmpty()) {
+        append("Advice to give now, in your own words:\n")
+        advice.forEach { append("- $it\n") }
+    }
+}
+
+private val hhmm = DateTimeFormatter.ofPattern("HH:mm")
+private fun clock(s: Long) = hhmm.format(Instant.ofEpochSecond(s).atZone(ZoneId.systemDefault()))
+
+/**
+ * DT3 ("Update me", and the automatic [evening] entry): `/report/update` from the last note, then one note stored as
+ * `"date/update-<at>": {at, text, advice, evening}` in `reports.json` (text is the fallback when a check failed).
+ * Returns the backend's reply (`nothing_new` true: nothing is written), or null when the writer is off, the model is
+ * missing or the backend did not answer. Blocks for seconds.
+ */
+internal suspend fun writeUpdate(ctx: Context, evening: Boolean = false): JsonObject? = writing.withLock {
+    if (!ctx.reportWriter) return@withLock null
+    val model = reportModel(ctx)
+    if (!model.exists()) return@withLock null
+    val date = LocalDate.now().toString()
+    val file = File(ctx.filesDir, "reports.json")
+    val reports = keepDays(runCatching { Json.parseToJsonElement(file.readText()).jsonObject }.getOrDefault(JsonObject(emptyMap())), LocalDate.parse(date)).toMutableMap()
+    val since = updateSince(reports, date)
+    val given = givenAdvice(reports, date)
+    val reply = Api.reportUpdate(ctx, since, given) ?: return@withLock null
+    if ((reply["nothing_new"] as? JsonPrimitive)?.content == "true") return@withLock reply
+    val at = reply.long("at") ?: return@withLock null
+    val facts = reply.strings("facts")
+    val advice = reply.strings("advice")
+    val times = listOf(clock(since), clock(at))
+    val earlier = listOfNotNull((reports["$date/today"] as? JsonObject)?.str("text")) + updates(reports, date).map { it.str("text") }
+    val cfg = ConversationConfig(systemInstruction = Contents.of(updateSystem(ctx.reportName, times[0], times[1], (reply["evening"] as? JsonPrimitive)?.content == "true")),
+        samplerConfig = SamplerConfig(topK = 40, topP = 0.9, temperature = 0.4))
+    val note = Engine(EngineConfig(modelPath = model.path, backend = Backend.CPU())).use { engine ->
+        engine.initialize()
+        // The two times are in the instruction, so they may appear in the note.
+        engine.createConversation(cfg).use { checkedNote(it.sendMessage(updatePrompt(earlier, given, facts, advice)).toString(), facts + times, advice) }
+    }
+    reports["$date/update-$at"] = updateEntry(at, note ?: reply.str("fallback"), advice, evening)
+    File(ctx.filesDir, "reports.json.tmp").apply { writeText(JsonObject(reports).toString()) }.renameTo(file)
+    reply
+}
+
+private fun JsonObject.long(key: String) = (this[key] as? JsonPrimitive)?.content?.toDoubleOrNull()?.toLong()
 private fun JsonObject.str(key: String) = (this[key] as? JsonPrimitive)?.content.orEmpty()
 private fun JsonObject.strings(key: String) = (this[key] as? JsonArray)?.map { (it as JsonPrimitive).content }.orEmpty()

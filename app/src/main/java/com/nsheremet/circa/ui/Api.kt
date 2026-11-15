@@ -85,6 +85,12 @@ object Api {
     suspend fun settings(ctx: Context) = get(ctx, "/settings") as? JsonObject
     suspend fun notifications(ctx: Context) = get(ctx, "/notifications/pending")
     suspend fun report(ctx: Context, date: LocalDate) = get(ctx, "/report?date=$date")
+    /** `{date, events: [{t (epoch s), kind, label}]}` in time order. */
+    suspend fun timeline(ctx: Context, date: LocalDate) = get(ctx, "/timeline?date=$date") as? JsonObject
+
+    /** POST /report/update ([since] epoch s, [given] advice lines already given today) → `{at, nothing_new, evening, facts, advice, fallback}`, or null on failure. */
+    suspend fun reportUpdate(ctx: Context, since: Long, given: List<String>) =
+        call(ctx, "/report/update", "POST", JsonObject(mapOf("since" to JsonPrimitive(since), "given" to JsonArray(given.map { JsonPrimitive(it) }))).toString()) as? JsonObject
 
     /** GET /export.csv: the last 90 days as CSV text on 2xx, else null. Never cached: a share must be current. */
     suspend fun exportCsv(ctx: Context): String? = withContext(Dispatchers.IO) {
