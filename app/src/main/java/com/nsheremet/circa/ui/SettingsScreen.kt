@@ -954,15 +954,20 @@ internal fun ButtonRow(title: String, enabled: Boolean = true, onClick: () -> Un
 
 // ── Live heart rate (moved from MainActivity; behaviour unchanged) ──────────
 
-/** Streams live HR for up to [durationMs]; [stopWhenStable] ends early once readings settle and pushes the last bpm. */
+/**
+ * Streams live HR for up to [durationMs]; [stopWhenStable] ends early once readings settle and pushes the last bpm.
+ * [onLight] set: the light copy is on (`A1 0A` after each `69 01`) and gets each `A1 0C` packet's unsaturated pulse readings.
+ */
 @SuppressLint("MissingPermission")
 internal suspend fun runLiveHr(
     ctx: Context, address: String, onBpm: (Int) -> Unit = {}, durationMs: Long = 30_000, stopWhenStable: Boolean = true,
+    onLight: ((List<Int>) -> Unit)? = null,
     onProgress: (String) -> Unit,
 ): String {
     val conn = ColmiConnection(ctx, address)
     var measurementStarted = false
     var packets = 0; var valid = 0; var restarts = 0
+    var lastLight = 0L // last light packet since the last start request; 0 = none
     SyncWorker.liveHrActive = true // a background sync would take the ring mid-stream
     return try {
         val connected = conn.connect()
@@ -971,6 +976,8 @@ internal suspend fun runLiveHr(
         onProgress("Measuring (keep ring still)…")
         conn.writePacket(ColmiProtocol.liveHrStartRequest())
         measurementStarted = true
+        // after 69 01: a measurement start clears the light copy
+        if (onLight != null) conn.writePacket(ColmiProtocol.lightOnRequest())
 
         // Read for ~30s, accepting whatever bpm > 0 we see; the ring usually
         // streams a few invalid (bpm=0) packets first while it acquires.
@@ -981,12 +988,16 @@ internal suspend fun runLiveHr(
         loop@ while (currentCoroutineContext().isActive && System.currentTimeMillis() < deadline) {
             // Long mode: the ring may stop streaming on its own. It needs ~25 s to lock on after a start
             // (seen on the real ring), so ask again only after 30 s without a valid reading.
-            if (!stopWhenStable && System.currentTimeMillis() - lastLock >= 30_000) {
+            // With light: the ring ended its measurement when samples stop for 1 s; restart at once (one restart per silence).
+            val lightSilent = lastLight > 0 && System.currentTimeMillis() - lastLight >= 1_000
+            if (!stopWhenStable && (lightSilent || System.currentTimeMillis() - lastLock >= 30_000)) {
                 conn.writePacket(ColmiProtocol.liveHrStartRequest())
-                lastLock = System.currentTimeMillis(); restarts++
+                if (onLight != null) conn.writePacket(ColmiProtocol.lightOnRequest()) // the copy turns off at each measurement end
+                lastLock = System.currentTimeMillis(); restarts++; lastLight = 0
             }
             val left = deadline - System.currentTimeMillis()
-            val pkt = withTimeoutOrNull(if (stopWhenStable) left else minOf(left, 5_000)) {
+            // short wait with light so 1 s of silence is seen within about 1.2 s
+            val pkt = withTimeoutOrNull(if (stopWhenStable) left else minOf(left, if (onLight != null) 200 else 5_000)) {
                 conn.notifyV1.receive()
             }
             if (pkt == null) {
@@ -994,6 +1005,12 @@ internal suspend fun runLiveHr(
                 continue
             }
             packets++
+            val light = if (onLight != null) ColmiProtocol.parseLightPacket(pkt) else null
+            if (onLight != null && light != null) {
+                lastLight = System.currentTimeMillis()
+                onLight(light.filter { ColmiProtocol.lightTag(it) == 1 && ColmiProtocol.lightReading(it) < 0x1FFF00 }.map(ColmiProtocol::lightReading))
+                continue
+            }
             val parsed = ColmiProtocol.parseLiveHrPacket(pkt) ?: continue
             when (parsed.error) {
                 1 -> { notWorn = true; break@loop }
@@ -1025,6 +1042,9 @@ internal suspend fun runLiveHr(
                 // NonCancellable: Breathe ends the stream by cancelling, and a cancelled coroutine cannot suspend.
                 withContext(NonCancellable) { withTimeoutOrNull(2_000) { conn.writePacket(ColmiProtocol.liveHrStopRequest()) } }
             }.onFailure { Log.w("Settings", "Live HR stop failed", it) }
+            if (onLight != null) runCatching {
+                withContext(NonCancellable) { withTimeoutOrNull(2_000) { conn.writePacket(ColmiProtocol.lightOffRequest()) } }
+            }.onFailure { Log.w("Settings", "Light copy off failed", it) }
         }
         conn.disconnect()
         SyncWorker.liveHrActive = false

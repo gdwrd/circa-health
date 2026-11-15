@@ -437,7 +437,7 @@ object ColmiProtocol {
 
     /**
      * `A1 0C nn <nn bytes>`: optical samples as the sensor's queue gave them, 3 bytes each, 1 to 4 a packet.
-     * Each value is the 3 bytes little-endian, uninterpreted (what the bits mean is the open question of FW7a).
+     * Each value is the 3 bytes little-endian: [lightTag] in bits 21..22, [lightReading] in bits 0..20 (FW7a).
      */
     fun parseLightPacket(value: ByteArray): List<Int>? {
         if (value.size < 16 || value[0] != CMD_RAW_STREAM || value[1] != 0x0C.toByte()) return null
@@ -445,6 +445,12 @@ object ColmiProtocol {
         if (n !in 1..4) return null
         return List(n) { i -> (0..2).sumOf { (value[3 + 3 * i + it].toInt() and 0xff) shl (8 * it) } }
     }
+
+    /** Channel of a light value (bits 21..22); 1 is the pulse channel, 25.1 readings a second. */
+    fun lightTag(v: Int): Int = (v shr 21) and 3
+
+    /** Reading of a light value (bits 0..20); 0x1FFF00 and above is saturated. */
+    fun lightReading(v: Int): Int = v and 0x1FFFFF
 
     // A1 0F: wear state (patched firmware circaA, emu/patch_fw.py FW15b); older firmware answers A1 FF.
     fun wearRequest(): ByteArray = buildPacket(byteArrayOf(CMD_RAW_STREAM, 0x0F))
