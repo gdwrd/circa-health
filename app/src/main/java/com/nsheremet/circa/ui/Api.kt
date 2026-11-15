@@ -84,6 +84,7 @@ object Api {
     suspend fun marks(ctx: Context) = get(ctx, "/marks")
     suspend fun settings(ctx: Context) = get(ctx, "/settings") as? JsonObject
     suspend fun notifications(ctx: Context) = get(ctx, "/notifications/pending")
+    suspend fun report(ctx: Context, date: LocalDate) = get(ctx, "/report?date=$date")
 
     /** GET /export.csv: the last 90 days as CSV text on 2xx, else null. Never cached: a share must be current. */
     suspend fun exportCsv(ctx: Context): String? = withContext(Dispatchers.IO) {

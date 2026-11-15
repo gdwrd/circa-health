@@ -286,6 +286,9 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 log("Server: pushed $sent samples to $vmUrl (${pusher.lastResult})")
                 runCatching { postPending() }.onSuccess { n -> if (n > 0) log("Server: showed $n notifications") }
             }
+            // Every sync, not only after a push: the hash skips unchanged cards, and a model that just arrived gets its first run.
+            runCatching { writeReports(applicationContext) }.onSuccess { it?.let(log) }
+                .onFailure { if (it is CancellationException) throw it; log("Reports: ${it.javaClass.simpleName}: ${it.message}") }
 
             // Widget snapshot (a failed push returned above); plain VM answers /today 404 (null), so the widget keeps "Open to sync".
             runCatching {
