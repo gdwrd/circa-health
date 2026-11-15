@@ -2,6 +2,13 @@ package com.nsheremet.circa.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.Spring
@@ -246,6 +253,7 @@ private fun MeasureNow() {
     val scope = rememberCoroutineScope()
     var job by remember { mutableStateOf<Job?>(null) }
     var bpm by remember { mutableStateOf<Int?>(null) }
+    var light by remember { mutableStateOf<List<Int>>(emptyList()) } // grows all measurement: PulseWave slides on growth
     var status by remember { mutableStateOf("Tap to read your heart rate from the ring.") }
     val sweep = remember { Animatable(0f) }
     val measuring = job?.isActive == true
@@ -270,9 +278,10 @@ private fun MeasureNow() {
         bpm = null
         job = scope.launch {
             launch { sweep.snapTo(0f); sweep.animateTo(1f, tween(30_000, easing = LinearEasing)) }
-            val result = runLiveHr(ctx.applicationContext, address!!, onBpm = { bpm = it }) { p ->
+            val result = runLiveHr(ctx.applicationContext, address!!, onBpm = { bpm = it }, onLight = { light = light + it }) { p ->
                 status = if (p.startsWith("♥")) "Measuring… keep your hand still" else p
             }
+            light = emptyList()
             status = if (result.startsWith("♥")) "Just now" else result
             sweep.animateTo(if (result.startsWith("♥")) 1f else 0f, tween(300))
             job = null
@@ -284,12 +293,7 @@ private fun MeasureNow() {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(AppSpace.m),
     ) {
-        ScoreRing(sweep.value, c.heart, Modifier.size(160.dp).graphicsLayer { scaleX = pulse.value; scaleY = pulse.value }, stroke = 12.dp) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                bpm?.let { CountUp(it, AppType.largeTitle) } ?: Text("—", style = AppType.largeTitle, color = c.secondaryLabel)
-                Text("bpm", style = AppType.footnote, color = c.secondaryLabel)
-            }
-        }
+        MeasureRing(sweep.value, pulse.value, bpm, light)
         Text(status, style = AppType.subhead, color = c.secondaryLabel, textAlign = TextAlign.Center)
         Box(
             Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(AppShape.small)
@@ -299,6 +303,29 @@ private fun MeasureNow() {
         ) {
             Text(if (measuring) "Measuring…" else if (bpm != null) "Measure again" else "Measure now",
                 style = AppType.headline, color = if (measuring) c.secondaryLabel else c.heart)
+        }
+    }
+}
+
+/** The measurement's ring-shaped progress and, while light readings arrive, the pulse wave under it. */
+@Composable
+internal fun MeasureRing(sweep: Float, pulse: Float, bpm: Int?, light: List<Int>) {
+    val c = AppTheme.colors
+    val reduce = LocalReduceMotion.current
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        ScoreRing(sweep, c.heart, Modifier.size(160.dp).graphicsLayer { scaleX = pulse; scaleY = pulse }, stroke = 12.dp) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                bpm?.let { CountUp(it, AppType.largeTitle) } ?: Text("—", style = AppType.largeTitle, color = c.secondaryLabel)
+                Text("bpm", style = AppType.footnote, color = c.secondaryLabel)
+            }
+        }
+        // the gap sits inside so it grows and shrinks with the strip
+        AnimatedVisibility(
+            light.isNotEmpty(),
+            enter = if (reduce) EnterTransition.None else fadeIn() + expandVertically(),
+            exit = if (reduce) ExitTransition.None else fadeOut() + shrinkVertically(),
+        ) {
+            PulseWave(light, Modifier.padding(top = AppSpace.m).fillMaxWidth().height(56.dp))
         }
     }
 }
