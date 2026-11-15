@@ -83,6 +83,15 @@ class ReportUpdateTest {
     @Test fun givenWithoutAdviceField() = assertEquals(emptyList<String>(), givenAdvice(mapOf("$d/today" to JsonObject(mapOf("text" to JsonPrimitive("x")))), d))
     @Test fun keptWithTheDay() = assertEquals(4, keepDays(reports, LocalDate.parse(d)).size)
 
+    @Test fun dayAdviceFromCardsAndUpdates() {
+        val tonight = JsonObject(mapOf("text" to JsonPrimitive("x"), "advice" to JsonArray(listOf(JsonPrimitive("Be in bed by 22:45"), JsonPrimitive("Go easy today")))))
+        val all = reports + ("$d/tonight" to tonight) + ("$d/night" to JsonObject(mapOf("text" to JsonPrimitive("y"))))
+        assertEquals(setOf("Go easy today", "Take a walk", "No more coffee today", "Be in bed by 22:45"), dayAdvice(all, d).toSet())
+        assertEquals(4, dayAdvice(all, d).size)
+        assertEquals(listOf("Old"), dayAdvice(all, "2026-11-15"))
+        assertEquals(emptyList<String>(), dayAdvice(all, "2026-11-14"))
+    }
+
     @Test fun promptCarriesEarlierNotes() {
         val p = updatePrompt(listOf("Morning note.", "First update."), listOf("Go easy today"), listOf("A walk at 13:20 for 40 min"), listOf("Keep the rest of the day easy"))
         assertTrue(p, p.contains("Earlier notes today (context, do not repeat):\n- Morning note.\n- First update.\n"))
@@ -130,6 +139,22 @@ class ReportDaysTest {
         val after = first.associate { "2026-11-15/${(it["kind"] as JsonPrimitive).content}" to JsonPrimitive(1) }
         assertEquals(listOf("body"), kinds(toWrite(after, "2026-11-15", cards("night", "week", "body"), false)))
         assertEquals(emptyList<String>(), kinds(toWrite(after + ("2026-11-15/body" to JsonPrimitive(1)), "2026-11-15", cards("night", "week", "body"), false)))
+    }
+
+    @Test fun quietCards() {
+        val c = { q: JsonPrimitive? -> JsonObject(listOfNotNull("kind" to JsonPrimitive("night"), q?.let { "quiet" to it }).toMap()) }
+        assertTrue(isQuiet(c(JsonPrimitive(true))))
+        assertFalse(isQuiet(c(JsonPrimitive(false))))
+        assertFalse(isQuiet(c(null)))
+    }
+
+    @Test fun systemFitsFewFindings() {
+        val s = reportSystem("Ann", "today")
+        assertTrue(s, s.contains("and open with their name.\n"))
+        assertTrue(s, s.contains("Length: 2 to 4 sentences"))
+        assertTrue(s, s.contains("Add nothing that is not in the facts"))
+        assertFalse(s, s.contains("Connect them"))
+        assertTrue(reportSystem("", "night").contains("Length: 2 to 4 sentences"))
     }
 
     @Test fun dropsOnlyThatDay() {

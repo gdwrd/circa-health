@@ -34,13 +34,13 @@ import java.util.Locale
 // AI5: Gemma on the phone turns each /report card into a note; reports.json keeps them for the Reports page.
 
 private val kindFocus = mapOf(
-    "today" to "how their body recovered overnight and how today is likely to feel",
-    "yesterday" to "how yesterday went for their body",
-    "night" to "how the night went and what shaped it",
+    "today" to "what stands out this morning",
+    "yesterday" to "what stood out about yesterday",
+    "night" to "what was unusual about the night",
     "tonight" to "what to do this evening and why",
-    "week" to "how the week went for their body and what stands out",
+    "week" to "what stood out this week",
     "next_week" to "the one thing to focus on next week and why",
-    "body" to "what their body's signals show, said calmly",
+    "body" to "the signal that stands out, said calmly",
 )
 
 /** System instruction: role, length and rules for one card. */
@@ -49,8 +49,9 @@ internal fun reportSystem(name: String, kind: String) = buildString {
     append("You write a short personal note to $who about how their body is doing, based on what their ring measured. ")
     append("Write to them as \"you\"")
     append(if (kind == "today" && name.isNotBlank()) " and open with their name.\n" else ".\n")
-    append("Length: ${if (kind == "today") "5 to 7" else "3 to 5"} sentences in one paragraph. No lists, no headings, no markdown.\n")
-    append("Do not list the facts one by one. Connect them into an explanation of how the body is doing and why, then what that means, then the advice.\n")
+    append("Length: 2 to 4 sentences in one paragraph. No lists, no headings, no markdown.\n")
+    append("Say each fact once, in plain words, with its reason when the fact gives one. Add nothing that is not in the facts ")
+    append("and do not describe readings that are not given. Then give the advice.\n")
     append("Focus: ${kindFocus[kind] ?: "how their body is doing"}.\n")
     append("Use plain short sentences, no 'indicating' or 'suggesting'. Keep words like 'can', 'may' and 'likely' as they are.\n")
     append("Rules: use only the facts and advice given. When you use a number or a time, copy it exactly as written, in digits. ")
@@ -116,6 +117,9 @@ internal fun dropDay(reports: Map<String, JsonElement>, date: String) = reports.
 internal fun toWrite(reports: Map<String, JsonElement>, date: String, cards: List<JsonObject>, force: Boolean): List<JsonObject> =
     if (!force && cards.none { it.str("kind") == "night" }) emptyList() else cards.filter { "$date/${it.str("kind")}" !in reports }
 
+/** FN2: a quiet card has nothing new; its fallback is the note and the model is not called. */
+internal fun isQuiet(card: JsonObject) = (card["quiet"] as? JsonPrimitive)?.content == "true"
+
 /** The first two sentences of [text]: a notification body. */
 internal fun firstSentences(text: String): String = text.trim().split(Regex("(?<=[.!?])\\s+")).take(2).joinToString(" ")
 
@@ -135,11 +139,12 @@ private suspend fun writeLocked(ctx: Context, force: Boolean): String? {
     runCatching { checkDownload(ctx, ctx.getSystemService(DownloadManager::class.java)) } // a download that ended while Settings was closed
     val model = reportModel(ctx)
     if (!model.exists()) return null
-    val reply = Api.report(ctx, LocalDate.now()) as? JsonObject ?: return null
-    val date = (reply["date"] as? JsonPrimitive)?.content ?: return null
     val file = File(ctx.filesDir, "reports.json")
-    val reports = keepDays(runCatching { Json.parseToJsonElement(file.readText()).jsonObject }.getOrDefault(JsonObject(emptyMap())), LocalDate.parse(date))
-        .let { if (force) dropDay(it, date) else it }.toMutableMap()
+    val stored = runCatching { Json.parseToJsonElement(file.readText()).jsonObject }.getOrDefault(JsonObject(emptyMap()))
+    val now = LocalDate.now()
+    val reply = Api.report(ctx, now, dayAdvice(stored, now.minusDays(1).toString())) as? JsonObject ?: return null
+    val date = (reply["date"] as? JsonPrimitive)?.content ?: return null
+    val reports = keepDays(stored, LocalDate.parse(date)).let { if (force) dropDay(it, date) else it }.toMutableMap()
     // Through a rename: a killed worker keeps what it wrote and the page never reads half a file.
     val save = { File(ctx.filesDir, "reports.json.tmp").apply { writeText(JsonObject(reports).toString()) }.renameTo(file) }
     if (force) save() // the page shows a placeholder for every card until its note lands
@@ -148,26 +153,30 @@ private suspend fun writeLocked(ctx: Context, force: Boolean): String? {
     if (todo.isEmpty()) return null
     val t0 = SystemClock.elapsedRealtime()
     var fallbacks = 0
-    Engine(EngineConfig(modelPath = model.path, backend = Backend.CPU())).use { engine ->
+    // at and advice (DT3): an update's `since` and `given` start from the morning card. [note] null: the fallback.
+    val store = { c: JsonObject, note: String? ->
+        val advice = c.strings("advice")
+        reports["$date/${c.str("kind")}"] = JsonObject(mapOf("hash" to JsonPrimitive(reportHash(name, (c["verdict"] as? JsonPrimitive)?.contentOrNull, c.strings("facts"), advice)),
+            "text" to JsonPrimitive(note ?: c.str("fallback")), "at" to JsonPrimitive(System.currentTimeMillis() / 1000), "advice" to JsonArray(advice.map { JsonPrimitive(it) })))
+        save() // after every card
+    }
+    val (quiet, loud) = todo.partition(::isQuiet)
+    quiet.forEach { store(it, null) }
+    if (loud.isNotEmpty()) Engine(EngineConfig(modelPath = model.path, backend = Backend.CPU())).use { engine ->
         engine.initialize()
-        for (c in todo) {
-            val kind = c.str("kind")
+        for (c in loud) {
             val verdict = (c["verdict"] as? JsonPrimitive)?.contentOrNull
             val facts = c.strings("facts")
             val advice = c.strings("advice")
-            val fallback = c.str("fallback")
-            val cfg = ConversationConfig(systemInstruction = Contents.of(reportSystem(name, kind)),
+            val cfg = ConversationConfig(systemInstruction = Contents.of(reportSystem(name, c.str("kind"))),
                 samplerConfig = SamplerConfig(topK = 40, topP = 0.9, temperature = 0.4))
-            val note = engine.createConversation(cfg).use { checkedNote(it.sendMessage(reportPrompt(verdict, facts, advice, fallback)).toString(), facts, advice) }
+            val note = engine.createConversation(cfg).use { checkedNote(it.sendMessage(reportPrompt(verdict, facts, advice, c.str("fallback"))).toString(), facts, advice) }
             if (note == null) fallbacks++
-            // at and advice (DT3): an update's `since` and `given` start from the morning card.
-            reports["$date/$kind"] = JsonObject(mapOf("hash" to JsonPrimitive(reportHash(name, verdict, facts, advice)), "text" to JsonPrimitive(note ?: fallback),
-                "at" to JsonPrimitive(System.currentTimeMillis() / 1000), "advice" to JsonArray(advice.map { JsonPrimitive(it) })))
-            save() // after every card
+            store(c, note)
         }
     }
-    return String.format(Locale.ROOT, "Reports: wrote %d cards for %s in %.1f s, %d fallbacks",
-        todo.size, date, (SystemClock.elapsedRealtime() - t0) / 1000.0, fallbacks)
+    return String.format(Locale.ROOT, "Reports: wrote %d cards for %s in %.1f s, %d fallbacks, %d quiet",
+        todo.size, date, (SystemClock.elapsedRealtime() - t0) / 1000.0, fallbacks, quiet.size)
 }
 
 /** DT3: [date]'s update entries (`date/update-<epoch s>`), oldest first. */
@@ -182,6 +191,10 @@ internal fun updateSince(reports: Map<String, JsonElement>, date: String): Long 
 /** Advice lines already given on [date], exactly as the backend sent them: the `today` card's, then every update's. */
 internal fun givenAdvice(reports: Map<String, JsonElement>, date: String): List<String> =
     ((reports["$date/today"] as? JsonObject)?.strings("advice").orEmpty() + updates(reports, date).flatMap { it.strings("advice") }).distinct()
+
+/** FN2: every advice line stored under [date] (all cards and updates), distinct: `/report`'s `given` for the next day. */
+internal fun dayAdvice(reports: Map<String, JsonElement>, date: String): List<String> =
+    reports.filterKeys { it.startsWith("$date/") }.values.flatMap { (it as? JsonObject)?.strings("advice").orEmpty() }.distinct()
 
 internal fun updateEntry(at: Long, text: String, advice: List<String>, evening: Boolean) = JsonObject(mapOf(
     "at" to JsonPrimitive(at), "text" to JsonPrimitive(text), "advice" to JsonArray(advice.map { JsonPrimitive(it) }), "evening" to JsonPrimitive(evening)))

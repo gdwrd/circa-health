@@ -16,6 +16,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
+import java.net.URLEncoder
 import java.security.MessageDigest
 import java.time.LocalDate
 import java.util.concurrent.TimeUnit
@@ -84,7 +85,9 @@ object Api {
     suspend fun marks(ctx: Context) = get(ctx, "/marks")
     suspend fun settings(ctx: Context) = get(ctx, "/settings") as? JsonObject
     suspend fun notifications(ctx: Context) = get(ctx, "/notifications/pending")
-    suspend fun report(ctx: Context, date: LocalDate) = get(ctx, "/report?date=$date")
+    /** [given]: the advice lines shown on the day before [date] (FN2), so a card can follow up on them. */
+    suspend fun report(ctx: Context, date: LocalDate, given: List<String> = emptyList()) =
+        get(ctx, "/report?date=$date" + given.joinToString("") { "&given=" + URLEncoder.encode(it, "UTF-8") })
     /** `{date, events: [{t (epoch s), kind, label}]}` in time order. */
     suspend fun timeline(ctx: Context, date: LocalDate) = get(ctx, "/timeline?date=$date") as? JsonObject
 
