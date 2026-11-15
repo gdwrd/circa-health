@@ -42,13 +42,14 @@ def _ctx(**kw: object) -> dict:
     return {"calm": False, "guess_pending": False, "need_min": 480.0, "window": {"status": "learning"},
             "plan": {"in_bed_by_min": 645, "wake_min": 1140, "extra_min": 0, "sleep_min": 480.0},
             "debt": {"debt_min": 0, "nights": 7, "suggest_min": 0}, "target": None, "cardio_base": 20.0,
-            "moments": [], "because": [], "explain": [], "closed": None, "tz": timezone.utc} | kw
+            "moments": [], "because": [], "explain": [], "closed": None, "tz": timezone.utc, "given": []} | kw
 
 
 def _cards(rows: list[dict] | None = None, d: date = MON, week: dict | None = None, **kw: object) -> dict[str, dict]:
     out = report.cards(d, rows or _rows(d), week or _week(), _week(), _ctx(**kw))
     for c in out:
         assert 1 <= len(c["facts"]) <= report.MAX_FACTS and len(c["advice"]) <= report.MAX_ADVICE and c["fallback"]
+        assert isinstance(c["quiet"], bool)
         assert "oura" not in (c["fallback"] + " ".join(c["facts"] + c["advice"])).lower()
     return {c["kind"]: c for c in out}
 
@@ -70,7 +71,7 @@ def test_today_verdicts() -> None:
     assert _cards(_rows(ready=75), debt=easy)["today"]["verdict"] == "easy"  # debt turns a middle day easy
     t = _cards(_rows(ready=93, asleep=504.0), debt=DEBT)["today"]  # the first real reply: top band, 5 h 15 min debt
     assert t["verdict"] == "steady"
-    assert any(f.startswith("Sleep debt 5 h 15 min") for f in t["facts"]) and "debt" in " ".join(t["advice"])
+    assert "debt" in " ".join(t["advice"])
     push = {"debt_min": report.PUSH_DEBT_MAX, "nights": 7, "suggest_min": 20}
     assert _cards(_rows(ready=90), debt=push)["today"]["verdict"] == "steady"
     rest = _cards(_rows(ready=90, sig=STRAIN_SIG))["today"]
@@ -78,22 +79,121 @@ def test_today_verdicts() -> None:
     assert _cards(_rows(ready=None)).get("today") is None  # no scored night: no today card
 
 
-def test_today_observations_and_advice() -> None:
-    t = _cards(_rows(ready=93, rhr=51.0, hrv=52.0, asleep=504.0), target=TARGET,
-               moments=[{"kind": "flat", "ts": _ts(MON - timedelta(1), 15, 10)}])["today"]
-    assert t["verdict"] == "push"
-    f = t["facts"]
-    assert "Overall recovery well above your usual" in f and "Likely more energy than usual today" in f
-    assert "Resting heart rate 51 bpm, 4 bpm below your usual: a sign of good recovery" in f
-    assert "HRV 52 ms, 16 % above your usual: a sign your body is well rested" in f
-    assert "Slept 8 h 24 min, 54 min above your usual: more time for your body to recover" in f
-    assert "You noted feeling flat at 15:10 yesterday" in f
-    assert "A walk at 17:10 for 35 min yesterday, average heart rate 104 bpm" in f
-    assert f.index("Deep sleep 1 h 20 min, about the same as your usual") > f.index("Slept 8 h 24 min, 54 min above your usual: more time for your body to recover")
-    assert t["advice"] == ["A good day for a harder workout: aim for a cardio load of 22 to 28"]
-    assert t["fallback"] == "A good day to push. " + f[0] + ". " + f[1] + ". " + t["advice"][0] + "."
-    late = _cards(_rows(bed_start=810.0))["today"]["facts"]
-    assert "You fell asleep at 01:30, about 2 h 30 min later than usual" in late
+def _busy(**today: float) -> list[dict]:
+    """Yesterday: 14,000 steps and double cardio load; today: the given inputs."""
+    return _rows()[:-2] + [_row(MON - timedelta(1), steps=14000.0, cardio_load=40.0), _row(MON, **today)]
+
+
+def test_unusual_findings_carry_the_difference_only() -> None:
+    cs = _cards(_busy(rhr=62.0, bed_start=760.0), target=TARGET)
+    t, n, y = cs["today"], cs["night"], cs["yesterday"]
+    assert not t["quiet"] and t["verdict"] == "steady"
+    assert t["advice"] == ["Train at your usual effort: aim for a cardio load of 22 to 28"]
+    # ranked by size in bands: steps 6000/400 = 15, fall-asleep 100/15 = 6.7, load 20/4 = 5, rhr 7/2.75 = 2.5
+    assert t["facts"] == ["Walked 6,000 steps more than your usual yesterday: a more active day than usual",
+                          "You fell asleep about 1 h 40 min later than usual"]
+    assert n["facts"] == ["Resting heart rate 7 bpm higher than your usual: can mean your body is still recovering"]
+    assert y["facts"] == ["Cardio load 100 % higher than your usual yesterday: a heavier day than usual for your heart"]
+    for c in (t, n, y):
+        assert not re.search(r"\b(62|14,000|01:40)\b", _text(c)), _text(c)  # the readings stay on the pages
+    assert t["fallback"] == "A steady day, keep to your usual. " + t["facts"][0] + ". " + t["facts"][1] + ". " \
+        + t["advice"][0] + "."
+
+
+def test_inside_twice_the_band_is_not_a_finding() -> None:
+    # rhr band = max(5 % of 55, 1.5) = 2.75 bpm: 5 bpm is outside the band but under 2 bands
+    cs = _cards(_rows(rhr=60.0, bed_start=685.0))  # fall asleep 25 min later: under 30
+    assert cs["today"]["quiet"] and cs["night"]["quiet"]
+    assert "Resting heart rate 6 bpm higher than your usual" in " ".join(_cards(_rows(rhr=61.0))["today"]["facts"])
+
+
+def test_streak_wording() -> None:
+    rows = _rows()[:-2] + [_row(MON - timedelta(1), rhr=59.0), _row(MON, rhr=62.0)]
+    assert "Resting heart rate 7 bpm higher than your usual, for the 2nd night in a row: can mean your body is still recovering" \
+        in _cards(rows)["today"]["facts"]
+    assert "Resting heart rate higher than your usual, for more than one night: can mean your body is still recovering" \
+        in _cards(rows, calm=True)["today"]["facts"]
+    lower = _rows()[:-2] + [_row(MON - timedelta(1), rhr=52.0), _row(MON, rhr=62.0)]  # the night before went the other way
+    assert "Resting heart rate 7 bpm higher than your usual: can mean your body is still recovering" in _cards(lower)["today"]["facts"]
+    assert [report._nth(n) for n in (2, 3, 11, 21)] == ["2nd", "3rd", "11th", "21st"]
+
+
+def test_quiet_cards() -> None:
+    cs = _cards(_rows(ready=93), target=TARGET)
+    t = cs["today"]
+    assert t["quiet"] and t["verdict"] == "push" and t["facts"] == ["Nothing unusual in your body's numbers today"]
+    assert t["fallback"] == "A good day to push. Nothing unusual in your body's numbers today. " \
+                            "A good day for a harder workout: aim for a cardio load of 22 to 28."
+    assert cs["night"] == {"kind": "night", "verdict": None, "facts": ["A usual night for you"], "advice": [], "quiet": True,
+                           "fallback": "A usual night for you."}
+    assert cs["yesterday"]["quiet"] and cs["yesterday"]["fallback"] == "A usual day for you."
+    assert not cs["week"]["quiet"] and not cs["next_week"]["quiet"]
+    no_session = _rows()[:-1] + [_row(MON) | {"c": {"signals": CALM_SIG}}]
+    assert "night" not in _cards(no_session)
+    off = _row(MON - timedelta(1))
+    off["c"]["wear"] = {"awake_hours": 16, "worn_hours": 5}
+    assert _cards(_rows()[:-2] + [off, _row(MON)])["yesterday"]["facts"] == [
+        "A usual day for you", "The ring was off for much of the day, so movement may be undercounted"]
+
+
+def test_max_findings_and_no_repeat() -> None:
+    rows = _rows()[:-2] + [_row(MON - timedelta(1), steps=14000.0, cardio_load=40.0, stress_load=3.0),
+                           _row(MON, rhr=62.0, hrv=30.0, asleep=330.0, awake=60.0, bed_start=760.0, bed_end=1300.0)]
+    cs = _cards(rows)
+    assert len(cs["today"]["facts"]) == len(cs["night"]["facts"]) == len(cs["yesterday"]["facts"]) == report.MAX_FINDINGS
+    shown = cs["today"]["facts"] + cs["night"]["facts"] + cs["yesterday"]["facts"]
+    assert len(shown) == len(set(shown))
+    # all of the night's (or yesterday's) findings went to today: the card stays, quiet, without claiming a usual night
+    only = _cards(_rows(rhr=62.0))
+    assert only["today"]["facts"][0].startswith("Resting heart rate 7 bpm higher than")
+    assert only["night"] == {"kind": "night", "verdict": None, "facts": ["Nothing else stood out last night"], "advice": [],
+                             "quiet": True, "fallback": "Nothing else stood out last night."}
+    day = _cards(_rows()[:-2] + [_row(MON - timedelta(1), steps=14000.0), _row(MON)])["yesterday"]
+    assert day["quiet"] and day["facts"] == ["Nothing else stood out yesterday"]
+    assert day["fallback"] == "Nothing else stood out yesterday."
+
+
+PLANNED = "Be in bed by 22:45 to be rested for 07:00"
+LATE_COFFEE_YDAY = [{"kind": "coffee", "ts": _ts(MON - timedelta(1), 16, 10)}]
+
+
+def test_follow_up_bedtime() -> None:
+    on_time = _cards(_rows(bed_start=650.0), given=[PLANNED])["today"]["facts"]  # 22:50: within 15 min
+    assert on_time == ["You were in bed by 22:45 as planned"]
+    late = _cards(_rows(bed_start=685.0, asleep=420.0), given=[PLANNED])["today"]["facts"]
+    assert late == ["You fell asleep about 40 min after the 22:45 you planned, and you slept 30 min shorter than your usual"]
+    calm = _cards(_rows(bed_start=685.0), given=[PLANNED], calm=True)["today"]["facts"]
+    assert calm == ["You fell asleep later than you planned"]
+    assert _cards(_rows(bed_start=None), given=[PLANNED])["today"]["quiet"]  # no data: no follow-up
+
+
+def test_follow_up_coffee_alcohol_meal() -> None:
+    kept = _cards(given=["Skip coffee after 14:00: after late coffee you fall asleep about 40 min later"],
+                  moments=[{"kind": "coffee", "ts": _ts(MON - timedelta(1), 9, 0)}])["today"]["facts"]
+    assert kept == ["No coffee after 14:00 yesterday, as planned"]
+    broke = _cards(_rows(bed_start=720.0), given=["No more coffee today: it can push your sleep later"],
+                   moments=LATE_COFFEE_YDAY)
+    assert broke["today"]["facts"] == [
+        "Coffee at 16:10 yesterday, after the cut-off, and you fell asleep about 1 h later than usual"]
+    assert broke["night"]["facts"] == ["Nothing else stood out last night"]  # the fall-asleep shift is told once
+    calm = _cards(given=["Skip coffee in the afternoon"], moments=LATE_COFFEE_YDAY, calm=True)["today"]["facts"]
+    assert calm == ["Coffee in the afternoon yesterday, after the cut-off"]
+    assert _cards(given=["Skip alcohol tonight"])["today"]["facts"] == ["No alcohol yesterday, as planned"]
+    drink = [{"kind": "alcohol", "ts": _ts(MON - timedelta(1), 20, 30)}]
+    assert _cards(given=["Skip alcohol tonight"], moments=drink)["today"]["facts"] == [
+        "Alcohol at 20:30 yesterday, against the plan"]
+    meal = [{"kind": "meal", "ts": _ts(MON - timedelta(1), 21, 40)}]
+    assert _cards(given=["Finish eating before 21:00: x"], moments=meal)["today"]["facts"] == [
+        "A meal at 21:40 yesterday, after the cut-off"]
+    assert _cards(given=["Eat earlier in the evening"], calm=True)["today"]["facts"] == ["No late meal yesterday, as planned"]
+    assert _cards(given=["Rest today.", "Go to bed at your planned time", "something else"])["today"]["quiet"]
+
+
+def test_follow_up_light_day() -> None:
+    light = "Keep exercise light, a walk rather than a hard workout"
+    assert _cards(given=[light])["today"]["facts"] == ["You kept yesterday light, as planned"]
+    heavy = _cards(_busy(), given=["Keep the rest of the day easy after a walk"])["today"]["facts"]
+    assert heavy[0] == "Yesterday was a heavier day than planned"
 
 
 def test_no_score_numbers() -> None:
@@ -111,9 +211,11 @@ def test_no_score_numbers() -> None:
 
 def test_tonight_advice_grounded() -> None:
     assert _cards()["tonight"]["verdict"] == "usual"
+    assert _cards(window={"status": "learning"}, plan=None, debt=None).get("tonight") is None
     plan = {"in_bed_by_min": 615, "wake_min": 1140, "extra_min": 30, "sleep_min": 510.0}
     t = _cards(plan=plan, debt={"debt_min": 95, "nights": 7, "suggest_min": 30})["tonight"]
-    assert t["verdict"] == "earlier" and "Sleep debt 1 h 35 min over the last 7 nights: can leave you more tired than usual" in t["facts"]
+    assert t["verdict"] == "earlier" and t["quiet"] and t["facts"] == ["Go to bed a little earlier tonight"]
+    assert t["fallback"] == "Go to bed a little earlier tonight. Be in bed by 22:15 to pay back some sleep debt."
     assert t["advice"][0] == f"Be in bed by {report._clock(plan['in_bed_by_min'])} to pay back some sleep debt" \
         and "22:15" in t["advice"][0]
     today = _cards(_rows(ready=93), plan=plan, debt=DEBT)["today"]
@@ -131,13 +233,11 @@ def test_because_advice_only_with_effect() -> None:
 
 
 def test_yesterday_and_week_wording() -> None:
-    y = _cards(_rows()[:-2] + [_row(MON - timedelta(1), steps=12000.0, cardio_load=35.0), _row(MON)],
+    y = _cards(_rows()[:-2] + [_row(MON - timedelta(1), steps=12000.0, cardio_load=35.0), _row(MON)], guess_pending=True,
                moments=[{"kind": "flat", "ts": _ts(MON - timedelta(1), 15, 10)}])["yesterday"]
-    assert y["verdict"] is None and y["advice"] == []
-    assert "Walked 12,000 steps, 4,000 steps above your usual: a more active day than usual" in y["facts"]
-    assert "Yesterday was a heavier day than usual for your heart" in y["facts"]
-    assert "A walk at 17:10 for 35 min, average heart rate 104 bpm" in y["facts"]
-    assert "You noted feeling flat at 15:10" in y["facts"]
+    assert y["verdict"] is None and y["advice"] == [] and not y["quiet"]
+    assert y["facts"] == ["Walked 4,000 steps more than your usual yesterday: a more active day than usual",
+                          "Cardio load 75 % higher than your usual yesterday: a heavier day than usual for your heart"]
     w = _cards()["week"]
     assert "63,801 steps in total, 63,801 the week before" in w["facts"]
     assert "averaged" not in _text(w) and "Best night Thursday 12 November" in w["facts"] and w["advice"] == []
@@ -163,9 +263,10 @@ def test_calm_mode_has_no_digits() -> None:
         cs = _cards(_rows(ready=58, asleep=340.0, sig=sig, rhr=60.0, spo2=88.0, wind_down=700.0), calm=True, because=because,
                     plan=plan, closed=ep, moments=[{"kind": "coffee", "ts": _ts(MON - timedelta(1), 16, 20)}],
                     explain=["alcohol"], target=TARGET, debt=DEBT,
+                    given=[PLANNED, "Skip coffee after 14:00", "Keep exercise light"],
                     window={"status": "ok", "start_min": 630, "end_min": 690})
         assert set(cs) == {"today", "yesterday", "night", "tonight", "week", "next_week", "body"}
-        assert cs["today"]["advice"] and cs["tonight"]["advice"]
+        assert cs["today"]["advice"] and cs["tonight"]["advice"] and not cs["today"]["quiet"]
         for c in cs.values():
             assert not re.search(r"\d", _text(c)), (c["kind"], _text(c))
 
@@ -302,6 +403,9 @@ def test_report_endpoint() -> None:
         assert c.get("/report").status_code == 401
         assert c.get("/report?date=bad", headers=H).status_code == 422
         j = c.get(f"/report?date={d.isoformat()}", headers=H).json()
+        assert c.get("/report", params={"given": ["x" * 301]}, headers=H).status_code == 422
+        g = c.get("/report", params={"date": d.isoformat(), "given": ["Skip alcohol tonight", "Rest today."]}, headers=H).json()
     kinds = [x["kind"] for x in j["cards"]]
     assert j["date"] == d.isoformat() and kinds[:2] == ["today", "yesterday"] and "body" not in kinds
-    assert all(set(x) == {"kind", "verdict", "facts", "advice", "fallback"} for x in j["cards"])
+    assert all(set(x) == {"kind", "verdict", "facts", "advice", "fallback", "quiet"} for x in j["cards"])
+    assert j["cards"][0]["quiet"] and g["cards"][0]["facts"] == ["No alcohol yesterday, as planned"]

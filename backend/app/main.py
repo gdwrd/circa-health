@@ -647,8 +647,11 @@ def week(end: str | None = None) -> dict:
 
 
 @api.get("/report")
-def get_report(day: str | None = Query(None, alias="date")) -> dict:
-    """Report cards for the on-phone writer: report.py decides, this only gathers what /today and /week already use."""
+def get_report(day: str | None = Query(None, alias="date"), given: list[str] = Query([])) -> dict:
+    """Report cards for the on-phone writer: report.py decides, this only gathers what /today and /week already use.
+    given = the advice lines the phone showed the day before, as this backend sent them (followed up today)."""
+    if len(given) > 50 or any(len(g) > 300 for g in given):
+        raise HTTPException(422, "bad given")
     d, cfg = _day(day), db.settings()
     rows = db.days(d - timedelta(13), d)
     ready = next((r["readiness_score"] for r in rows if r["date"] == d), None)
@@ -657,7 +660,7 @@ def get_report(day: str | None = Query(None, alias="date")) -> dict:
            "need_min": db.setting("sleep_need_min"), "plan": notify.tonight(d), "window": notify.bedtime_window(d),
            "debt": debt(d), "target": cardio.target(ready, m) if cfg["birth_year"] else None, "cardio_base": m,
            "moments": _moments(d - timedelta(1)), "because": notify.because(d - timedelta(1), d),
-           "explain": notify.explain(d), "tz": samples.tz(),
+           "explain": notify.explain(d), "tz": samples.tz(), "given": given,
            "closed": next((e for i in range(3) if (e := insights.closed_today(eps, d - timedelta(i)))), None)}
     return {"date": d.isoformat(), "cards": report.cards(d, rows, _week(d - timedelta(1)), _week(d - timedelta(8)), ctx)}
 

@@ -1,12 +1,13 @@
 """Report cards for the on-phone writer (PLAN12 AI1): verdicts, observations with their meaning attached and the allowed
 advice, all decided here, never by the model. No score number ever appears: the app already shows the scores.
 Pure: rows and helper results in (main.get_report gathers them), card dicts out."""
+import re
 from collections.abc import Callable, Iterable
 from datetime import date, datetime, timedelta, tzinfo
 from statistics import mean, pstdev
 
 from . import scoring
-from .notify import GUESS, LOGGED, NOUNS, WORDS, _duration, _join, _nights
+from .notify import GUESS, LOGGED, NOUNS, _duration, _join, _nights
 
 PUSH_DEBT_MAX = 60  # push needs readiness 85+ (scoring.band 2) and under 1 h of sleep debt
 EASY_DEBT_MIN = 180  # 3 h of debt makes a day easy, unless readiness is in the top band (then steady)
@@ -16,6 +17,7 @@ MOVE_RATIO = 0.7  # next week = move when the week's cardio load is under this s
 LOAD_SAME = 0.2  # cardio load within 20 % of its usual is an ordinary day
 SAME = 0.05  # within 5 % counts as "about the same"
 MAX_FACTS = 12
+COFFEE_CUTOFF_H = 14  # scoring.derived's caffeine_late hour
 MAX_ADVICE = 3
 
 LEAD = {"push": "A good day to push.", "steady": "A steady day, keep to your usual.", "easy": "Take it easy today.",
@@ -39,6 +41,8 @@ BODY: dict[str, tuple[str, str, float, str | None, str | None]] = {
     "spo2": ("Lowest blood oxygen", "%", 1.0, None, None),
     "steps": ("Walked", "steps", 0.0, "a more active day than usual", "a quieter day than usual"),
     "stress": ("Time stressed", "min", 30.0, "a more demanding day than usual", "a calmer day than usual"),
+    "cardio_load": ("Cardio load", "load", 0.0, "a heavier day than usual for your heart",
+                    "a lighter day than usual for your heart"),
 }
 # unit: (value, gap from the reference, calm word when higher, when lower)
 UNITS: dict[str, tuple[Callable[[float], str], Callable[[float, float], str], str, str]] = {
@@ -47,9 +51,11 @@ UNITS: dict[str, tuple[Callable[[float], str], Callable[[float, float], str], st
     "min": (_duration, lambda d, u: _duration(abs(d)), "longer", "shorter"),
     "%": (lambda v: f"{round(v)} %", lambda d, u: f"{round(abs(d))} %", "higher", "lower"),
     "steps": (lambda v: f"{round(v):,} steps", lambda d, u: f"{round(abs(d)):,} steps", "more", "less"),
+    "load": (lambda v: f"{round(v)}", lambda d, u: f"{round(abs(100 * d / u))} %", "higher", "lower"),
 }
 GET: dict[str, Callable[[dict], float | None]] = {
-    **{k: (lambda r, k=k: r["inputs"].get(k)) for k in ("rhr", "hrv", "sleep_min", "awake", "spo2", "steps")},
+    **{k: (lambda r, k=k: r["inputs"].get(k)) for k in ("rhr", "hrv", "sleep_min", "awake", "spo2", "steps",
+                                                         "bed_start", "bed_end", "cardio_load")},
     "deep_min": lambda r: (r["c"].get("session") or {}).get("deep_min"),
     "rem_min": lambda r: (r["c"].get("session") or {}).get("rem_min"),
     "stress": lambda r: None if r["inputs"].get("stress_load") is None else 60 * r["inputs"]["stress_load"]}
@@ -57,6 +63,21 @@ GET: dict[str, Callable[[dict], float | None]] = {
 AVOID = {"caffeine_late": ("Skip coffee after 14:00", "Skip coffee in the afternoon"),
          "alcohol": ("Skip alcohol tonight", "Skip alcohol tonight"),
          "late_meal": ("Finish eating before 21:00", "Eat earlier in the evening")}
+UNUSUAL = 2.0  # a finding needs a gap of at least this many "about the same" bands
+MAX_FINDINGS = 2
+CLOCK_SAME = 15  # clock times within 15 min count as "about the same"
+LATE_MEAL_H = 21  # scoring.derived's late_meal hour
+TIMES = {"bed_start": "You fell asleep", "bed_end": "You woke"}
+NIGHT_KEYS = ("rhr", "hrv", "sleep_min", "deep_min", "rem_min", "awake", "spo2", "bed_start", "bed_end")
+DAY_KEYS = ("steps", "stress", "cardio_load")
+# advice line prefix (as _bed, AVOID, update() and _train write them) -> what to follow up on the next day
+FOLLOW = {"Be in bed by ": "bed", "Skip coffee": "coffee", "No more coffee today": "coffee", "Skip alcohol": "alcohol",
+          "Finish eating before": "meal", "Eat earlier in the evening": "meal", "Keep exercise light": "load",
+          "Keep the rest of the day easy": "load"}
+# moment kind: (from this hour, none taken, calm none taken, taken)
+LATE = {"coffee": (COFFEE_CUTOFF_H, f"coffee after {COFFEE_CUTOFF_H}:00", "coffee in the afternoon", "after the cut-off"),
+        "alcohol": (0, "alcohol", "alcohol", "against the plan"),
+        "meal": (LATE_MEAL_H, f"meal after {LATE_MEAL_H}:00", "late meal", "after the cut-off")}
 NEXT = {"regular": "Go to bed within the same hour each night", "move": "Add a brisk walk or a workout on most days",
         "keep": "Keep your current routine"}
 
@@ -112,57 +133,84 @@ def _cmp(key: str, x: float | None, ref: float | None, calm: bool, what: str = "
     return s + (f": {meaning}" if meaning else "")
 
 
-def _vs(key: str, row: dict, rows: list[dict], d: date, calm: bool) -> str | None:
-    return _cmp(key, GET[key](row), _usual(rows, d, GET[key]), calm)
-
-
-def _timing(noun: str, x: float | None, ref: float | None, calm: bool) -> str | None:
-    """Clock times in minutes after noon: 'You fell asleep at 01:21, about 1 h 30 min later than usual'."""
-    if x is None:
+def _dev(key: str, rows: list[dict], day: date) -> tuple[float, float, float] | None:
+    """(reading - usual, the "about the same" band, usual) for one day, or None without both."""
+    x, u = GET[key](_on(rows, day)), _usual(rows, day, GET[key])
+    if x is None or u is None:
         return None
-    if ref is None:
-        return None if calm else f"{noun} at {_clock(x)}"
-    d = x - ref
-    if abs(d) < 15:
-        return f"{noun} at about the same time as usual" if calm else f"{noun} at {_clock(x)}, about the same time as usual"
-    w = "later" if d > 0 else "earlier"
-    return f"{noun} {w} than usual" if calm else f"{noun} at {_clock(x)}, about {_duration(abs(d))} {w} than usual"
+    band = CLOCK_SAME if key in TIMES else LOAD_SAME * abs(u) if key == "cardio_load" else max(SAME * abs(u), BODY[key][2])
+    return (x - u, band, u) if band > 0 else None
 
 
-def _level(noun: str, x: float | None, ref: float | None) -> str | None:
-    """A score's level in words only: 'Overall recovery well above your usual'."""
-    if x is None or ref is None:
-        return None
-    d = x - ref
-    if abs(d) < 3:
-        return f"{noun} about the same as your usual"
-    return f"{noun} {'well ' if abs(d) >= 10 else ''}{'above' if d > 0 else 'below'} your usual"
+def _nth(n: int) -> str:
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
 
 
-def _low_hr(row: dict, rows: list[dict], d: date, ctx: dict) -> str | None:
-    """recovery = share of the night before HR nears its low; readiness scores an early low as better."""
-    x, u = row["inputs"].get("recovery"), _usual(rows, d, lambda r: r["inputs"].get("recovery"))
-    if x is None or u is None or abs(x - u) <= scoring.FLOORS["recovery"]:
-        return None
-    t = (row["c"].get("sleep_extra") or {}).get("hr_low_t")
-    at = "" if ctx["calm"] or t is None else " " + _at(t, ctx["tz"], False)
-    if x > u:
-        return f"Heart rate reached its overnight low{at}, later in the night than usual: often means your body took longer to settle"
-    return f"Heart rate reached its overnight low{at}, earlier in the night than usual: a sign your body settled quickly"
+def _findings(d: date, rows: list[dict], calm: bool) -> list[tuple[float, str, str]]:
+    """(size, card, text), largest first: only gaps of UNUSUAL bands or more, as the difference, never the reading."""
+    out = []
+    for card, day, keys in (("night", d, NIGHT_KEYS), ("yesterday", d - timedelta(1), DAY_KEYS)):
+        for key in keys:
+            g = _dev(key, rows, day)
+            if not g or abs(g[0]) < UNUSUAL * g[1] or key == "spo2" and g[0] > 0:
+                continue
+            dx, u, up, n = g[0], g[2], g[0] > 0, 1
+            while (p := _dev(key, rows, day - timedelta(n))) and p[0] * dx > 0 and abs(p[0]) > p[1]:
+                n += 1
+            per = "night" if card == "night" else "day"
+            streak = "" if n < 2 else f", for more than one {per}" if calm else f", for the {_nth(n)} {per} in a row"
+            if key in TIMES:
+                w = "later" if up else "earlier"
+                s = f"{TIMES[key]} {w if calm else f'about {_duration(abs(dx))} {w}'} than usual{streak}"
+            else:
+                noun, unit, _, hi, lo = BODY[key]
+                gap, more, less = UNITS[unit][1:]
+                s = f"{noun} {'' if calm else gap(dx, u) + ' '}{more if up else less} than your usual" \
+                    + (" yesterday" if card == "yesterday" else "") + streak
+                s += f": {m}" if (m := hi if up else lo) else ""
+            out.append((abs(dx) / g[1], card, s))
+    return sorted(out, key=lambda f: -f[0])
 
 
-def _load(row: dict, rows: list[dict], d: date) -> str | None:
-    x, u = row["inputs"].get("cardio_load"), _usual(rows, d, lambda r: r["inputs"].get("cardio_load"))
-    if x is None or not u or abs(x - u) <= LOAD_SAME * u:
-        return None
-    return f"Yesterday was a {'heavier' if x > u else 'lighter'} day than usual for your heart"
+def _after(rows: list[dict], d: date, calm: bool) -> str:
+    """', and you fell asleep about 40 min later than usual' when last night's fall-asleep time left the usual."""
+    g = _dev("bed_start", rows, d)
+    if not g or abs(g[0]) <= g[1]:
+        return ""
+    w = "later" if g[0] > 0 else "earlier"
+    return f", and you fell asleep {w if calm else f'about {_duration(abs(g[0]))} {w}'} than usual"
 
 
-def _debt(m: float, calm: bool) -> str | None:
-    if m < 30:
-        return None
-    s = "Some sleep debt from the last week" if calm else f"Sleep debt {_duration(m)} over the last 7 nights"
-    return s + (": can leave you more tired than usual" if m >= PUSH_DEBT_MAX else "")
+def _follow(d: date, rows: list[dict], ctx: dict) -> list[str]:
+    """Did yesterday's advice (ctx["given"], lines as this module wrote them) happen, and what came after."""
+    calm, tz, out, seen = ctx["calm"], ctx["tz"], [], set()
+    for line in ctx["given"]:
+        kind = next((k for p, k in FOLLOW.items() if line.startswith(p)), None)
+        if not kind or kind in seen:
+            continue
+        if kind == "bed":
+            x, hhmm = _on(rows, d)["inputs"].get("bed_start"), line[13:18]
+            if x is None or not re.fullmatch(r"\d\d:\d\d", hhmm):
+                continue
+            late = x - (int(hhmm[:2]) * 60 + int(hhmm[3:]) - 720) % 1440
+            s = ("You were in bed in time, as planned" if calm else f"You were in bed by {hhmm} as planned") \
+                if late <= CLOCK_SAME else "You fell asleep later than you planned" if calm \
+                else f"You fell asleep about {_duration(late)} after the {hhmm} you planned"
+            if (g := _dev("sleep_min", rows, d)) and _gap("sleep_min", g[0] + g[2], g[2]):
+                w = "longer" if g[0] > 0 else "shorter"
+                s += f", and you slept {w if calm else f'{_duration(abs(g[0]))} {w}'} than your usual"
+        elif kind == "load":
+            if not (g := _dev("cardio_load", rows, d - timedelta(1))):
+                continue
+            s = "Yesterday was a heavier day than planned" if g[0] > g[1] else "You kept yesterday light, as planned"
+        else:
+            h, none, calm_none, broke = LATE[kind]
+            late = [m["ts"] for m in ctx["moments"] if m["kind"] == kind and datetime.fromtimestamp(m["ts"], tz).hour >= h]
+            s = (f"{NOTED[kind].capitalize()} {_at(late[-1], tz, calm)} yesterday, {broke}" if late
+                 else f"No {calm_none if calm else none} yesterday, as planned") + _after(rows, d, calm)
+        seen.add(kind)
+        out.append(s)
+    return out
 
 
 def _workout(w: dict, tz: tzinfo, calm: bool, when: str = "") -> str:
@@ -175,14 +223,6 @@ def _workout(w: dict, tz: tzinfo, calm: bool, when: str = "") -> str:
 
 def _noted(m: dict, tz: tzinfo, calm: bool, when: str = "") -> str:
     return f"You noted {NOTED[m['kind']]} {_at(m['ts'], tz, calm)}{when}"
-
-
-def _signals(sig: dict, calm: bool) -> str | None:
-    if sig.get("level") in (None, "calm"):
-        return None
-    streak = sig.get("streak", 0)
-    return "Body signals above calm" + ("" if streak < 2 else " for more than one night" if calm
-                                        else f" for {streak} nights") + (": your body may be under strain" if streak >= 2 else "")
 
 
 def _effect(e: dict, calm: bool) -> str:
@@ -217,13 +257,15 @@ def _bed(p: dict | None, debt: float, calm: bool) -> str | None:
     return p and "Go to bed in time for a full night's sleep"
 
 
-def _card(kind: str, verdict: str | None, facts: Iterable[str | None | bool], advice: Iterable[str | None] = ()) -> dict:
+def _card(kind: str, verdict: str | None, facts: Iterable[str | None | bool], advice: Iterable[str | None] = (),
+          fallback: str | None = None) -> dict:
+    """fallback given = a quiet card: the app shows it as is, without the model."""
     # what matches the usual goes last: the model should lead with what changed
     facts = sorted(dict.fromkeys(f for f in facts if f), key=lambda f: "about the same" in f)[:MAX_FACTS]
     advice = [a for a in advice if a][:MAX_ADVICE]
     lead = [LEAD[verdict]] if verdict else []
-    return {"kind": kind, "verdict": verdict, "facts": facts, "advice": advice,
-            "fallback": " ".join(lead + [s + "." for s in facts[:3 - len(lead)] + advice[:1]])}
+    return {"kind": kind, "verdict": verdict, "facts": facts, "advice": advice, "quiet": fallback is not None,
+            "fallback": fallback or " ".join(lead + [s + "." for s in facts[:3 - len(lead)] + advice[:1]])}
 
 
 def _strained(sig: dict) -> bool:
@@ -231,97 +273,56 @@ def _strained(sig: dict) -> bool:
     return sig.get("level") not in (None, "calm") and sig.get("streak", 0) >= 2
 
 
-def _today(d: date, row: dict, rows: list[dict], ctx: dict) -> dict | None:
-    ready, calm, tz = row.get("readiness_score"), ctx["calm"], ctx["tz"]
+def _today(d: date, row: dict, rows: list[dict], ctx: dict, found: list[str]) -> dict | None:
+    ready, calm = row.get("readiness_score"), ctx["calm"]
     if ready is None or ctx["guess_pending"]:
         return None
     sig, debt = row["c"].get("signals") or {}, (ctx["debt"] or {}).get("debt_min", 0)
     band = scoring.band(ready)
     verdict = "rest" if _strained(sig) else "easy" if band == 0 or (debt >= EASY_DEBT_MIN and band < 2) \
         else "push" if band == 2 and debt < PUSH_DEBT_MAX else "steady"
-    i, y = row["inputs"], _on(rows, d - timedelta(1))
-    g = {k: _gap(k, GET[k](row), _usual(rows, d, GET[k])) for k in ("rhr", "hrv", "sleep_min")}
-    good, bad = g["rhr"] < 0 or g["hrv"] > 0, g["rhr"] > 0 or g["hrv"] < 0
-    likely = {"push": good and not bad and "Likely more energy than usual today",
-              "steady": band == 2 and "Likely fine for a normal day, though the sleep debt may catch up with you later",
-              "easy": (bad or g["sleep_min"] < 0 or debt >= EASY_DEBT_MIN) and "Likely to tire sooner than usual",
-              "rest": "Likely to feel below your best today"}[verdict]
-    c = {k: v for k, v in (row["c"].get("readiness") or {}).items() if v is not None}
-    low = min(c, key=lambda k: c[k], default=None)
-    return _card("today", verdict, [
-        _signals(sig, calm),
-        _level("Overall recovery", ready, _usual(rows, d, lambda r: r["readiness_score"])),
-        likely,
-        _vs("rhr", row, rows, d, calm), _vs("hrv", row, rows, d, calm), _vs("sleep_min", row, rows, d, calm),
-        _timing("You fell asleep", i.get("bed_start"), _usual(rows, d, lambda r: r["inputs"].get("bed_start")), calm),
-        _vs("deep_min", row, rows, d, calm), _vs("rem_min", row, rows, d, calm), _vs("awake", row, rows, d, calm),
-        _low_hr(row, rows, d, ctx),
-        _gap("spo2", i.get("spo2"), _usual(rows, d, GET["spo2"])) < 0 and _vs("spo2", row, rows, d, calm),
-        _debt(debt, calm),
-        _load(y, rows, d - timedelta(1)),
-        _gap("stress", GET["stress"](y), _usual(rows, d - timedelta(1), GET["stress"]))
-        and "Yesterday's t" + _vs("stress", y, rows, d - timedelta(1), calm)[1:],
-        *[_workout(w, tz, calm, " yesterday") for w in y["c"].get("workouts") or []],
-        *[_noted(m, tz, calm, " yesterday") for m in ctx["moments"] if m["kind"] in NOTED],
-        low and f"The weakest part of your recovery: {WORDS.get(low, low)}",
-        (row["c"].get("confidence") or {}).get("readiness") == "low"
-        and "The ring had little data last night, so read this loosely"],
-        [_train(verdict, ctx["target"], calm), debt >= 30 and _bed(ctx["plan"], debt, calm), *_avoid(ctx["because"], calm)])
+    advice = [a for a in (_train(verdict, ctx["target"], calm), debt >= 30 and _bed(ctx["plan"], debt, calm),
+                          *_avoid(ctx["because"], calm)) if a]
+    low = (row["c"].get("confidence") or {}).get("readiness") == "low" \
+        and "The ring had little data last night, so read this loosely"
+    fol = _follow(d, rows, ctx)
+    told = any("fell asleep" in f for f in fol)  # the follow-up already gave the fall-asleep shift
+    facts = (fol + [t for t in found if not (told and t.startswith(TIMES["bed_start"]))])[:MAX_FINDINGS]
+    if facts:
+        return _card("today", verdict, facts + [low], advice)
+    none = "Nothing unusual in your body's numbers today"
+    return _card("today", verdict, [none, low], advice, " ".join([LEAD[verdict], none + "."] + [a + "." for a in advice[:1]]))
 
 
-def _yesterday(d: date, rows: list[dict], ctx: dict) -> dict | None:
-    y, calm, tz = d - timedelta(1), ctx["calm"], ctx["tz"]
-    row = _on(rows, y)
-    i, z, w = row["inputs"], row["c"].get("stress"), row["c"].get("wear") or {}
-    up, down = (z["engaged"] + z["stressed"], z["restored"] + z["relaxed"]) if z else (0, 0)
-    return _card("yesterday", None, [
-        _level("Overall activity", row.get("activity_score"), _usual(rows, y, lambda r: r["activity_score"])),
-        _vs("steps", row, rows, y, calm), _load(row, rows, y),
-        *[_workout(x, tz, calm) for x in row["c"].get("workouts") or []],
-        _vs("stress", row, rows, y, calm),
-        up + down and ("Stress stayed raised for most of the day" if up > down else "Mostly relaxed or restored through the day"),
-        *[_noted(m, tz, calm) for m in ctx["moments"] if m["kind"] in NOTED],
-        (i.get("nap_min") or 0) >= 20 and ("You took a nap" if calm else f"Napped {_duration(i['nap_min'])}"),
-        (i.get("breath_min") or 0) >= 1 and ("You did a breathing exercise" if calm
-                                            else f"Breathing exercises for {_duration(i['breath_min'])}"),
-        w.get("awake_hours") and w["worn_hours"] < w["awake_hours"] / 2
-        and "The ring was off for much of the day, so movement may be undercounted"])
+def _quiet(kind: str, facts: list[str] | None, extra: str | None | bool, line: str) -> dict:
+    """The card's own findings, or its one fixed line when there are none."""
+    return _card(kind, None, facts[:MAX_FINDINGS] + [extra]) if facts else _card(kind, None, [line, extra], (), line + ".")
 
 
-def _night(d: date, row: dict, rows: list[dict], ctx: dict) -> dict | None:
-    s, i, calm = row["c"].get("session"), row["inputs"], ctx["calm"]
-    if not s or i.get("sleep_min") is None:
+def _yesterday(d: date, rows: list[dict], facts: list[str] | None) -> dict:
+    """facts None: all of yesterday's findings went to today (a different quiet line: not a usual day)."""
+    w = _on(rows, d - timedelta(1))["c"].get("wear") or {}
+    off = w.get("awake_hours") and w["worn_hours"] < w["awake_hours"] / 2 \
+        and "The ring was off for much of the day, so movement may be undercounted"
+    return _quiet("yesterday", facts, off, "Nothing else stood out yesterday" if facts is None else "A usual day for you")
+
+
+def _night(row: dict, facts: list[str] | None) -> dict | None:
+    """Always present with a session: the app waits for it. facts None as in _yesterday."""
+    if not row["c"].get("session") or row["inputs"].get("sleep_min") is None:
         return None
-    pm = round(s.get("phone_min") or 0)
-    return _card("night", None, [
-        _vs("sleep_min", row, rows, d, calm),
-        _level("Overall sleep quality", row.get("sleep_score"), _usual(rows, d, lambda r: r["sleep_score"])),
-        _timing("You fell asleep", i.get("bed_start"), _usual(rows, d, lambda r: r["inputs"].get("bed_start")), calm),
-        _timing("You woke", i.get("bed_end"), _usual(rows, d, lambda r: r["inputs"].get("bed_end")), calm),
-        _vs("deep_min", row, rows, d, calm), _vs("rem_min", row, rows, d, calm), _vs("awake", row, rows, d, calm),
-        _low_hr(row, rows, d, ctx),
-        _gap("spo2", i.get("spo2"), _usual(rows, d, GET["spo2"])) < 0 and _vs("spo2", row, rows, d, calm),
-        _timing("Your heart rate settled for the night", i.get("wind_down"),
-                _usual(rows, d, lambda r: r["inputs"].get("wind_down")), calm),
-        pm >= 1 and ("Phone in use in bed" if calm else f"Phone in use in bed for {_duration(pm)}"),
-        *[f"After {LOGGED[b['kind']]} {_effect(b['effect'], calm)}" for b in ctx["because"]
-          if b["effect"] and b["kind"] in LOGGED]])
+    return _quiet("night", facts, None, "Nothing else stood out last night" if facts is None else "A usual night for you")
 
 
 def _tonight(ctx: dict) -> dict | None:
+    """Always quiet: its content is the plan the Today page shows."""
     p, b, w, calm = ctx["plan"], ctx["debt"], ctx["window"], ctx["calm"]
     extra, debt = p["extra_min"] if p else (b or {}).get("suggest_min", 0), (b or {}).get("debt_min", 0)
     if not p and not b and w.get("status") != "ok":
         return None
-    return _card("tonight", "earlier" if extra > 0 else "usual", [
-        p and ("Aim for a full night's sleep before your wake time" if calm else
-               f"Your wake time is {_clock(p['wake_min'])}, and you need about {_duration(ctx['need_min'])} of sleep"),
-        extra > 0 and ("A little extra sleep tonight helps you catch up" if calm
-                       else f"{_duration(extra)} extra tonight helps you catch up"),
-        _debt(debt, calm),
-        w.get("status") == "ok" and ("Your best nights start at your usual bedtime" if calm
-                                     else f"Your best nights start between {_clock(w['start_min'])} and {_clock(w['end_min'])}")],
-        [_bed(p, debt, calm), *_avoid(ctx["because"], calm)])
+    verdict = "earlier" if extra > 0 else "usual"
+    advice = [a for a in (_bed(p, debt, calm), *_avoid(ctx["because"], calm)) if a][:MAX_ADVICE]
+    return _card("tonight", verdict, [LEAD[verdict][:-1]], advice, " ".join([LEAD[verdict]] + [a + "." for a in advice]))
 
 
 def _spread(rows: list[dict], d: date) -> float | None:
@@ -427,7 +428,6 @@ WIND_DOWN_MIN = 120  # inside 2 h of the planned bedtime: wind-down lines only
 MOVE_ROOM_MIN = 180  # "move" needs at least 3 h before the planned bedtime
 EFFORT_MIN = 30  # a walk, ride or workout this long today is effort: go easy after it
 COFFEE_MAX = 3  # this many coffees, or any coffee once past the cut-off: no more coffee
-COFFEE_CUTOFF_H = 14  # scoring.derived's caffeine_late hour
 STRESS_LONG_MIN = 60  # stressed this long since the last note: a walk or the breathing exercise
 MOVE_SHARE = 0.4  # under this share of the step goal by the afternoon is little movement
 AFTERNOON_H = 14
@@ -501,8 +501,20 @@ def update(now: float, since: float, day: dict, given: list[str], ctx: dict) -> 
 def cards(d: date, rows: list[dict], week: dict, prev: dict, ctx: dict) -> list[dict]:
     """rows: db.days(d - 13, d); week / prev: main._week ending d - 1 and d - 8; ctx: calm, guess_pending, need_min,
     plan (notify.tonight), window (notify.bedtime_window), debt, target (cardio.target), cardio_base, moments and
-    because (of d - 1), explain (notify.explain), closed (episode closed in the last 3 days or None), tz (for clock times)."""
-    row = _on(rows, d)
-    out = [_today(d, row, rows, ctx), _yesterday(d, rows, ctx), _night(d, row, rows, ctx), _tonight(ctx),
+    because (of d - 1), explain (notify.explain), closed (episode closed in the last 3 days or None), tz (for clock times),
+    given (advice lines shown on d - 1, followed up in today)."""
+    row, found = _on(rows, d), _findings(d, rows, ctx["calm"])
+    today = _today(d, row, rows, ctx, [t for _, _, t in found])
+    used = set(today["facts"]) if today else set()
+    if any("fell asleep" in f for f in used):  # a follow-up already told the fall-asleep shift
+        used |= {t for _, _, t in found if t.startswith(TIMES["bed_start"])}
+
+    def left(card: str) -> list[str] | None:
+        """None when all of the card's findings went to today: not a usual day, just nothing else to say."""
+        mine = [t for _, c, t in found if c == card]
+        rest = [t for t in mine if t not in used]
+        return rest if rest or not mine else None
+
+    out = [today, _yesterday(d, rows, left("yesterday")), _night(row, left("night")), _tonight(ctx),
            _week(d, rows, week, prev, ctx["calm"]), _next_week(d, rows, week, ctx), _body(row, ctx)]
     return [c for c in out if c and c["facts"]]
