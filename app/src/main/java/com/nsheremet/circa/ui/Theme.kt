@@ -183,6 +183,11 @@ data class AppColors(
     val sleepBand: Color = SleepIndigo.copy(alpha = 0.12f),
     /** Launcher icon background (res ic_launcher bg), for the mark shown as the app icon. */
     val brandTile: Color = Color(0xFF0B0B10),
+    /** Reports hero wash per verdict (push, steady, easy, rest): the accent at the top, faded to nothing below. */
+    val pushWash: Color = ActivityPink.copy(alpha = 0.12f),
+    val steadyWash: Color = ReadinessGreen.copy(alpha = 0.12f),
+    val easyWash: Color = Color(0x1F00C7BE),
+    val restWash: Color = SleepIndigo.copy(alpha = 0.12f),
 ) {
     /** Lighter gradient partner of a score colour (the arc head); other colours pair with themselves. */
     fun light(c: Color): Color = when (c) {
@@ -240,6 +245,8 @@ private val DarkColors = AppColors(
     cardStroke = Color(0x0FFFFFFF),
     nightBottom = Color(0x1F000000),
     emptySegment = Color(0x598E8E93), sleepBand = SleepIndigo.copy(alpha = 0.3f),
+    pushWash = ActivityPink.copy(alpha = 0.18f), steadyWash = ReadinessGreen.copy(alpha = 0.18f),
+    easyWash = Color(0x2E63E6E2), restWash = SleepIndigo.copy(alpha = 0.22f),
 )
 
 /** Bundled OFL Nunito: rounded numerals and titles; body text stays on the platform sans. */
@@ -254,6 +261,8 @@ object AppType {
     val subhead = TextStyle(fontSize = 15.sp, lineHeight = 20.sp)
     val footnote = TextStyle(fontSize = 13.sp, lineHeight = 18.sp)
     val tab = TextStyle(fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.Medium)
+    /** Reports notes: platform serif at body size, looser lines; marks "written for you" apart from data. */
+    val note = TextStyle(fontFamily = FontFamily.Serif, fontSize = 17.sp, lineHeight = 25.sp)
 }
 
 // shortcut: read when AppTheme composes; a 12/24 h switch shows on the next app start, fine for a rarely changed setting.

@@ -22,6 +22,8 @@ import androidx.compose.material.icons.outlined.Bedtime
 import androidx.compose.material.icons.outlined.DirectionsWalk
 import androidx.compose.material.icons.outlined.MonitorHeart
 import androidx.compose.material.icons.outlined.Today
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -60,6 +62,7 @@ private enum class TabItem(val route: String, val label: String, val icon: Image
     Trends("trends", "Trends", Icons.AutoMirrored.Rounded.ShowChart, Icons.AutoMirrored.Outlined.ShowChart),
 }
 
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pair<String, String?>?, onLinkHandled: () -> Unit) {
     AppTheme {
@@ -71,7 +74,7 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
         LaunchedEffect(route) { backend = Api.cached(ctx) ?: Api.hasBackend(ctx) }
         fun go(t: TabItem) {
             // Settings and Breathe sit above a tab; pop them first or saveState/restoreState brings them back on that tab.
-            if (nav.currentDestination?.route in setOf("settings", "breathe")) nav.popBackStack()
+            if (nav.currentDestination?.route in setOf("settings", "breathe", "reports")) nav.popBackStack()
             nav.navigate(t.route) {
                 popUpTo(nav.graph.findStartDestination().id) { saveState = true }
                 launchSingleTop = true
@@ -107,18 +110,26 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
                 LocalOpenSettings provides { nav.navigate("settings") { launchSingleTop = true } },
                 LocalOpenBreathe provides (if (backend == true) ({ nav.navigate("breathe") { launchSingleTop = true } }) else null),
             ) {
+            SharedTransitionLayout { CompositionLocalProvider(LocalShared provides this) {
             NavHost(nav, startDestination = TabItem.Today.route, modifier = Modifier.haze(haze)) {
-                composable(TabItem.Today.route) { TodayScreen(backend, { nav.navigate("breathe") }, journalDate, onLinkHandled) }
+                composable(TabItem.Today.route) {
+                    CompositionLocalProvider(LocalNavScope provides this) {
+                        TodayScreen(backend, { nav.navigate("breathe") }, journalDate, onLinkHandled) { nav.navigate("reports") { launchSingleTop = true } }
+                    }
+                }
+                composable("reports") { CompositionLocalProvider(LocalNavScope provides this) { ReportScreen(backend) { nav.popBackStack() } } }
                 composable(TabItem.Sleep.route) { SleepScreen(backend) }
                 composable(TabItem.Activity.route) { ActivityScreen(backend, link?.takeIf { it.first == "workout" }?.second, onLinkHandled) }
                 composable(TabItem.Body.route) { BodyScreen(backend) }
                 composable(TabItem.Trends.route) { TrendsScreen(backend, link?.first == "month", onLinkHandled) }
                 composable("breathe") { BreatheScreen { nav.popBackStack() } }
                 composable("settings") {
-                    val from = TabItem.entries.firstOrNull { it.route == nav.previousBackStackEntry?.destination?.route }?.label ?: "Today"
+                    val prev = nav.previousBackStackEntry?.destination?.route
+                    val from = TabItem.entries.firstOrNull { it.route == prev }?.label ?: if (prev == "reports") "Reports" else "Today"
                     SettingsScreen(hasPermissions, requestPermissions, from) { nav.popBackStack() }
                 }
             }
+            } }
             }
         }
     }

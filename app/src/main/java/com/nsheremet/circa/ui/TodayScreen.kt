@@ -227,7 +227,7 @@ private fun JsonElement?.num() = (this as? JsonPrimitive)?.doubleOrNull
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? = null, onJournalOpened: () -> Unit = {}) {
+fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? = null, onJournalOpened: () -> Unit = {}, onReports: () -> Unit = {}) {
     val haptic = LocalHapticFeedback.current
     if (backend != true) return PlaceholderTab("Today", backend)
     // Breathe and the Settings gear both come from LargeTitleScaffold (via LocalOpenBreathe / LocalOpenSettings).
@@ -250,6 +250,7 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
     var holdGone by remember { mutableStateOf(ctx.holdDismissed) }
     var reply by remember { mutableStateOf<String?>(null) } // the feeling the NowCard answers
     var marks by remember { mutableStateOf<List<JsonObject>>(emptyList()) } // `/marks.things`: one per named thing
+    var report by remember { mutableStateOf<ReportCard?>(null) } // the Reports page's first card, shown cut down on top
     LaunchedEffect(journalDate) {
         if (journalDate == null) return@LaunchedEffect
         sheetDay = if (journalDate == LocalDate.now().toString()) 1 else 0
@@ -262,6 +263,7 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
     var refreshing by remember { mutableStateOf(false) }
     suspend fun load() {
         Api.today(ctx).obj()?.let { data = it }
+        loadReport(ctx)?.let { report = it.second.firstOrNull() }
         // Hold my place: last night's sleep onset against the playback log. Read here, on the phone; nothing about it is sent.
         hold = if (!ctx.holdPlace || !ctx.notificationAccess) null else Api.sleep(ctx, data?.get("date").str().orEmpty()).obj()?.get("session").obj()?.let { s ->
             val start = s["start"].num() ?: return@let null
@@ -285,6 +287,7 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
     suspend fun answered(r: JsonObject?, widget: Boolean) {
         if (r == null) return Toast.makeText(ctx, "Not saved. Try again.", Toast.LENGTH_SHORT).show()
         data = r
+        loadReport(ctx)?.let { report = it.second.firstOrNull() } // a guess lets the backend send the `today` card
         if (widget) { ctx.todayJson = r.toString(); ctx.todayJsonMs = System.currentTimeMillis(); RingWidget().updateAll(ctx) }
     }
 
@@ -301,6 +304,8 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
                 d["wear"].obj()?.get("off_since").num()?.let { Text("Ring off since ${clock(it)}", style = AppType.subhead, color = c.secondaryLabel) }
             }
         }
+        // Not while the guess is pending: the verdict word would give the answer away.
+        report?.takeIf { d["guess"].obj()?.get("pending").str() != "true" }?.let { r -> item { ReportCardView(r, Modifier.hero(), onReports) } }
         val day = d["date"].str().orEmpty() // the server's day, never the phone's clock
         item { RightNow(day, scope, { reply = it }) { Api.today(ctx).obj()?.let { data = it } } }
         reply?.let { f -> item { NowCard(f, d, { text -> scope.launch { answered(Api.putNote(ctx, "now_$f", text), false) } }, onBreathe) { reply = null } } }
