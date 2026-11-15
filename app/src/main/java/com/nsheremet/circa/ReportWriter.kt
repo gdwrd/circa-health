@@ -66,7 +66,7 @@ internal fun reportPrompt(verdict: String?, facts: List<String>, advice: List<St
     }
 }
 
-/** What a note depends on: a card is rewritten only when this changes. */
+/** What a note depends on; stored with it, no longer a reason to rewrite (DT1). */
 internal fun reportHash(name: String, verdict: String?, facts: List<String>, advice: List<String>): String =
     MessageDigest.getInstance("SHA-1").digest(listOf(name.trim(), verdict.orEmpty(), facts.joinToString("\n"), advice.joinToString("\n"))
         .joinToString("\u0000").toByteArray()).joinToString("") { "%02x".format(it) }
@@ -106,6 +106,13 @@ internal fun keepDays(reports: Map<String, JsonElement>, date: LocalDate) =
 /** `reports.json` entries without [date]'s: Regenerate rewrites every card of that day. */
 internal fun dropDay(reports: Map<String, JsonElement>, date: String) = reports.filterKeys { !it.startsWith("$date/") }
 
+/**
+ * DT1: the [cards] of [date]'s `/report` to write. A card with an entry is never rewritten (Regenerate drops the day first);
+ * nothing is written until the `night` card is in, unless [force].
+ */
+internal fun toWrite(reports: Map<String, JsonElement>, date: String, cards: List<JsonObject>, force: Boolean): List<JsonObject> =
+    if (!force && cards.none { it.str("kind") == "night" }) emptyList() else cards.filter { "$date/${it.str("kind")}" !in reports }
+
 /** The first two sentences of [text]: a notification body. */
 internal fun firstSentences(text: String): String = text.trim().split(Regex("(?<=[.!?])\\s+")).take(2).joinToString(" ")
 
@@ -113,7 +120,7 @@ internal fun firstSentences(text: String): String = text.trim().split(Regex("(?<
 private val writing = Mutex()
 
 /**
- * Writes the notes of today's `/report` cards whose hash changed into `filesDir/reports.json`
+ * Writes the notes of today's `/report` cards that have none yet ([toWrite]) into `filesDir/reports.json`
  * (`{"date/kind": {"hash", "text"}}`; text is the card's fallback when a check failed).
  * [force] drops today's entries first, so every card is written again.
  * Returns the Sync log line, or null when the writer is off, the model is missing or nothing changed. Blocks for seconds a card.
@@ -134,10 +141,7 @@ private suspend fun writeLocked(ctx: Context, force: Boolean): String? {
     val save = { File(ctx.filesDir, "reports.json.tmp").apply { writeText(JsonObject(reports).toString()) }.renameTo(file) }
     if (force) save() // the page shows a placeholder for every card until its note lands
     val name = ctx.reportName
-    val todo = (reply["cards"] as? JsonArray).orEmpty().map { it.jsonObject }.filter { c ->
-        val h = reportHash(name, (c["verdict"] as? JsonPrimitive)?.contentOrNull, c.strings("facts"), c.strings("advice"))
-        ((reports["$date/${c.str("kind")}"] as? JsonObject)?.get("hash") as? JsonPrimitive)?.content != h
-    }
+    val todo = toWrite(reports, date, (reply["cards"] as? JsonArray).orEmpty().map { it.jsonObject }, force)
     if (todo.isEmpty()) return null
     val t0 = SystemClock.elapsedRealtime()
     var fallbacks = 0

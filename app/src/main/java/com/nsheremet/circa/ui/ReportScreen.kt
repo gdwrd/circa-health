@@ -68,10 +68,8 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.nsheremet.circa.Prefs.reportName
 import com.nsheremet.circa.Prefs.reportWriter
 import com.nsheremet.circa.Prefs.sleepNeedHours
-import com.nsheremet.circa.reportHash
 import com.nsheremet.circa.writeReports
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -90,14 +88,13 @@ import kotlinx.serialization.json.doubleOrNull
 import java.io.File
 import java.time.LocalDate
 import java.time.ZoneId
-import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.roundToInt
 
 // AI6: the Reports page. Each `/report` card shows its written note (reports.json, when its hash still matches) or its fallback.
 
-/** [written] is the model's note, null when the card shows its [fallback]; [pending]: reports.json has no current entry (not written yet). */
-internal data class ReportCard(val kind: String, val verdict: String?, val advice: List<String>, val fallback: String, val written: String?, val pending: Boolean) {
+/** [written] is the model's note, null when the card shows its [fallback]; [pending]: reports.json has no entry (not written yet); [date]: the report's day. */
+internal data class ReportCard(val kind: String, val verdict: String?, val advice: List<String>, val fallback: String, val written: String?, val pending: Boolean, val date: LocalDate) {
     val note get() = written ?: fallback
 }
 
@@ -111,21 +108,19 @@ internal fun reportCards(ctx: Context, reply: JsonElement?): List<ReportCard> {
     val o = reply as? JsonObject ?: return emptyList()
     val date = (o["date"] as? JsonPrimitive)?.content ?: return emptyList()
     val saved = if (reportsOff(ctx)) null else runCatching { Json.parseToJsonElement(File(ctx.filesDir, "reports.json").readText()) as JsonObject }.getOrNull()
-    val name = ctx.reportName
     return (o["cards"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.map { c ->
-        fun strs(k: String) = (c[k] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content }.orEmpty()
         val kind = (c["kind"] as? JsonPrimitive)?.content.orEmpty()
-        val verdict = (c["verdict"] as? JsonPrimitive)?.contentOrNull
         val fallback = (c["fallback"] as? JsonPrimitive)?.content.orEmpty()
+        // DT1: a stored note stays whatever the card's hash is now (written once a day).
         val e = saved?.get("$date/$kind") as? JsonObject
-        val fresh = (e?.get("hash") as? JsonPrimitive)?.content == reportHash(name, verdict, strs("facts"), strs("advice"))
-        ReportCard(kind, verdict, strs("advice"), fallback, (e?.get("text") as? JsonPrimitive)?.content?.takeIf { fresh && it != fallback }, !fresh)
+        ReportCard(kind, (c["verdict"] as? JsonPrimitive)?.contentOrNull, (c["advice"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content }.orEmpty(),
+            fallback, (e?.get("text") as? JsonPrimitive)?.content?.takeIf { it != fallback }, e == null, LocalDate.parse(date))
     }.sortedBy { if (it.kind == "body" && it.verdict == "watch") 0.5 else pageOrder.indexOf(it.kind).let { i -> if (i < 0) 99.0 else i.toDouble() } }
 }
 
-/** Today's cards, or null when the backend gave nothing (not even a cached reply). */
-internal suspend fun loadReport(ctx: Context): Pair<JsonElement, List<ReportCard>>? =
-    Api.report(ctx, LocalDate.now())?.let { r -> r to withContext(Dispatchers.IO) { reportCards(ctx, r) } }
+/** [date]'s cards, or null when the backend gave nothing (not even a cached reply). */
+internal suspend fun loadReport(ctx: Context, date: LocalDate = LocalDate.now()): Pair<JsonElement, List<ReportCard>>? =
+    Api.report(ctx, date)?.let { r -> r to withContext(Dispatchers.IO) { reportCards(ctx, r) } }
 
 /** App provides both so the Today hero can grow into the page's first card. */
 @OptIn(ExperimentalSharedTransitionApi::class)
@@ -243,7 +238,7 @@ internal fun ReportCardView(card: ReportCard, modifier: Modifier = Modifier, onO
             if (onOpen == null) {
                 val ctx = LocalContext.current
                 var graph by remember { mutableStateOf<(@Composable (Color) -> Unit)?>(null) }
-                LaunchedEffect(card.kind, card.verdict) { graph = runCatching { graphFor(ctx, card) }.getOrNull() }
+                LaunchedEffect(card.kind, card.verdict, card.date) { graph = runCatching { graphFor(ctx, card) }.getOrNull() }
                 graph?.let { g ->
                     Hairline(Modifier.padding(top = AppSpace.l, bottom = AppSpace.s))
                     g(a)
@@ -273,7 +268,9 @@ private suspend fun nights(ctx: Context): Pair<JsonObject?, List<Pair<LocalDate,
 
 /** PLAN12 Cards table: the card's graph from the endpoint its own screen uses, drawn in the accent it is given; null when there is too little to draw. */
 private suspend fun graphFor(ctx: Context, card: ReportCard): (@Composable (Color) -> Unit)? {
-    val today = LocalDate.now()
+    val today = card.date
+    // /week, /trends and the bedtime plan have no date: an earlier day shows only its night and yesterday graphs.
+    if (today != LocalDate.now() && card.kind != "night" && card.kind != "yesterday") return null
     suspend fun weekDays() = Api.week(ctx).obj()?.get("days")
     return when {
         card.kind == "today" -> daily(weekDays(), "readiness").takeIf(::enough)?.let { p -> { a -> MiniChart(null, p, a, false, GRAPH) } }
@@ -353,29 +350,35 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
     var loaded by remember { mutableStateOf(false) }
     var off by remember { mutableStateOf(true) } // writer off or no model: every card shows its fallback
     var writing by remember { mutableStateOf(false) }
+    var date by remember { mutableStateOf(LocalDate.now()) }
+    val isToday = date == LocalDate.now()
     val scope = rememberCoroutineScope()
-    // Writes the notes, re-reading reports.json as they land; a model that fails to load ends it like a finished write.
+    // Writes today's notes, re-reading reports.json as they land; a model that fails to load ends it like a finished write.
     suspend fun write(r: JsonElement, force: Boolean) {
         writing = true
         try {
+            // Only while today is shown: the user may have stepped to an earlier day meanwhile.
+            suspend fun reread() { val l = withContext(Dispatchers.IO) { reportCards(ctx, r) }; if (date == LocalDate.now()) cards = l }
             coroutineScope {
                 val job = launch(Dispatchers.Default) { runCatching { writeReports(ctx, force) } }
                 while (job.isActive) {
                     delay(1500)
-                    cards = withContext(Dispatchers.IO) { reportCards(ctx, r) }
+                    reread()
                 }
             }
-            cards = withContext(Dispatchers.IO) { reportCards(ctx, r) }
+            reread()
         } finally { writing = false }
     }
-    LaunchedEffect(Unit) {
-        val r = loadReport(ctx)
+    LaunchedEffect(date) {
+        cards = null
+        loaded = false
+        val r = loadReport(ctx, date)
         off = withContext(Dispatchers.IO) { reportsOff(ctx) }
         report = r?.first
         cards = r?.second
         loaded = true
-        // The worker may have been killed before it wrote: write the missing notes now.
-        if (r != null && !off && r.second.any { it.pending }) write(r.first, false)
+        // Today only, once the night is in: the worker may have been killed before it wrote the missing notes. Earlier days never write.
+        if (r != null && isToday && !off && r.second.any { it.kind == "night" } && r.second.any { it.pending }) write(r.first, false)
     }
     val wide = LocalConfiguration.current.screenWidthDp >= 600
     val haptic = LocalHapticFeedback.current
@@ -397,18 +400,19 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
             Text(if (writing) "Writing…" else "Regenerate", style = AppType.body, color = color, modifier = Modifier.padding(start = AppSpace.xs))
         }
     }
-    LargeTitleScaffold("Reports", back = back, action = regenerate.takeIf { !off && !cards.isNullOrEmpty() }) {
-        item {
-            Text(
-                LocalDate.now().format(DateTimeFormatter.ofPattern("EEEE d MMMM", Locale.getDefault())), style = AppType.subhead, color = c.secondaryLabel,
-                modifier = Modifier.padding(start = AppSpace.xs),
-            )
-        }
+    LargeTitleScaffold("Reports", back = back, action = regenerate.takeIf { isToday && !off && !cards.isNullOrEmpty() }) {
+        item { DayPicker(date) { date = it } }
         val list = cards
         if (list.isNullOrEmpty()) {
-            if (loaded) item { InsetCard { EmptyState(Icons.Rounded.AutoAwesome, "No report yet", if (list == null) "It appears once the server can be reached." else "It fills in after the next sync.") } }
+            if (loaded) item {
+                InsetCard {
+                    EmptyState(Icons.Rounded.AutoAwesome, if (isToday) "No report yet" else "No report for this day",
+                        if (list == null) "It appears once the server can be reached." else if (isToday) "It fills in after the next sync." else "The ring has too little from this day.")
+                }
+            }
             return@LargeTitleScaffold
         }
+        val writing = writing && isToday
         item(key = list.first().kind) { ReportCardView(list.first(), Modifier.hero(), writing = writing) }
         val rest = list.drop(1)
         // 600 dp and wider: the small cards flow in two columns under the full-width hero.

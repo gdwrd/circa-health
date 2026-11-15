@@ -1,5 +1,6 @@
 package com.nsheremet.circa
 
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -67,6 +68,27 @@ class ReportDaysTest {
         val x = JsonPrimitive(1)
         val kept = keepDays(mapOf("2026-11-15/today" to x, "2026-11-02/week" to x, "2026-11-01/today" to x), LocalDate.parse("2026-11-15"))
         assertEquals(setOf("2026-11-15/today", "2026-11-02/week"), kept.keys)
+    }
+
+    private fun cards(vararg kinds: String) = kinds.map { JsonObject(mapOf("kind" to JsonPrimitive(it))) }
+    private fun kinds(l: List<JsonObject>) = l.map { (it["kind"] as JsonPrimitive).content }
+    private val written = mapOf("2026-11-15/night" to JsonPrimitive(1), "2026-11-15/week" to JsonPrimitive(1), "2026-11-14/today" to JsonPrimitive(1))
+
+    @Test fun entryIsNotRewritten() =
+        assertEquals(listOf("today"), kinds(toWrite(written, "2026-11-15", cards("night", "today", "week"), false)))
+
+    @Test fun forceRewritesAll() =
+        assertEquals(listOf("night", "today", "week"), kinds(toWrite(dropDay(written, "2026-11-15"), "2026-11-15", cards("night", "today", "week"), true)))
+
+    @Test fun waitsForNight() =
+        assertEquals(emptyList<String>(), kinds(toWrite(emptyMap(), "2026-11-15", cards("yesterday", "week"), false)))
+
+    @Test fun laterCardWrittenOnce() {
+        val first = toWrite(emptyMap(), "2026-11-15", cards("night", "week"), false)
+        assertEquals(listOf("night", "week"), kinds(first))
+        val after = first.associate { "2026-11-15/${(it["kind"] as JsonPrimitive).content}" to JsonPrimitive(1) }
+        assertEquals(listOf("body"), kinds(toWrite(after, "2026-11-15", cards("night", "week", "body"), false)))
+        assertEquals(emptyList<String>(), kinds(toWrite(after + ("2026-11-15/body" to JsonPrimitive(1)), "2026-11-15", cards("night", "week", "body"), false)))
     }
 
     @Test fun dropsOnlyThatDay() {
