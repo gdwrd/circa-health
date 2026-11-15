@@ -52,6 +52,8 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberColumnCartesianLayer
@@ -89,8 +91,8 @@ import kotlin.math.roundToInt
 private fun JsonElement?.obj() = this as? JsonObject
 private fun JsonElement?.num() = (this as? JsonPrimitive)?.doubleOrNull
 
-private class Seg(val startS: Double, val endS: Double, val stage: Int)
-private class HrPt(val t: Double, val bpm: Double)
+internal class Seg(val startS: Double, val endS: Double, val stage: Int)
+internal class HrPt(val t: Double, val bpm: Double)
 
 private val STAGE_NAME = mapOf(4 to "Awake", 3 to "REM", 1 to "Light", 2 to "Deep")
 private val STAGE_INFO = mapOf(
@@ -118,7 +120,7 @@ private fun noonClock(min: Double): String = clock(LocalTime.NOON.plusMinutes(mi
 private fun median(v: List<Int>): Double = v.sorted().let { s -> if (s.size % 2 == 1) s[s.size / 2].toDouble() else (s[s.size / 2 - 1] + s[s.size / 2]) / 2.0 }
 
 /** A segment runs until the next sample with a different stage; stage 0 ends the night. */
-private fun segments(stages: JsonArray?, endS: Double): List<Seg> {
+internal fun segments(stages: JsonArray?, endS: Double): List<Seg> {
     val pts = stages?.mapNotNull { s -> s.obj()?.let { o -> o["t"].num()?.let { t -> t to (o["stage"].num()?.toInt() ?: 0) } } }
         ?.sortedBy { it.first } ?: return emptyList()
     val out = mutableListOf<Seg>()
@@ -372,8 +374,9 @@ private fun EditNight(ses: JsonObject?, date: LocalDate, onDismiss: () -> Unit, 
 
 private fun JsonObject.hrPt(): HrPt? = this["t"].num()?.let { t -> this["bpm"].num()?.let { HrPt(t, it) } }
 
+/** [lane]: height of one stage lane; the stage part is 4 lanes plus 44 dp of padding and hour labels. */
 @Composable
-private fun Hypnogram(segs: List<Seg>, startS: Double, endS: Double, hr: List<HrPt>, low: HrPt?) {
+internal fun Hypnogram(segs: List<Seg>, startS: Double, endS: Double, hr: List<HrPt>, low: HrPt?, lane: Dp = 35.dp) {
     val c = AppTheme.colors
     val measurer = rememberTextMeasurer()
     val label = AppType.footnote.copy(color = c.secondaryLabel)
@@ -383,7 +386,7 @@ private fun Hypnogram(segs: List<Seg>, startS: Double, endS: Double, hr: List<Hr
     val hrH = if (hr.size > 1) 72.dp else 0.dp
     var touch by remember { mutableStateOf<Float?>(null) }
     Canvas(
-        Modifier.fillMaxWidth().height(184.dp + hrH).padding(horizontal = AppSpace.l, vertical = AppSpace.m).pointerInput(Unit) {
+        Modifier.fillMaxWidth().height(lane * 4 + 44.dp + hrH).padding(horizontal = AppSpace.l, vertical = AppSpace.m).pointerInput(Unit) {
             awaitEachGesture {
                 touch = awaitFirstDown().position.x
                 do {
@@ -395,7 +398,7 @@ private fun Hypnogram(segs: List<Seg>, startS: Double, endS: Double, hr: List<Hr
         },
     ) {
         val left = 48.dp.toPx()
-        val laneH = 35.dp.toPx()
+        val laneH = lane.toPx()
         val span = (endS - startS).coerceAtLeast(1.0)
         fun x(s: Double) = left + ((s - startS) / span * (size.width - left)).toFloat()
         lanes.forEachIndexed { i, (name, _) ->
@@ -465,9 +468,9 @@ private fun Hypnogram(segs: List<Seg>, startS: Double, endS: Double, hr: List<Hr
     }
 }
 
-/** 7-night bed→wake strip on a 6 PM–noon axis, median band behind it. */
+/** 7-night bed→wake strip on a 6 PM–noon axis, median band behind it. [framed] false: the strip alone (inside a report card). */
 @Composable
-private fun Regularity(score: Double?, week: List<Pair<LocalDate, JsonObject?>>, reg: JsonObject?) {
+internal fun Regularity(score: Double?, week: List<Pair<LocalDate, JsonObject?>>, reg: JsonObject?, accent: Color = AppTheme.colors.sleep, framed: Boolean = true) {
     val c = AppTheme.colors
     val rows = week.map { (day, s) -> day to s?.let { afterNoon(it["start"].num() ?: 0.0) to afterNoon(it["end"].num() ?: 0.0) } }
     val have = rows.mapNotNull { it.second }
@@ -479,20 +482,7 @@ private fun Regularity(score: Double?, week: List<Pair<LocalDate, JsonObject?>>,
     val learning = if (reg != null) reg["sd_min"].num() == null else have.size < 4
     val measurer = rememberTextMeasurer()
     val label = AppType.footnote.copy(color = c.secondaryLabel)
-    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-        Text("Regularity", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-        InsetCard {
-            Text(
-                buildAnnotatedString {
-                    withStyle(SpanStyle(fontWeight = AppType.headline.fontWeight)) { append("Regularity" + (score?.let { " ${it.roundToInt()}" } ?: "")) }
-                    withStyle(SpanStyle(color = c.secondaryLabel)) { append(" · bed around ${noonClock(bed)}, up around ${noonClock(up)}") }
-                },
-                style = AppType.subhead, modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.l, end = AppSpace.l),
-            )
-            if (learning) Text(
-                "Learning your rhythm · $nights/4 nights. Regularity needs 4 of the last 7.",
-                style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.xs, end = AppSpace.l),
-            )
+    val strip = @Composable {
             Canvas(Modifier.fillMaxWidth().height((7 * 18 + 20 + 2 * 12).dp).padding(horizontal = AppSpace.l, vertical = AppSpace.m)) {
                 val left = 48.dp.toPx()
                 val rowH = 18.dp.toPx()
@@ -510,17 +500,34 @@ private fun Regularity(score: Double?, week: List<Pair<LocalDate, JsonObject?>>,
                     drawText(dm, topLeft = Offset(0f, cy - dm.size.height / 2f))
                     n?.let { (a, b) ->
                         val x0 = x(a.toDouble())
-                        drawRoundRect(c.sleep, Offset(x0, cy - barH / 2), Size((x(b.toDouble()) - x0).coerceAtLeast(barH), barH), CornerRadius(barH / 2))
+                        drawRoundRect(accent, Offset(x0, cy - barH / 2), Size((x(b.toDouble()) - x0).coerceAtLeast(barH), barH), CornerRadius(barH / 2))
                     }
                 }
             }
+    }
+    if (!framed) return strip()
+    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+        Text("Regularity", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
+        InsetCard {
+            Text(
+                buildAnnotatedString {
+                    withStyle(SpanStyle(fontWeight = AppType.headline.fontWeight)) { append("Regularity" + (score?.let { " ${it.roundToInt()}" } ?: "")) }
+                    withStyle(SpanStyle(color = c.secondaryLabel)) { append(" · bed around ${noonClock(bed)}, up around ${noonClock(up)}") }
+                },
+                style = AppType.subhead, modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.l, end = AppSpace.l),
+            )
+            if (learning) Text(
+                "Learning your rhythm · $nights/4 nights. Regularity needs 4 of the last 7.",
+                style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.xs, end = AppSpace.l),
+            )
+            strip()
         }
     }
 }
 
-/** Best-bedtime window (from today) on an 8 PM–2 AM strip, this week's bedtimes as dots. */
+/** Best-bedtime window (from today) on an 8 PM–2 AM strip, this week's bedtimes as dots. [framed] false: the strip alone, drawn only when the window is known. */
 @Composable
-private fun Bedtime(b: JsonObject, week: List<Pair<LocalDate, JsonObject?>>, plan: JsonObject?) {
+internal fun Bedtime(b: JsonObject, week: List<Pair<LocalDate, JsonObject?>>, plan: JsonObject?, accent: Color = AppTheme.colors.sleep, framed: Boolean = true) {
     val c = AppTheme.colors
     val nights = b["nights"].num()?.roundToInt() ?: 0
     val start = b["start_min"].num()
@@ -530,6 +537,30 @@ private fun Bedtime(b: JsonObject, week: List<Pair<LocalDate, JsonObject?>>, pla
     val inBed = plan?.get("in_bed_by_min").num()
     val measurer = rememberTextMeasurer()
     val label = AppType.footnote.copy(color = c.secondaryLabel)
+    val strip = @Composable {
+                    val dots = week.mapNotNull { (_, s) -> s?.get("start").num()?.let { afterNoon(it).toDouble() } }
+                    // 8 PM–2 AM, stretched to whole hours when the window or a bedtime falls outside.
+                    val lo = (listOf(480.0, start!!) + dots + listOfNotNull(inBed)).min().let { floor(it / 60) * 60 }
+                    val hi = (listOf(840.0, end!!) + dots + listOfNotNull(inBed)).max().let { ceil(it / 60) * 60 }
+                    Canvas(Modifier.fillMaxWidth().height(40.dp).padding(top = AppSpace.m)) {
+                        val h = 8.dp.toPx()
+                        val cy = h / 2 + 1.dp.toPx()
+                        fun x(m: Double) = ((m - lo) / (hi - lo) * size.width).toFloat()
+                        drawRoundRect(c.emptySegment, Offset(0f, cy - h / 2), Size(size.width, h), CornerRadius(h / 2))
+                        drawRoundRect(accent.copy(alpha = 0.35f), Offset(x(start), cy - h / 2), Size(x(end) - x(start), h), CornerRadius(h / 2))
+                        dots.forEach { m ->
+                            drawCircle(c.card, 4.dp.toPx(), Offset(x(m), cy))
+                            drawCircle(accent, 3.dp.toPx(), Offset(x(m), cy))
+                        }
+                        inBed?.let { drawLine(c.label, Offset(x(it), cy - h), Offset(x(it), cy + h), 2.dp.toPx(), StrokeCap.Round) }
+                        listOf(lo, (lo + hi) / 2, hi).forEachIndexed { i, m ->
+                            val lm = measurer.measure(noonClock(m).replace(":00 ", " "), label)
+                            val lx = when (i) { 0 -> 0f; 1 -> x(m) - lm.size.width / 2f; else -> size.width - lm.size.width }
+                            drawText(lm, topLeft = Offset(lx, size.height - lm.size.height))
+                        }
+                    }
+    }
+    if (!framed) { if (ok) strip(); return }
     Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
         Text("Bedtime", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
         InsetCard {
@@ -545,29 +576,7 @@ private fun Bedtime(b: JsonObject, week: List<Pair<LocalDate, JsonObject?>>, pla
                     style = AppType.subhead, modifier = Modifier.padding(bottom = AppSpace.xs),
                 )
                 Text(head, style = AppType.headline)
-                if (ok) {
-                    val dots = week.mapNotNull { (_, s) -> s?.get("start").num()?.let { afterNoon(it).toDouble() } }
-                    // 8 PM–2 AM, stretched to whole hours when the window or a bedtime falls outside.
-                    val lo = (listOf(480.0, start!!) + dots + listOfNotNull(inBed)).min().let { floor(it / 60) * 60 }
-                    val hi = (listOf(840.0, end!!) + dots + listOfNotNull(inBed)).max().let { ceil(it / 60) * 60 }
-                    Canvas(Modifier.fillMaxWidth().height(40.dp).padding(top = AppSpace.m)) {
-                        val h = 8.dp.toPx()
-                        val cy = h / 2 + 1.dp.toPx()
-                        fun x(m: Double) = ((m - lo) / (hi - lo) * size.width).toFloat()
-                        drawRoundRect(c.emptySegment, Offset(0f, cy - h / 2), Size(size.width, h), CornerRadius(h / 2))
-                        drawRoundRect(c.sleep.copy(alpha = 0.35f), Offset(x(start), cy - h / 2), Size(x(end) - x(start), h), CornerRadius(h / 2))
-                        dots.forEach { m ->
-                            drawCircle(c.card, 4.dp.toPx(), Offset(x(m), cy))
-                            drawCircle(c.sleep, 3.dp.toPx(), Offset(x(m), cy))
-                        }
-                        inBed?.let { drawLine(c.label, Offset(x(it), cy - h), Offset(x(it), cy + h), 2.dp.toPx(), StrokeCap.Round) }
-                        listOf(lo, (lo + hi) / 2, hi).forEachIndexed { i, m ->
-                            val lm = measurer.measure(noonClock(m).replace(":00 ", " "), label)
-                            val lx = when (i) { 0 -> 0f; 1 -> x(m) - lm.size.width / 2f; else -> size.width - lm.size.width }
-                            drawText(lm, topLeft = Offset(lx, size.height - lm.size.height))
-                        }
-                    }
-                }
+                if (ok) strip()
                 Text(line, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = if (ok) AppSpace.s else AppSpace.xs))
             }
         }

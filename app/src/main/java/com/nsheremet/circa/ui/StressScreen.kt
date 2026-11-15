@@ -37,6 +37,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberColumnCartesianLayer
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLineCartesianLayer
@@ -204,9 +205,9 @@ fun StressScreen(backend: Boolean?, header: @Composable () -> Unit) {
 
 private fun zoneOf(v: Double) = if (v <= 25) 0 else if (v <= 50) 1 else if (v <= 75) 2 else 3
 
-/** 30-min stress columns across the day, each in its zone colour. */
+/** 30-min stress columns across the day, each in its zone colour ([accent]: all in one). [framed] false: the chart alone (inside a report card). */
 @Composable
-private fun ThroughTheDay(samples: List<Pair<Int, Double>>, starts: List<Double>) {
+internal fun ThroughTheDay(samples: List<Pair<Int, Double>>, starts: List<Double>, accent: Color? = null, height: Dp = 160.dp, framed: Boolean = true) {
     val c = AppTheme.colors
     val zones = listOf("Restored" to c.zoneRestored, "Relaxed" to c.zoneRelaxed, "Engaged" to c.zoneEngaged, "Stressed" to c.zoneStressed)
     val byX = samples.associate { it.first.toDouble() to it.second }
@@ -216,7 +217,7 @@ private fun ThroughTheDay(samples: List<Pair<Int, Double>>, starts: List<Double>
             columnSeries { series(samples.map { it.first }, samples.map { it.second }) }
         }
     }
-    val cols = zones.map { (_, col) -> rememberLineComponent(fill = fill(col), thickness = 4.dp, shape = CorneredShape.rounded(topLeftPercent = 30, topRightPercent = 30)) }
+    val cols = zones.map { (_, col) -> rememberLineComponent(fill = fill(accent ?: col), thickness = 4.dp, shape = CorneredShape.rounded(topLeftPercent = 30, topRightPercent = 30)) }
     val layer = rememberColumnCartesianLayer(
         object : ColumnCartesianLayer.ColumnProvider {
             override fun getColumn(entry: ColumnCartesianLayerModel.Entry, seriesIndex: Int, extraStore: ExtraStore) = cols[zoneOf(entry.y)]
@@ -225,22 +226,24 @@ private fun ThroughTheDay(samples: List<Pair<Int, Double>>, starts: List<Double>
         columnCollectionSpacing = 1.dp,
         rangeProvider = CartesianLayerRangeProvider.fixed(minX = 0.0, maxX = 47.0, minY = 0.0, maxY = 100.0),
     )
+    val chart = @Composable {
+        ScrubChartHost(
+            rememberCartesianChart(
+                layer,
+                startAxis = startAxis(25.0),
+                bottomAxis = bottomAxis(CartesianValueFormatter { _, x, _ -> clock(LocalTime.of(x.toInt() / 2, x.toInt() % 2 * 30)).replace(":00 ", " ") }, 12),
+                marker = rememberScrubMarker(c.tint) { x ->
+                    byX[x]?.let { "${zones[zoneOf(it)].first} ${it.roundToInt()} · ${clock(LocalTime.of(x.toInt() / 2, x.toInt() % 2 * 30))}" } ?: "—"
+                },
+                decorations = listOfNotNull(starts.takeIf { it.isNotEmpty() }?.let { s -> DoseWindows(s.map { it to it }, c.breathe.toArgb()) }),
+            ),
+            producer, height,
+        )
+    }
+    if (!framed) return chart()
     Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
         Text("Through the day", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-        InsetCard {
-            ScrubChartHost(
-                rememberCartesianChart(
-                    layer,
-                    startAxis = startAxis(25.0),
-                    bottomAxis = bottomAxis(CartesianValueFormatter { _, x, _ -> clock(LocalTime.of(x.toInt() / 2, x.toInt() % 2 * 30)).replace(":00 ", " ") }, 12),
-                    marker = rememberScrubMarker(c.tint) { x ->
-                        byX[x]?.let { "${zones[zoneOf(it)].first} ${it.roundToInt()} · ${clock(LocalTime.of(x.toInt() / 2, x.toInt() % 2 * 30))}" } ?: "—"
-                    },
-                    decorations = listOfNotNull(starts.takeIf { it.isNotEmpty() }?.let { s -> DoseWindows(s.map { it to it }, c.breathe.toArgb()) }),
-                ),
-                producer, 160.dp,
-            )
-        }
+        InsetCard { chart() }
     }
 }
 
@@ -328,8 +331,12 @@ private fun Bar(name: String, value: String, frac: Double, color: Color) {
     }
 }
 
+/** [title] null: the chart alone (inside a report card). [unit] follows a column's value in the marker; [goal] draws a dashed line. */
 @Composable
-private fun MiniChart(title: String, pts: List<Pair<LocalDate, Double?>>, color: Color, column: Boolean) {
+internal fun MiniChart(
+    title: String?, pts: List<Pair<LocalDate, Double?>>, color: Color, column: Boolean,
+    height: Dp = 140.dp, unit: String = " h", goal: Double? = null,
+) {
     val c = AppTheme.colors
     val first = pts.firstOrNull()?.first ?: return
     val xy = pts.mapNotNull { (d, v) -> v?.let { (d.toEpochDay() - first.toEpochDay()).toDouble() to it } }
@@ -341,7 +348,7 @@ private fun MiniChart(title: String, pts: List<Pair<LocalDate, Double?>>, color:
             else lineSeries { series(xy.map { it.first }, xy.map { it.second }) }
         }
     }
-    val top = if (column) maxOf(2.0, ceil(xy.maxOf { it.second })) else 100.0
+    val top = if (column) maxOf(2.0, ceil(xy.maxOf { it.second }), ceil(goal ?: 0.0)) else 100.0
     val range = CartesianLayerRangeProvider.fixed(minX = -0.5, maxX = pts.size - 0.5, minY = 0.0, maxY = top)
     val layer = if (column) {
         rememberColumnCartesianLayer(
@@ -359,21 +366,24 @@ private fun MiniChart(title: String, pts: List<Pair<LocalDate, Double?>>, color:
         )
     }
     val fmt = DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
+    val byX = xy.toMap()
+    val chart = @Composable {
+        ScrubChartHost(
+            rememberCartesianChart(
+                layer,
+                startAxis = startAxis(top / 2),
+                bottomAxis = bottomAxis(CartesianValueFormatter { _, x, _ -> first.plusDays(x.toLong()).format(fmt) }, 4),
+                marker = rememberScrubMarker(color) { x ->
+                    "${byX[x]?.let { if (column) "%.1f$unit".format(it) else it.roundToInt().toString() } ?: "—"} · ${first.plusDays(x.toLong()).format(fmt)}"
+                },
+                decorations = listOfNotNull(goal?.let { dashedLine(it, c.secondaryLabel) }),
+            ),
+            producer, height,
+        )
+    }
+    if (title == null) return chart()
     Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
         Text(title, style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-        InsetCard {
-            val byX = xy.toMap()
-            ScrubChartHost(
-                rememberCartesianChart(
-                    layer,
-                    startAxis = startAxis(top / 2),
-                    bottomAxis = bottomAxis(CartesianValueFormatter { _, x, _ -> first.plusDays(x.toLong()).format(fmt) }, 4),
-                    marker = rememberScrubMarker(color) { x ->
-                        "${byX[x]?.let { if (column) "%.1f h".format(it) else it.roundToInt().toString() } ?: "—"} · ${first.plusDays(x.toLong()).format(fmt)}"
-                    },
-                ),
-                producer, 140.dp,
-            )
-        }
+        InsetCard { chart() }
     }
 }

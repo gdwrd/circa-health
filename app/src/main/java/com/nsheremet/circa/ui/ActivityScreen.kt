@@ -31,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberColumnCartesianLayer
 import com.patrykandpatrick.vico.compose.cartesian.rememberCartesianChart
@@ -65,7 +66,7 @@ private fun JsonElement?.str() = (this as? JsonPrimitive)?.contentOrNull
 
 private const val SLOT_S = 300.0
 
-private class Hour(val h: Int, val steps: Double, val worn: Boolean)
+internal class Hour(val h: Int, val steps: Double, val worn: Boolean)
 
 @Composable
 fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: () -> Unit = {}) {
@@ -308,7 +309,7 @@ private fun Tiles(vararg tiles: Triple<String, String, String>) {
 
 /** 24 hourly step columns (Stress's ThroughTheDay style); a ring-off hour is a short muted stub, not an empty gap. */
 @Composable
-private fun HourlySteps(rows: List<Hour>) {
+internal fun HourlySteps(rows: List<Hour>, height: Dp = 160.dp) {
     val c = AppTheme.colors
     val peak = rows.maxOfOrNull { it.steps } ?: 0.0
     val step = if (peak > 2000) 1000.0 else if (peak > 1000) 500.0 else 250.0
@@ -342,7 +343,7 @@ private fun HourlySteps(rows: List<Hour>) {
                 byX[x]?.let { "${it.steps.roundToInt()} steps · ${hour(x)}" + if (it.worn) "" else " · not worn" } ?: "—"
             },
         ),
-        producer, 160.dp,
+        producer, height,
     )
 }
 
