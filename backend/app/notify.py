@@ -178,6 +178,22 @@ def _bedtime(now: datetime, dates: set[date]) -> None:
         _add("bedtime", title, body + _because_line(noon.date(), d), now)
 
 
+def _evening(now: datetime, dates: set[date]) -> None:
+    """Once per evening, inside 2 h of the planned bedtime (report.WIND_DOWN_MIN; report imports notify); the phone
+    writes the wind-down note at this sync and shows it, this body only when nothing is written."""
+    noon = samples.midnight(now.date()) + timedelta(hours=12)
+    if now < noon:
+        noon -= timedelta(1)
+    p = tonight(noon.date())
+    if not p or _fired("evening", now, noon):
+        return
+    target = noon + timedelta(minutes=p["in_bed_by_min"])
+    if target - timedelta(hours=2) <= now < target:
+        body = "Bedtime is close. Time to wind down." if db.settings()["calm"] else \
+            f"In bed by {target:%H:%M}. Time to wind down."
+        _add("evening", "This evening", body, now, {"open": "reports"})
+
+
 def _stillup(now: datetime, dates: set[date]) -> None:
     """In bed by + 20 min until 03:00, phone screen on within 20 min, no session yet; once per evening."""
     noon = samples.midnight(now.date()) + timedelta(hours=12)
@@ -423,7 +439,7 @@ def _receipt(now: datetime, dates: set[date]) -> None:
 
 
 KINDS = ("readiness", "bedtime", "bedtime_soon", "inactivity", "strain", "checkin", "weekly", "morning", "monthly", "stillup",
-         "experiment", "workout", "receipt")
+         "experiment", "workout", "receipt", "evening")
 
 
 def evaluate(dates: set[date]) -> None:
@@ -432,7 +448,7 @@ def evaluate(dates: set[date]) -> None:
     for rule, kind in ((_bedtime, "bedtime"), (_inactivity, "inactivity"),
                        (_weekly, "weekly"), (_strain, "strain"), (_checkin, "checkin"), (_morning, "morning"),
                        (_monthly, "monthly"), (_stillup, "stillup"), (_experiment, "experiment"),
-                       (_workout, "workout"), (_receipt, "receipt")):
+                       (_workout, "workout"), (_receipt, "receipt"), (_evening, "evening")):
         if kind in muted:
             continue
         try:

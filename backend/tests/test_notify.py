@@ -861,3 +861,37 @@ def test_one_morning_notification(monkeypatch) -> None:
     notify.evaluate({D})
     notify.evaluate({D})
     assert kinds() == ["morning"]
+
+
+def eve() -> list[dict]:
+    return [n for n in notify.pending() if n["kind"] == "evening"]
+
+
+def test_evening_two_hours_before_bed_once(monkeypatch) -> None:
+    """Wake 07:00, need 450, no debt: in bed 23:15 → evening window 21:15-23:15, once per evening."""
+    db.set_settings({"wake_weekday": "07:00"})
+    at(monkeypatch, 21, 10)
+    notify.evaluate(set())
+    assert eve() == []
+    at(monkeypatch, 21, 20)
+    notify.evaluate(set())
+    at(monkeypatch, 22, 50)
+    notify.evaluate(set())
+    assert [(n["title"], n["body"], n["extra"]) for n in eve()] == \
+        [("This evening", "In bed by 23:15. Time to wind down.", {"open": "reports"})]
+    at(monkeypatch, 21, 30, day=D + timedelta(1))
+    notify.evaluate(set())
+    assert len(eve()) == 2
+
+
+def test_evening_not_after_bedtime_or_without_plan(monkeypatch) -> None:
+    at(monkeypatch, 22)
+    notify.evaluate(set())
+    assert eve() == []  # no wake time, no planned bedtime
+    db.set_settings({"wake_weekday": "07:00", "calm": "1"})
+    at(monkeypatch, 23, 20)
+    notify.evaluate(set())
+    assert eve() == []
+    at(monkeypatch, 22)
+    notify.evaluate(set())
+    assert eve()[0]["body"] == "Bedtime is close. Time to wind down."

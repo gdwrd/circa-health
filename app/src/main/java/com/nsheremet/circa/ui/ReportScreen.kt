@@ -340,6 +340,7 @@ private fun TimeCol(at: Double) =
     Text(clock(at), style = AppType.footnote.copy(fontFeatureSettings = "tnum"), color = AppTheme.colors.secondaryLabel, modifier = Modifier.width(if (clock(0.0).length > 5) 68.dp else 48.dp)) // "12:55 PM" needs more than "12:55"
 
 private fun JsonObject.t() = this["t"].num() ?: 0.0
+private fun JsonObject.isEvening() = (this["evening"] as? JsonPrimitive)?.content == "true"
 
 /** `/timeline` events in rows: an event within half an hour of a row's first event joins that row. */
 internal fun halfHours(events: List<JsonObject>): List<List<JsonObject>> =
@@ -388,9 +389,9 @@ private fun EventRow(row: List<JsonObject>) {
 
 /** An update entry; no `text` = being written (loading bars), the note cross-fades in when it lands. */
 @Composable
-private fun UpdateEntry(u: JsonObject, a: Color) {
+private fun UpdateEntry(u: JsonObject, a: Color, what: String) {
     Column {
-        NodeHeader(u["at"].num() ?: (System.currentTimeMillis() / 1000.0), "Update", a)
+        NodeHeader(u["at"].num() ?: (System.currentTimeMillis() / 1000.0), what, a)
         Crossfade(
             (u["text"] as? JsonPrimitive)?.content,
             Modifier.padding(top = AppSpace.xs).widthIn(max = 640.dp).animateContentSize(spring(stiffness = Spring.StiffnessMediumLow)),
@@ -641,9 +642,13 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
             ReportCardView(hero, Modifier.hero(), writing = writing, rail = true, morningAt = morningAt, after = (@Composable { a: Color ->
                 entries.forEachIndexed { i, (_, e) ->
                     val last = !pill && i == entries.lastIndex
-                    if (e is JsonObject) RailRow(a, false, last, 28.dp, 0.dp, dot = {
-                        Box(Modifier.size(28.dp).background(a.copy(alpha = 0.16f), CircleShape), contentAlignment = Alignment.Center) { Icon(Icons.Rounded.Update, null, tint = a, modifier = Modifier.size(16.dp)) }
-                    }) { UpdateEntry(e, a) }
+                    // DT5: the automatic evening entry is an update with a moon in sleepLight
+                    if (e is JsonObject) { val ev = e.isEvening(); val n = if (ev) c.sleepLight else a
+                        RailRow(a, false, last, 28.dp, 0.dp, dot = {
+                            Box(Modifier.size(28.dp).background(n.copy(alpha = 0.16f), CircleShape), contentAlignment = Alignment.Center) {
+                                Icon(if (ev) Icons.Rounded.NightsStay else Icons.Rounded.Update, null, tint = n, modifier = Modifier.size(16.dp))
+                            }
+                        }) { UpdateEntry(e, n, if (ev) "Evening" else "Update") } }
                     else RailRow(a, false, last, 8.dp, 10.dp, dot = { Box(Modifier.size(8.dp).background(a.copy(alpha = 0.55f), CircleShape)) }) {
                         @Suppress("UNCHECKED_CAST") EventRow(e as List<JsonObject>)
                     }
@@ -664,7 +669,9 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
                 }
             }).takeIf { entries.isNotEmpty() || pill })
         }
-        val rest = list.drop(1)
+        // DT5: the Tonight card leaves the page once the day has its evening entry.
+        val evening = updates(saved, date.toString()).any { it.isEvening() }
+        val rest = list.drop(1).filter { !(evening && it.kind == "tonight") }
         // 600 dp and wider: the small cards flow in two columns under the full-width hero.
         if (wide) item {
             Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.l)) {

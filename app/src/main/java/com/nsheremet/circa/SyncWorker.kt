@@ -561,8 +561,13 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             val open = PendingIntent.getActivity(ctx, id, intent, flags)
             // morning / weekly: the first two sentences of today's written note instead of the backend's line, when there is one
-            val note = when (o["kind"]?.jsonPrimitive?.content) { "morning" -> "today"; "weekly" -> "week"; else -> null }
-                ?.takeIf { !reportsOff(ctx) }?.let { k -> runCatching {
+            // evening: the wind-down update is written now; no entry (null, nothing new) keeps the backend's line
+            val note = if (reportsOff(ctx)) null else when (o["kind"]?.jsonPrimitive?.content) {
+                "morning" -> "today"; "weekly" -> "week"
+                "evening" -> runCatching { writeUpdate(ctx, evening = true) }.getOrNull()
+                    ?.takeIf { it["nothing_new"]?.jsonPrimitive?.content != "true" }?.get("at")?.jsonPrimitive?.content?.let { "update-$it" }
+                else -> null }
+                ?.let { k -> runCatching {
                     ((Json.parseToJsonElement(File(ctx.filesDir, "reports.json").readText()) as JsonObject)["${LocalDate.now()}/$k"] as? JsonObject)
                         ?.get("text")?.jsonPrimitive?.content
                 }.getOrNull() }
