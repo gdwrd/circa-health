@@ -103,6 +103,7 @@ fun BreatheScreen(onBack: () -> Unit) {
     var guard by remember { mutableStateOf<String?>(null) }
     var hrNote by remember { mutableStateOf<String?>(null) }
     val samples = remember { mutableStateListOf<Pair<Long, Int>>() }
+    val light = remember { mutableStateListOf<Int>() } // grows all session (PulseWave slides on growth); memory only
     var hrJob by remember { mutableStateOf<Job?>(null) }
     var startMs by remember { mutableLongStateOf(0L) }
     var endMs by remember { mutableLongStateOf(0L) }
@@ -121,7 +122,7 @@ fun BreatheScreen(onBack: () -> Unit) {
         onDispose { view.keepScreenOn = false }
     }
 
-    fun finish(n: Int) { done = n; endMs = System.currentTimeMillis(); state = FINISHED }
+    fun finish(n: Int) { done = n; endMs = System.currentTimeMillis(); state = FINISHED; light.clear() }
 
     fun begin() {
         val address = ctx.ringAddress
@@ -132,13 +133,14 @@ fun BreatheScreen(onBack: () -> Unit) {
             else -> null
         }
         if (guard != null) return
-        samples.clear(); hrNote = null; error = null
+        samples.clear(); light.clear(); hrNote = null; error = null
         startMs = System.currentTimeMillis()
         round = 1
         state = RUNNING
         hrJob = scope.launch {
+            // The ring keeps streaming past the session's end (bpm tail for the result); the wave stops with the session.
             val r = runLiveHr(ctx.applicationContext, address!!, onBpm = { samples += System.currentTimeMillis() to it },
-                durationMs = rounds * 19_000L + 15_000, stopWhenStable = false) {}
+                durationMs = rounds * 19_000L + 15_000, stopWhenStable = false, onLight = { if (state == RUNNING) light += it }) {}
             if (samples.isEmpty() && isActive) hrNote = r // runLiveHr swallows cancellation; ignore its message then
         }
     }
@@ -146,7 +148,7 @@ fun BreatheScreen(onBack: () -> Unit) {
     fun stop() {
         if (round > 1) return finish(round - 1)
         // Nothing finished yet: discard the session.
-        hrJob?.cancel(); samples.clear(); state = START
+        hrJob?.cancel(); samples.clear(); light.clear(); state = START
     }
 
     LaunchedEffect(state) {
@@ -213,24 +215,7 @@ fun BreatheScreen(onBack: () -> Unit) {
                 }
             }
             RUNNING -> {
-                item {
-                    HeroCard {
-                        // Reduce motion: fade 0.5 -> 1.0 instead of growing.
-                        Orb(if (reduce) 1f else circle.value, if (reduce) 0.5f + (circle.value - 0.6f) * 1.25f else 1f) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(phase, style = AppType.title)
-                                Text("$left", style = AppType.display)
-                            }
-                        }
-                        PhaseBar(PHASES.indexOfFirst { it.first == phase }, fill.value)
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            repeat(rounds) { Box(Modifier.size(8.dp).clip(CircleShape).background(if (it < round) c.breathe else c.emptySegment)) }
-                        }
-                        Text("Round $round of $rounds", style = AppType.subhead, color = c.secondaryLabel)
-                        val line = samples.lastOrNull()?.let { "${it.second} bpm · started at ${samples.first().second}" } ?: hrNote ?: "—"
-                        Text(line, style = AppType.subhead, color = if (samples.isEmpty() && hrNote != null) c.secondaryLabel else c.heart, textAlign = TextAlign.Center)
-                    }
-                }
+                item { BreatheRunning(phase, left, circle.value, fill.value, round, rounds, samples, hrNote, light) }
                 item {
                     InsetCard {
                         Box(Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable(onClick = ::stop).padding(horizontal = AppSpace.l), contentAlignment = Alignment.CenterStart) {
@@ -279,6 +264,33 @@ fun BreatheScreen(onBack: () -> Unit) {
                 }
             }
         }
+    }
+}
+
+/** The running session's hero card; [light] is the session's growing list of pulse readings (wave hidden while empty). */
+@Composable
+internal fun BreatheRunning(
+    phase: String, left: Int, scale: Float, fill: Float, round: Int, rounds: Int,
+    samples: List<Pair<Long, Int>>, hrNote: String?, light: List<Int>,
+) {
+    val c = AppTheme.colors
+    val reduce = LocalReduceMotion.current
+    HeroCard {
+        // Reduce motion: fade 0.5 -> 1.0 instead of growing.
+        Orb(if (reduce) 1f else scale, if (reduce) 0.5f + (scale - 0.6f) * 1.25f else 1f) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(phase, style = AppType.title)
+                Text("$left", style = AppType.display)
+            }
+        }
+        AnimatedVisibility(light.isNotEmpty()) { PulseWave(light, Modifier.fillMaxWidth().height(96.dp)) }
+        PhaseBar(PHASES.indexOfFirst { it.first == phase }, fill)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            repeat(rounds) { Box(Modifier.size(8.dp).clip(CircleShape).background(if (it < round) c.breathe else c.emptySegment)) }
+        }
+        Text("Round $round of $rounds", style = AppType.subhead, color = c.secondaryLabel)
+        val line = samples.lastOrNull()?.let { "${it.second} bpm · started at ${samples.first().second}" } ?: hrNote ?: "—"
+        Text(line, style = AppType.subhead, color = if (samples.isEmpty() && hrNote != null) c.secondaryLabel else c.heart, textAlign = TextAlign.Center)
     }
 }
 
