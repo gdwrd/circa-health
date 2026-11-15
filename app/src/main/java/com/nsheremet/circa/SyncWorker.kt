@@ -52,15 +52,19 @@ import com.nsheremet.circa.Prefs.lastSyncMs
 import com.nsheremet.circa.Prefs.ringAddress
 import com.nsheremet.circa.Prefs.vmUrl
 import com.nsheremet.circa.ui.Api
+import com.nsheremet.circa.ui.reportsOff
 import com.nsheremet.circa.widget.RingWidget
 import androidx.glance.appwidget.updateAll
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.io.File
+import java.time.LocalDate
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
 
@@ -284,11 +288,12 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 log("Server: nothing new to push")
             } else {
                 log("Server: pushed $sent samples to $vmUrl (${pusher.lastResult})")
-                runCatching { postPending() }.onSuccess { n -> if (n > 0) log("Server: showed $n notifications") }
             }
             // Every sync, not only after a push: the hash skips unchanged cards, and a model that just arrived gets its first run.
+            // Before the notifications: the morning / weekly body is the start of the note written here.
             runCatching { writeReports(applicationContext) }.onSuccess { it?.let(log) }
                 .onFailure { if (it is CancellationException) throw it; log("Reports: ${it.javaClass.simpleName}: ${it.message}") }
+            if (sent > 0) runCatching { postPending() }.onSuccess { n -> if (n > 0) log("Server: showed $n notifications") }
 
             // Widget snapshot (a failed push returned above); plain VM answers /today 404 (null), so the widget keeps "Open to sync".
             runCatching {
@@ -555,13 +560,20 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             // request code = id: each notification keeps its own extras
             val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             val open = PendingIntent.getActivity(ctx, id, intent, flags)
-            val body = o["body"]!!.jsonPrimitive.content
+            // morning / weekly: the first two sentences of today's written note instead of the backend's line, when there is one
+            val note = when (o["kind"]?.jsonPrimitive?.content) { "morning" -> "today"; "weekly" -> "week"; else -> null }
+                ?.takeIf { !reportsOff(ctx) }?.let { k -> runCatching {
+                    ((Json.parseToJsonElement(File(ctx.filesDir, "reports.json").readText()) as JsonObject)["${LocalDate.now()}/$k"] as? JsonObject)
+                        ?.get("text")?.jsonPrimitive?.content
+                }.getOrNull() }
+            val body = note?.let(::firstSentences) ?: o["body"]!!.jsonPrimitive.content
             val notif = NotificationCompat.Builder(ctx, "health")
                 .setSmallIcon(R.drawable.ic_stat_circa)
                 .setContentTitle(o["title"]!!.jsonPrimitive.content)
                 .setContentText(body)
                 .setContentIntent(open)
                 .setAutoCancel(true)
+            if (note != null) notif.setStyle(NotificationCompat.BigTextStyle().bigText(body))
             // "Was this a workout?": confirm the server's guess or dismiss it without opening the app; a tap opens the day.
             val guess = extra?.get("kind")?.jsonPrimitive?.content
             if (extra?.get("open")?.jsonPrimitive?.content == "workout" && guess != null) {

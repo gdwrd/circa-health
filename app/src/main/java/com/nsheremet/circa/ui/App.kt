@@ -90,6 +90,7 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
                 "journal" -> { go(TabItem.Today); if (link.second == null) onLinkHandled() }
                 "workout" -> go(TabItem.Activity) // Activity consumes it once it shows that day
                 "today" -> { go(TabItem.Today); onLinkHandled() }
+                "reports" -> { go(TabItem.Today); nav.navigate("reports") { launchSingleTop = true }; onLinkHandled() }
                 null -> {}
                 else -> onLinkHandled()
             }

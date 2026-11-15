@@ -246,7 +246,7 @@ def _weekly(now: datetime, dates: set[date]) -> None:
     sleeps = [r for r in rows if r["sleep_score"] is not None]
     if sleeps:
         body += f" Best night: {max(sleeps, key=lambda r: r['sleep_score'])['date']:%a}."
-    _add("weekly", "Your week", body, now, {"open": "trends"})
+    _add("weekly", "Your week", body, now, {"open": "reports"})
 
 
 def _monthly(now: datetime, dates: set[date]) -> None:
@@ -284,7 +284,7 @@ def _duration(minutes: float) -> str:
 
 
 def _morning(now: datetime, dates: set[date]) -> None:
-    """Once per day, 30 min after today's night ended, 05:00-14:00 local; tap opens the Sleep tab."""
+    """Once per day, 30 min after today's night ended, 05:00-14:00 local; tap opens Reports (Today in guess-first mode)."""
     row = next(iter(db.days(now.date(), now.date())), None)
     n = row and row["c"].get("session")
     asleep = row and row["inputs"].get("sleep_min")
@@ -298,13 +298,13 @@ def _morning(now: datetime, dates: set[date]) -> None:
         return
     if db.settings()["calm"]:  # calm mode: the readiness word, no scores
         ready = row["readiness_score"]
-        _add("morning", "Last night" if ready is None else _word(ready), body, now, {"open": "sleep"})
+        _add("morning", "Last night" if ready is None else _word(ready), body, now, {"open": "reports"})
         return
     if row["readiness_score"] is not None:
         body += f" · Readiness {row['readiness_score']}"
     if score is not None and score < 70:
         body += _because_line(now.date() - timedelta(1), now.date())
-    _add("morning", "Last night" + ("" if score is None else f" · Sleep {score}"), body, now, {"open": "sleep"})
+    _add("morning", "Last night" + ("" if score is None else f" · Sleep {score}"), body, now, {"open": "reports"})
 
 
 def explain(d: date) -> list[str]:

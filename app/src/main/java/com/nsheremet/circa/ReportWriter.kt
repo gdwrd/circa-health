@@ -14,6 +14,8 @@ import com.nsheremet.circa.Prefs.reportWriter
 import com.nsheremet.circa.ui.Api
 import com.nsheremet.circa.ui.checkDownload
 import com.nsheremet.circa.ui.reportModel
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -101,12 +103,20 @@ internal fun checkedNote(reply: String, facts: List<String>, advice: List<String
 internal fun keepDays(reports: Map<String, JsonElement>, date: LocalDate) =
     reports.filterKeys { it.substringBefore('/') >= date.minusDays(13).toString() }
 
+/** The first two sentences of [text]: a notification body. */
+internal fun firstSentences(text: String): String = text.trim().split(Regex("(?<=[.!?])\\s+")).take(2).joinToString(" ")
+
+// One writer at a time: the Reports page and a sync may both start one; the second waits, then finds nothing to write.
+private val writing = Mutex()
+
 /**
  * Writes the notes of today's `/report` cards whose hash changed into `filesDir/reports.json`
  * (`{"date/kind": {"hash", "text"}}`; text is the card's fallback when a check failed).
  * Returns the Sync log line, or null when the writer is off, the model is missing or nothing changed. Blocks for seconds a card.
  */
-internal suspend fun writeReports(ctx: Context): String? {
+internal suspend fun writeReports(ctx: Context): String? = writing.withLock { writeLocked(ctx) }
+
+private suspend fun writeLocked(ctx: Context): String? {
     if (!ctx.reportWriter) return null
     runCatching { checkDownload(ctx, ctx.getSystemService(DownloadManager::class.java)) } // a download that ended while Settings was closed
     val model = reportModel(ctx)

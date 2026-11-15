@@ -172,7 +172,7 @@ def test_weekly_fires_monday_once(monkeypatch) -> None:
     notify.evaluate(set())
     (n,) = notify.pending()
     assert n["title"] == "Your week" and n["body"] == "Sleep 84 · Readiness 70 · Activity 60 avg. Best night: Mon."
-    assert n["extra"] == {"open": "trends"}
+    assert n["extra"] == {"open": "reports"}
     at(monkeypatch, 10, day=D + timedelta(1))  # Tuesday
     notify.evaluate(set())
     assert kinds() == ["weekly"]
@@ -307,7 +307,7 @@ def test_morning_fires_once_with_extra(monkeypatch) -> None:
     notify.evaluate(set())
     (n,) = notify.pending()
     assert n["kind"] == "morning" and n["title"] == "Last night · Sleep 78"
-    assert n["body"] == "7 h 15 min asleep · Readiness 71" and n["extra"] == {"open": "sleep"}
+    assert n["body"] == "7 h 15 min asleep · Readiness 71" and n["extra"] == {"open": "reports"}
 
 
 def test_morning_not_after_two_pm(monkeypatch) -> None:
@@ -685,7 +685,7 @@ def test_calm_morning_band_word_no_score(monkeypatch) -> None:
         notify.evaluate(set())
         (n,) = notify.pending()
         assert (n["kind"], n["title"], n["body"]) == ("morning", title, "7 h 15 min asleep")
-        assert n["extra"] == {"open": "sleep"}
+        assert n["extra"] == {"open": "reports"}
         with closing(db.connect()) as con, con:
             con.execute("DELETE FROM notifications")  # test db: lets the once-a-day rule fire for the next score
 

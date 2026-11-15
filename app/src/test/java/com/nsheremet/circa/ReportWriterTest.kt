@@ -22,6 +22,11 @@ class ReportChecksTest {
     @Test fun oneIsIgnored() = assertTrue(numbersOk("One of your best nights.", facts, advice))
     @Test fun insideWords() = assertTrue(numbersOk("Someone often feels tension.", facts, advice))
 
+    @Test fun firstTwoSentences() {
+        assertEquals("You slept 7 h 8 min. HRV was 43.5 ms!", firstSentences(" You slept 7 h 8 min. HRV was 43.5 ms! Why not rest? "))
+        assertEquals("One line, no end", firstSentences("One line, no end"))
+    }
+
     @Test fun sentences() {
         assertEquals(3, sentenceCount("You slept 7 h 8 min. HRV was 43.5 ms! Why not rest?"))
         assertEquals(1, sentenceCount("You fell asleep at 01:21, 9.5 min late."))
