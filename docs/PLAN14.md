@@ -1,6 +1,6 @@
 # Circa v16: mind
 
-Status: plan (user, 2026-11-15). Nothing built. Items MH1 to MH13 are in the ledger; each `###` item below is one
+Status: plan (user, 2026-11-15). Nothing built. Items MH0 to MH13 are in the ledger; each `###` item below is one
 ledger item / one session. Builds on v10 (`docs/PLAN10.md`: Right now, moments, reply card, dose timing) and v9
 (things to mark, `insights.before`).
 
@@ -14,9 +14,13 @@ ledger item / one session. Builds on v10 (`docs/PLAN10.md`: Right now, moments, 
   - **No new screen and no new tab.** The check-in stays in Today's Right now card and the check-in sheet, the dose
     comparison goes on Heart's Medication card, charts go on Trends, switches in Settings.
   - **No new table.** Ratings are samples (as moments are), day tags are journal kinds, dose steps are one setting.
-  - **The old four feelings stay** (tired, flat, wired, good): the reply card, the notes and backlog items SL1 / SL2
-    read them. Six body-state tags join them. Whether flat / wired / good are dropped in favour of the scales is
-    decided after two weeks of use.
+  - **The old four feelings go** (user, 2026-11-15: "let's drop old one"). Tired, flat, wired and good leave the
+    app; the two scales and six body-state tags replace them. Their stored samples and notes are kept and still show
+    on earlier days. The reply card opens for a tag, for Energy 1 or 2 (it keeps the `now_tired` note), for Energy 5
+    (`now_wired`) and for Mood 1 or 2 (new note `now_low`). Backlog items SL1 / SL2 now count a day with an Energy
+    1 or 2 tap as well as an old tired tap.
+  - **The dose notification has a "Taken" button** (user, 2026-11-15).
+  - **Settings is redesigned** (user, 2026-11-15): a root list of groups, each opening its own page (MH0).
   - **Shutdown / meltdown is a thing to mark**, not new code: the user names it in Settings › Things to mark. The
     widget, `/marks` ("what came before") and backlog item MM4 (heads-up) already exist for marks.
   - **The hyperfocus nudge already exists**: `notify._inactivity` ("No steps in the last 2 hours", 08:00 to 20:00).
@@ -29,6 +33,10 @@ ledger item / one session. Builds on v10 (`docs/PLAN10.md`: Right now, moments, 
   - The on-phone model never words mood, load or questionnaire findings: those are fixed backend sentences
     (`quiet`-style lines), because the v12 trial showed the model hardens meanings.
   - Every tap is one tap and takes effect at once; no Save buttons, no required fields.
+  - **Every UI change must look designed by Apple's designers, with our own character** (user, 2026-11-15, and the
+    ledger's Apple-style UI direction): `ui/Theme.kt` tokens only, inset cards, hairlines, spring motion, the app's
+    tinted icon chips; never a default Material look. Each app item is checked in light, dark and at 360 dp with
+    font 1.3, from screenshots the reviewer reads.
   - The data stays in `circa.db` on the homelab. It leaves only through the export the user starts.
   - Scores (Sleep / Readiness / Activity) do not change; old days are not rescored.
 
@@ -57,9 +65,10 @@ ledger item / one session. Builds on v10 (`docs/PLAN10.md`: Right now, moments, 
   values above 5). Metrics: `mood_energy` (1 flat … 5 wired), `mood_valence` (1 bad … 5 good), `rate_focus`,
   `rate_appetite`, `rate_crash` (1 none … 5 strong). A day's value is the mean of its mood samples and the latest of
   each rating.
-- **Feelings**: `scoring.FEELINGS` becomes an explicit tuple of ten: tired, flat, wired, good, overstimulated, numb,
-  anxious, irritable, focused, foggy. All are `moment_<kind>` samples and get the reply card and a `now_<feeling>`
-  note as the four do today.
+- **Feelings**: `scoring.FEELINGS` becomes an explicit tuple of six: overstimulated, numb, anxious, irritable,
+  focused, foggy. All are `moment_<kind>` samples with the reply card and a `now_<feeling>` note. The old four move
+  to `scoring.OLD_FEELINGS`: no longer offered, still read for earlier days (`_moments`, the timeline, notes).
+  Nothing is deleted from `circa.db`.
 - **Load** are journal kinds `load_social`, `load_sensory`, `load_masking` (day-level switches, one row a day).
 - **Dose steps**: setting `medication_doses`, a JSON list `[{"from": "2026-10-20", "mg": 30}, …]`, ascending by
   date; the dose of a day is the last step that starts on or before it. Setting `medication_name` (free text, for
@@ -69,13 +78,36 @@ ledger item / one session. Builds on v10 (`docs/PLAN10.md`: Right now, moments, 
 
 ## Phase 1: record and show (release MH10)
 
-### MH1 Backend: scales, six more feelings, load kinds, `GET /mind`
+### MH0 App: Settings as groups with their own pages
 
-- Files: `backend/app/scoring.py`, `main.py`, `db.py`, `backend/tests/test_mind.py` (new); `ingest` only if it
-  filters metric names.
-- `scoring.SCALES` (the five metrics above), `FEELINGS` as the explicit ten, `MOMENTS` = feelings + coffee, alcohol,
-  meal. Every reader of `FEELINGS` / `MOMENTS` keeps working (`main._moments`, `/today.now.notes`, the `now_` note
-  check, `notify._checkin`).
+- Files: `ui/SettingsScreen.kt`, `ui/Theme.kt` (tokens for the group icon tiles), `app/src/test/.../ui/SettingsGearTest.kt`
+  if it breaks. Can run beside MH1. Before every later item that adds a Settings row.
+- Root page: the large "Settings" title, then one status card with character (the ring's name, battery, last sync,
+  drawn with the app's ring motif, not a plain row), then the groups as inset rows: a tinted rounded-square icon
+  tile, the name, a short current value on the right, a chevron.
+- Groups and what moves into each (every existing row keeps its behaviour and text):
+  - **Ring** — today's Ring section, Sync log, Ring lab, firmware.
+  - **You** — birth year, goals, wake times, Workouts.
+  - **Medication** — today's section (MH5 adds Name and Dose steps).
+  - **Mind** — Things to mark (MH9 adds the questionnaire).
+  - **Notifications** — every per-kind switch, grouped Morning / Day / Evening.
+  - **Phone** — Phone and Driving.
+  - **Reports** — today's section.
+  - **Data** — exports (MH6 adds the titration summary).
+- Each group is a page inside `SettingsScreen` (a `page` state, as `SyncLogScreen` already is; no new nav route):
+  large collapsing title, back chevron, system Back returns to the root, the slide the app already uses between
+  screens. The section footers stay as the explaining text.
+- Check: `.\gradlew.bat :app:compileDebugKotlin`, `.\gradlew.bat :app:testDebugUnitTest`; emulator: every group
+  opened, one row changed in each and found changed after reopening, Back from each; screenshots light, dark,
+  360 dp with font 1.3.
+
+### MH1 Backend: scales, six feelings, load kinds, `GET /mind`
+
+- Files: `backend/app/scoring.py`, `main.py`, `db.py`, `notify.py` only if a reader of `FEELINGS` breaks,
+  `backend/tests/test_mind.py` (new); `ingest` only if it filters metric names.
+- `scoring.SCALES` (the five metrics above), `FEELINGS` as the six, `OLD_FEELINGS` as the four, `MOMENTS` =
+  feelings + old feelings + coffee, alcohol, meal (so earlier days still read). The `now_` note check accepts the
+  six, `tired`, `wired` and `low`. `/today.now.notes` returns those. `notify._checkin` counts a scale tap as a moment.
 - `db.KINDS` gains the three `load_*` kinds; they stay out of `insights.NIGHT_KINDS` for now.
 - `GET /mind?days=90` → `{"days": [{"date", "energy", "valence", "focus", "appetite", "crash", "feelings": {kind: n},
   "load": [kind, …], "mg"}], "phq": [{"ts", "total"}]}`; a day with nothing logged has nulls and empty lists.
@@ -99,13 +131,16 @@ ledger item / one session. Builds on v10 (`docs/PLAN10.md`: Right now, moments, 
 
 - Files: `ui/TodayScreen.kt`, `ui/Theme.kt` (colour tokens for the six new feelings and the two scales). After MH1;
   can run beside MH2.
-- "I feel" becomes: two rows of five dots, **Energy** (flat … wired) and **Mood** (low … good), then the ten
-  feelings as wrapping chips (the four old ones first, same icons and colours). A tap on a dot or chip logs it now;
-  the existing "… · 17:32 · Undo" line and the long-press "earlier time" work for all of them. A dot pushed again
-  the same day adds a sample; it does not replace one.
+- "I feel" becomes: two rows of five dots, **Energy** (flat … wired) and **Mood** (low … good), then the six
+  feelings as tiles with their own icon and colour. The four old tiles are removed. A tap on a dot or tile logs it
+  now; the existing "… · 17:32 · Undo" line and the long-press "earlier time" work for all of them. A dot pushed
+  again the same day adds a sample; it does not replace one.
 - Scale samples go through `pushSample` (as `mark()` does) with the value 1 to 5, cancel 9.
-- The reply card opens for every feeling, as today. `DaySoFar` shows the new feelings; scale taps show as one line
+- The reply card opens for a feeling tile, Energy 1 / 2 (note `now_tired`), Energy 5 (`now_wired`) and Mood 1 / 2
+  (`now_low`). `DaySoFar` shows the new feelings, the old ones on earlier days, and scale taps as one line
   ("Energy 2 · Mood 4") when both fall within the same five minutes.
+- The dots are the item's design work: they must read as ours (the accent of the scale filling up to the tapped
+  dot, a spring pop as `NowTile` has), not as a Material slider or radio row.
 - Accessibility: each dot is a button with a content description ("Energy 2 of 5"); 48 dp targets; colours from
   tokens only.
 - Check: `.\gradlew.bat :app:compileDebugKotlin`, `.\gradlew.bat :app:testDebugUnitTest` (`Theme.kt` changes);
@@ -144,14 +179,19 @@ ledger item / one session. Builds on v10 (`docs/PLAN10.md`: Right now, moments, 
 
 ### MH7 Backend + Settings: dose and meal nudges
 
-- Files: `backend/app/notify.py`, `backend/tests/test_notify.py`, `ui/SettingsScreen.kt`. After MH6 (same app file).
+- Files: `backend/app/notify.py`, `backend/tests/test_notify.py`, `ui/SettingsScreen.kt`, `SyncWorker.kt` (the
+  notification's action only), `DoseActionReceiver.kt` (new, as `WorkoutActionReceiver`), `AndroidManifest.xml`.
+  After MH6 (same app file).
 - `dose` ("Dose logged?", "Nothing logged today. Usual time 08:00."): `medication_started` set, no `medication` row
   today, 60 min or more after `medication_time`, before 14:00, once a day. It never says to take anything.
+- The `dose` notification has one button, **Taken**: it adds a `medication` journal row at the minute of the press
+  (`Api.addJournal`) and dismisses the notification; a failed write keeps the notification and shows "Not saved".
 - `meal` ("Nothing eaten since your dose?", "No meal logged since 08:05."): a dose today, 4 h or more since it, still
   inside the active window, no `moment_meal` since the dose, once a day.
 - Both in `KINDS` and `evaluate`, each with a Settings switch (RO1's pattern). They arrive with the next sync, so
-  they can be late; accepted, as for every other kind. No notification action button in this item.
-- Check: backend check; `.\gradlew.bat :app:compileDebugKotlin`.
+  they can be late; accepted, as for every other kind.
+- Check: backend check; `.\gradlew.bat :app:compileDebugKotlin`; emulator: the notification shown, Taken pressed,
+  the dose on Today.
 
 ### MH8 Backend: the questionnaire
 
@@ -172,7 +212,7 @@ ledger item / one session. Builds on v10 (`docs/PLAN10.md`: Right now, moments, 
 - When question 9 is above 0, the result page shows first, above everything: "You marked thoughts of being better
   off dead or of hurting yourself. Please talk to your doctor or someone you trust today. If you might act on them,
   call your local emergency number now." with a link to `findahelpline.com`. This text is never a notification.
-- Settings › a "Mind" section: switch "Depression questionnaire every two weeks" (setting `phq`), row "Answer now".
+- Settings › Mind: switch "Depression questionnaire every two weeks" (setting `phq`), row "Answer now".
   The `phq` notification opens the sheet.
 - Trends › Mood card: each total as a labelled point under the lines.
 - Check: compile; emulator: a full run, Back, leaving half way (nothing stored), question 9 above 0, the trend point.
@@ -213,7 +253,7 @@ ledger item / one session. Builds on v10 (`docs/PLAN10.md`: Right now, moments, 
 ## Not doing
 
 - Meditation (user: later). A new tab or screen. Location, calendar, microphone, typing or app-by-app usage.
-- Water reminders (nothing measures it). A notification action button to log a dose.
+- Water reminders (nothing measures it). Deleting the old feelings' samples or notes.
 - Other questionnaires (GAD-7, ASRS), storing single PHQ answers, sending anything to a clinician by itself.
 - Any advice on dose, timing, or stopping a medication. Weight, pulse-on-demand or blood pressure reminders.
 - A change to the on-phone model's prompts.
