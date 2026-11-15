@@ -60,7 +60,10 @@ class HeartWaveTest {
 
     // Saved for a look, not compared: build/reports/pulse-wave/measure-<light|dark>.png
     private fun render(dark: Boolean) {
+        // the wave's frame loop never idles; drive the clock so the strip has played out
+        rule.mainClock.autoAdvance = false
         show(beat(200), dark)
+        rule.mainClock.advanceTimeBy(6_000)
         rule.onNodeWithContentDescription("Pulse wave").assertExists()
         val out = File("build/reports/pulse-wave/measure-${if (dark) "dark" else "light"}.png").absoluteFile
         out.parentFile!!.mkdirs()
