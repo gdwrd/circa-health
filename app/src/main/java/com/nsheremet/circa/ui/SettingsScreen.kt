@@ -322,49 +322,15 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var storedTick by remember { mutableIntStateOf(0) }
     LaunchedEffect(storedTick) { stored = withContext(Dispatchers.IO) { SampleStore.get(ctx).stats() } }
 
-    // The Data page's files: [load] fetches the data and returns the writer (null: could not load); the file goes
-    // into cacheDir/share/[name], then the system share sheet.
     var sharing by remember { mutableStateOf(false) }
     fun share(name: String, mime: String, load: suspend () -> ((File) -> Unit)?) {
         haptic.tick()
-        sharing = true
-        activity.lifecycleScope.launch {
-            val uri = load()?.let { write ->
-                withContext(Dispatchers.IO) {
-                    runCatching {
-                        val file = File(File(ctx.cacheDir, "share").apply { mkdirs() }, name)
-                        write(file)
-                        FileProvider.getUriForFile(ctx, ctx.packageName + ".share", file)
-                    }.onFailure { Log.w("Settings", "Share failed", it) }.getOrNull()
-                }
-            }
-            sharing = false
-            if (uri == null) Toast.makeText(ctx, "Could not load your data", Toast.LENGTH_SHORT).show()
-            else ctx.startActivity(Intent.createChooser(
-                Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    .apply { clipData = ClipData.newRawUri(null, uri) }, // the grant travels with the chooser only through ClipData
-                null,
-            ))
-        }
+        shareFile(activity, name, mime, { sharing = it }, load)
     }
 
     // MH0: null is the root list of groups; a group's name opens its page (pages, not nav routes, as Sync log is).
     var page by rememberSaveable { mutableStateOf<String?>(null) }
     BackHandler(enabled = page != null) { page = null }
-    var phqOpen by remember { mutableStateOf(false) }
-    if (phqOpen) PhqSheet { phqOpen = false }
-    // ED6: questionnaire results (ts s, total), newest first; read again when Mind opens or the sheet closes.
-    fun phqList(j: JsonObject?) = (j?.get("phq") as? JsonArray)?.mapNotNull { o ->
-        val p = o as? JsonObject ?: return@mapNotNull null
-        ((p["ts"] as? JsonPrimitive)?.doubleOrNull ?: return@mapNotNull null) to ((p["total"] as? JsonPrimitive)?.doubleOrNull ?: return@mapNotNull null)
-    }?.reversed()
-    var phq by remember { mutableStateOf(emptyList<Pair<Double, Double>>()) }
-    var removePhq by remember { mutableStateOf<Pair<Double, Double>?>(null) }
-    LaunchedEffect(page, phqOpen) { if (page == "Mind" && !phqOpen) phqList(Api.mind(ctx, 90))?.let { phq = it } }
-    fun phqLabel(r: Pair<Double, Double>): Pair<String, String> {
-        val d = java.time.Instant.ofEpochMilli((r.first * 1000).toLong()).atZone(java.time.ZoneId.systemDefault()).toLocalDate()
-        return d.format(DateTimeFormatter.ofPattern(if (d.year == LocalDate.now().year) "d MMM" else "d MMM yyyy", Locale.getDefault())) to "${r.second.toInt()} of 27"
-    }
 
     if (showLog) return SyncLogScreen { showLog = false }
     if (showLab) return RingLabScreen { showLab = false }
@@ -625,7 +591,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             }
             if (started.isNotEmpty()) item {
                 val steps = Api.doseSteps(s)
-                Section("Dose steps", "A day counts under the latest step on or before it. Heart's Medication card shows each step side by side.") {
+                Section("Dose steps", "A day counts under the latest step on or before it. Body › Mind shows each step side by side.") {
                     val fmt = DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())
                     steps.forEach { st ->
                         Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(start = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
@@ -665,17 +631,6 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                             haptic.tick()
                             patchMed("phq", JsonPrimitive(if (on) "1" else ""))
                         }
-                    }
-                    Hairline(Modifier.padding(start = AppSpace.l))
-                    ChevronRow("Answer now", "") { haptic.tick(); phqOpen = true }
-                }
-            }
-            if (phq.isNotEmpty()) item {
-                Section("Results", "Tap a result to remove it. To correct one, remove it and answer again.") {
-                    phq.forEachIndexed { i, r ->
-                        if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
-                        val (day, total) = phqLabel(r)
-                        Box(Modifier.clickable(onClickLabel = "Remove") { haptic.tick(); removePhq = r }) { ValueRow(day, total) }
                     }
                 }
             }
@@ -813,12 +768,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             item {
                 Section(null, "Dose steps, averages by dose, blood pressure by step and the last 14 days of mood on one page, for your prescriber.") {
                     ButtonRow("Titration summary (PDF)", enabled = !sharing) {
-                        share("circa-titration.pdf", "application/pdf") {
-                            val m = ((Api.insights(ctx) as? JsonObject)?.get("kinds") as? JsonObject)?.get("medication") as? JsonObject
-                            val j = Api.journal(ctx, ChronoUnit.DAYS.between(first.from, LocalDate.now()).toInt() + 1) as? JsonObject
-                            val mind = Api.mind(ctx, 14)
-                            if (m == null || j == null || mind == null) null else { f: File -> writeTitration(ctx, f, s, m, j, mind) }
-                        }
+                        share("circa-titration.pdf", "application/pdf") { loadTitration(ctx, s, first) }
                     }
                 }
             }
@@ -973,34 +923,6 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         )
     }
 
-    removePhq?.let { r ->
-        val (day, total) = phqLabel(r)
-        AlertDialog(
-            onDismissRequest = { removePhq = null },
-            containerColor = c.card,
-            title = { Text("Remove this result?") },
-            text = { Text("$day · $total", style = AppType.body) },
-            confirmButton = {
-                TextButton({
-                    removePhq = null
-                    activity.lifecycleScope.launch {
-                        val left = phqList(Api.deletePhq(ctx, r.first))
-                        if (left == null) Toast.makeText(ctx, "Could not remove the result", Toast.LENGTH_SHORT).show()
-                        else {
-                            phq = left
-                            // The phone's copy too, or "Send all history" would push it back.
-                            withContext(Dispatchers.IO) {
-                                SampleStore.get(ctx).writableDatabase.delete("samples", "name IN ('phq9_total', 'phq9_item9') AND ts = ?",
-                                    arrayOf(Math.round(r.first * 1000).toString()))
-                            }
-                        }
-                    }
-                }) { Text("Remove", color = c.badText) }
-            },
-            dismissButton = { TextButton({ removePhq = null }) { Text("Cancel", color = c.tint) } },
-        )
-    }
-
     if (pickStart) StartDateDialog((med?.get("medication_started") as? JsonPrimitive)?.contentOrNull.orEmpty(), { pickStart = false }) {
         pickStart = false
         patchMed("medication_started", JsonPrimitive(it))
@@ -1128,6 +1050,40 @@ private fun writeReport(ctx: Context, csv: String, out: File) = onePage(ctx, out
  * MH6: one A4 page for the prescriber from GET /settings, `insights.kinds.medication`, GET /journal (since the first
  * step) and GET /mind?days=14. Only what was logged: no advice, no verdicts. A section with nothing to show is left out.
  */
+/**
+ * A shared file (Settings › Data, Body › Mind): [load] fetches the data and returns the writer (null: could not load);
+ * the file goes into cacheDir/share/[name], then the system share sheet. [busy] is true while it runs.
+ */
+internal fun shareFile(activity: ComponentActivity, name: String, mime: String, busy: (Boolean) -> Unit, load: suspend () -> ((File) -> Unit)?) {
+    busy(true)
+    activity.lifecycleScope.launch {
+        val uri = load()?.let { write ->
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val file = File(File(activity.cacheDir, "share").apply { mkdirs() }, name)
+                    write(file)
+                    FileProvider.getUriForFile(activity, activity.packageName + ".share", file)
+                }.onFailure { Log.w("Settings", "Share failed", it) }.getOrNull()
+            }
+        }
+        busy(false)
+        if (uri == null) Toast.makeText(activity, "Could not load your data", Toast.LENGTH_SHORT).show()
+        else activity.startActivity(Intent.createChooser(
+            Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                .apply { clipData = ClipData.newRawUri(null, uri) }, // the grant travels with the chooser only through ClipData
+            null,
+        ))
+    }
+}
+
+/** The titration summary's data from [first] (the first dose step) on; the writer, or null when a call failed. */
+internal suspend fun loadTitration(ctx: Context, s: JsonObject, first: Api.DoseStep): ((File) -> Unit)? {
+    val m = ((Api.insights(ctx) as? JsonObject)?.get("kinds") as? JsonObject)?.get("medication") as? JsonObject
+    val j = Api.journal(ctx, ChronoUnit.DAYS.between(first.from, LocalDate.now()).toInt() + 1) as? JsonObject
+    val mind = Api.mind(ctx, 14)
+    return if (m == null || j == null || mind == null) null else { f: File -> writeTitration(ctx, f, s, m, j, mind) }
+}
+
 private fun writeTitration(ctx: Context, out: File, settings: JsonObject, medication: JsonObject, journal: JsonObject, mind: JsonObject) = onePage(ctx, out) {
     fun str(o: JsonObject, k: String) = (o[k] as? JsonPrimitive)?.contentOrNull
     val today = LocalDate.now()

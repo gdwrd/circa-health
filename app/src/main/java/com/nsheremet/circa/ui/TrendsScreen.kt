@@ -14,9 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.ui.graphics.toArgb
-import com.patrykandpatrick.vico.compose.common.component.rememberShapeComponent
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
@@ -62,8 +59,6 @@ import com.patrykandpatrick.vico.core.cartesian.data.CartesianValueFormatter
 import com.patrykandpatrick.vico.core.cartesian.data.columnSeries
 import com.patrykandpatrick.vico.core.cartesian.data.lineSeries
 import com.patrykandpatrick.vico.core.cartesian.layer.CartesianLayer
-import com.patrykandpatrick.vico.core.cartesian.CartesianDrawingContext
-import com.patrykandpatrick.vico.core.cartesian.decoration.Decoration
 import com.patrykandpatrick.vico.core.cartesian.layer.ColumnCartesianLayer
 import com.patrykandpatrick.vico.core.cartesian.layer.LineCartesianLayer
 import com.patrykandpatrick.vico.core.common.shape.CorneredShape
@@ -147,8 +142,6 @@ fun TrendsScreen(backend: Boolean?, openMonth: Boolean, openInsights: Boolean = 
     var loaded by remember { mutableStateOf(false) }
     var journal by remember { mutableStateOf<List<Pair<LocalDate, String>>>(emptyList()) }
     var week by remember { mutableStateOf<JsonObject?>(null) }
-    var mind by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
-    var phq by remember { mutableStateOf<List<Pair<Long, Int>>>(emptyList()) } // questionnaire totals: (epoch s, total)
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
     suspend fun load() {
@@ -159,10 +152,6 @@ fun TrendsScreen(backend: Boolean?, openMonth: Boolean, openInsights: Boolean = 
             }
         }.getOrNull()?.let { journal = it }
         runCatching { parse(Api.trends(ctx, m.key, days), m.div) }.getOrNull()?.let { data = it }
-        Api.mind(ctx, days)?.let {
-            mind = (it["days"] as? JsonArray)?.mapNotNull { d -> d.obj() }.orEmpty()
-            phq = (it["phq"] as? JsonArray)?.mapNotNull { p -> p.obj()?.let { o -> o["ts"].num()?.let { t -> t.toLong() to (o["total"].num() ?: return@mapNotNull null).toInt() } } }.orEmpty()
-        }
     }
     LaunchedEffect(m, days) {
         loaded = false
@@ -243,105 +232,6 @@ fun TrendsScreen(backend: Boolean?, openMonth: Boolean, openInsights: Boolean = 
                     )
                 }
             }
-        }
-        // Shown only once there is a check-in in the range; a range without one shows nothing.
-        if (phq.isNotEmpty() || mind.any { it["energy"].num() != null || it["valence"].num() != null }) item { androidx.compose.runtime.key(days) { MoodCard(mind, phq) } }
-    }
-}
-
-/**
- * Energy and mood per day (1..5) as two lines over [days] (oldest first); days without a check-in are gaps; dose-step changes are vertical lines.
- * Questionnaire totals ([phq]: epoch s, total) sit as labelled points in a lane under the lines (y 0..1, no axis label).
- */
-@Composable
-private fun MoodCard(days: List<JsonObject>, phq: List<Pair<Long, Int>>) {
-    val c = AppTheme.colors
-    val first = day(days.firstOrNull()?.get("date")) ?: return
-    val fmt = DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
-    val zone = java.time.ZoneId.systemDefault()
-    val points = phq.map { (ts, total) -> (java.time.Instant.ofEpochSecond(ts).atZone(zone).toLocalDate().toEpochDay() - first.toEpochDay()).toDouble() to total }
-        .filter { it.first >= 0 && it.first < days.size }
-        .sortedBy { it.first }.associate { it }.toList() // one point a day: its latest total (the backend lists them by time)
-    val minY = if (points.isEmpty()) 1.0 else 0.0
-    // Runs of consecutive days with a value: each run is its own series, so a missing day breaks the line.
-    fun runs(k: String) = days.indices.mapNotNull { i -> days[i][k].num()?.let { i.toDouble() to it } }
-        .fold(mutableListOf<MutableList<Pair<Double, Double>>>()) { acc, p -> acc.apply { if (lastOrNull()?.last()?.first == p.first - 1) last() += p else add(mutableListOf(p)) } }
-    val energy = runs("energy")
-    val mood = runs("valence")
-    val steps = days.indices.filter { i -> i > 0 && days[i]["mg"].num().let { it != null && it != days[i - 1]["mg"].num() } }
-    val producer = remember { CartesianChartModelProducer() }
-    LaunchedEffect(days) { producer.runTransaction { lineSeries { (energy + mood).forEach { r -> series(r.map { it.first }, r.map { it.second }) } } } }
-    @Composable
-    fun scaleLine(color: Color) = LineCartesianLayer.rememberLine(
-        fill = LineCartesianLayer.LineFill.single(fill(color)),
-        stroke = LineCartesianLayer.LineStroke.Continuous(thicknessDp = 2.5f),
-        // A lone day has no segment to draw: the dot keeps it visible.
-        pointProvider = LineCartesianLayer.PointProvider.single(LineCartesianLayer.Point(rememberShapeComponent(fill(color), CorneredShape.Pill), 6f)),
-    )
-    val eLine = scaleLine(c.energy)
-    val mLine = scaleLine(c.mood)
-    InsetCard {
-        Text("Mood", style = AppType.headline, modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.l))
-        Text("${first.format(fmt)} – ${first.plusDays(days.size - 1L).format(fmt)} · 1 to 5", style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.l))
-        Row(Modifier.padding(start = AppSpace.l, top = AppSpace.s), horizontalArrangement = Arrangement.spacedBy(AppSpace.m), verticalAlignment = Alignment.CenterVertically) {
-            listOf("Energy" to c.energy, "Mood" to c.mood).forEach { (name, col) ->
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
-                    Box(Modifier.size(8.dp).clip(CircleShape).background(col))
-                    Text(name, style = AppType.footnote, color = c.secondaryLabel)
-                }
-            }
-            if (steps.isNotEmpty()) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
-                Box(Modifier.size(width = 2.dp, height = 12.dp).background(c.pill))
-                Text("Dose step", style = AppType.footnote, color = c.secondaryLabel)
-            }
-            if (points.isNotEmpty()) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
-                Box(Modifier.size(8.dp).clip(CircleShape).background(c.mind))
-                Text("PHQ-9", style = AppType.footnote, color = c.secondaryLabel)
-            }
-        }
-        ScrubChartHost(
-            rememberCartesianChart(
-                rememberLineCartesianLayer(
-                    LineCartesianLayer.LineProvider.series(energy.map { eLine } + mood.map { mLine }),
-                    rangeProvider = CartesianLayerRangeProvider.fixed(minX = -0.5, maxX = days.size.toDouble(), minY = minY, maxY = 5.0),
-                ),
-                startAxis = startAxis(1.0, CartesianValueFormatter { _, y, _ -> if (y < 1) " " else y.roundToInt().toString() }),
-                bottomAxis = bottomAxis(CartesianValueFormatter { _, x, _ -> first.plusDays(x.toLong()).format(fmt) }, if (days.size > 31) 15 else 7),
-                marker = rememberScrubMarker(c.energy) { x ->
-                    val d = days.getOrNull(x.roundToInt())
-                    (listOfNotNull(
-                        d?.get("energy").num()?.let { "Energy %.1f".format(it) }, d?.get("valence").num()?.let { "Mood %.1f".format(it) },
-                    ) + first.plusDays(x.toLong()).format(fmt)).joinToString(" · ")
-                },
-                decorations = listOf(DoseWindows(steps.map { it.toDouble() to it.toDouble() }, c.pill.toArgb(), alpha = 0), PhqPoints(points, c.mind.toArgb())),
-            ),
-            producer, 200.dp,
-        )
-        // No-break spaces: a line breaks only after a "·", never inside one step.
-        if (steps.isNotEmpty()) Text(
-            steps.joinToString("\u00A0· ") { "${Api.mgLabel(days[it]["mg"].num()!!)} from ${first.plusDays(it.toLong()).format(DateTimeFormatter.ofPattern("d MMM", Locale.getDefault()))}".replace(' ', '\u00A0') },
-            style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.l, end = AppSpace.l, bottom = AppSpace.l),
-        )
-    }
-}
-
-/** Each questionnaire total as a dot with its number above, in the lane y 0..1 under the mood lines (x as the chart's). */
-private class PhqPoints(private val points: List<Pair<Double, Int>>, private val color: Int) : Decoration {
-    private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { textAlign = android.graphics.Paint.Align.CENTER }
-
-    override fun drawOverLayers(context: CartesianDrawingContext) = with(context) {
-        val b = layerBounds
-        fun px(x: Double) = b.left + layerDimensions.startPadding + ((x - ranges.minX) / ranges.xStep).toFloat() * layerDimensions.xSpacing - scroll
-        val lane = b.height() / 5 // y 0..1 of the fixed 0..5 range
-        paint.color = color
-        paint.textSize = spToPx(11f)
-        paint.isFakeBoldText = true
-        points.forEach { (x, total) ->
-            val cx = px(x)
-            canvas.drawCircle(cx, b.bottom - lane * 0.3f, dpToPx(4f), paint)
-            val label = total.toString()
-            val half = paint.measureText(label) / 2
-            canvas.drawText(label, cx.coerceIn(b.left + half, b.right - half), b.bottom - lane * 0.3f - dpToPx(7f), paint)
         }
     }
 }

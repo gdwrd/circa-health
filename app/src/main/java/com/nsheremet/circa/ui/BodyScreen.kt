@@ -6,10 +6,14 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 
-/** Heart and Stress under one tab titled "Body"; each screen keeps its own DayPicker and loading. */
+/** Heart, Stress and Mind under one tab titled "Body"; each screen keeps its own loading. */
 @Composable
 fun BodyScreen(backend: Boolean?) {
     var seg by rememberSaveable { mutableIntStateOf(0) }
-    val header = @Composable { Segmented(listOf("Heart", "Stress"), seg) { seg = it } }
-    if (seg == 0) HeartScreen(backend, header) else StressScreen(backend, header)
+    val header = @Composable { Segmented(listOf("Heart", "Stress", "Mind"), seg) { seg = it } }
+    when (seg) {
+        0 -> HeartScreen(backend, header)
+        1 -> StressScreen(backend, header)
+        else -> MindScreen(backend, header)
+    }
 }

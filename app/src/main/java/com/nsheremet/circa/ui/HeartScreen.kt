@@ -34,11 +34,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Alignment
@@ -64,7 +61,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
@@ -93,11 +89,9 @@ import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.roundToInt
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.text.font.FontWeight
 import kotlinx.serialization.json.contentOrNull
 import java.time.LocalTime
 
@@ -118,9 +112,6 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
     var loaded by remember { mutableStateOf(false) }
     var doses by remember { mutableStateOf<List<Long>>(emptyList()) }
     var windowH by remember { mutableStateOf(6.0) }
-    var medStarted by remember { mutableStateOf<String?>(null) }
-    var med by remember { mutableStateOf<JsonObject?>(null) }
-    var rhr90 by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
     var date by remember { mutableStateOf(LocalDate.now()) }
     var day by remember { mutableStateOf<JsonObject?>(null) }
     var nextInputs by remember { mutableStateOf<JsonObject?>(null) } // the night that starts on [date] belongs to the next wake date
@@ -145,10 +136,7 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
     suspend fun load() {
         trend(Api.trends(ctx, "rhr", 30))?.let { rhr = it }
         trend(Api.trends(ctx, "hrv", 30))?.let { hrv = it }
-        Api.settings(ctx)?.let { s ->
-            s["medication_window_h"].num()?.let { windowH = it }
-            medStarted = s["medication_started"].str()?.takeIf { it.isNotBlank() }
-        }
+        Api.settings(ctx)?.let { s -> s["medication_window_h"].num()?.let { windowH = it } }
         Api.journal(ctx, 30).obj()?.let { j ->
             val es = (j["entries"] as? JsonArray)?.mapNotNull { it.obj() }.orEmpty().reversed() // oldest first
             doses = es.filter { it["kind"].str() == "medication" }.mapNotNull {
@@ -159,10 +147,6 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
                 val v = e["value"].str()?.split("/")?.mapNotNull { it.toIntOrNull() }
                 if (v?.size == 2) runCatching { Triple(LocalDate.parse(e["date"].str()), v[0], v[1]) }.getOrNull() else null
             }.associateBy { it.first }.values.toList()
-        }
-        if (medStarted != null) {
-            Api.insights(ctx).obj()?.let { med = it["kinds"].obj()?.get("medication").obj() }
-            (Api.trends(ctx, "rhr", 90).obj()?.get("points") as? JsonArray)?.let { a -> rhr90 = a.mapNotNull { it.obj() } }
         }
         loaded = true
     }
@@ -261,7 +245,6 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
         if (breaths.isNotEmpty()) item { BreathingCard(breaths) }
         item { TrendCard("Resting heart rate · 30 days", rhr, "bpm", c.heart) }
         item { TrendCard("Heart rate variability · 30 days", hrv, "ms", c.hrv) }
-        medStarted?.let { st -> item { MedicationCard(med, st, rhr90) } }
         if (bp.isNotEmpty()) item { BloodPressureCard(bp) }
     }
     if (measure) ModalBottomSheet(
@@ -396,140 +379,6 @@ private fun BreathingCard(breaths: List<JsonObject>) {
                 val byX = pts.toMap() // points are 5 s apart (backend step): label every 30 s
                 Chart(listOf(pts), c.breathe, true, 6, 0, height = 120.dp, marker = { x -> "${byX[x]?.roundToInt()} bpm · ${x.roundToInt()} s" }) { x -> "${x.roundToInt()} s" }
             }
-        }
-    }
-}
-
-private val MED_ROWS = listOf("day_hr", "rhr", "hrv", "bed_start", "total_min")
-
-@Composable
-private fun MedicationCard(med: JsonObject?, started: String, rhr: List<JsonObject>) {
-    val c = AppTheme.colors
-    val since = runCatching { LocalDate.parse(started).format(DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())) }.getOrDefault(started)
-    val all = (med?.get("all") as? JsonArray)?.mapNotNull { it.obj() }?.associateBy { it["metric"].str() }.orEmpty()
-    val nWith = med?.get("n_with").num()?.roundToInt() ?: 0
-    val nWithout = med?.get("n_without").num()?.roundToInt() ?: 0
-    Section("Medication") {
-        Column(Modifier.fillMaxWidth().padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-            if (med?.get("status").str() == "ok" && all.isNotEmpty()) {
-                Text("Days with medication vs without", style = AppType.headline)
-                Row {
-                    Spacer(Modifier.weight(1f))
-                    listOf("With", "Without", "Change").forEach {
-                        Text(it, style = AppType.footnote, color = c.secondaryLabel, textAlign = TextAlign.End, modifier = Modifier.width(76.dp))
-                    }
-                }
-                MED_ROWS.forEach { m ->
-                    val e = all[m] ?: return@forEach
-                    val w = e["with"].num()
-                    val wo = e["without"].num()
-                    // From the displayed (whole-number) values, so "65 / 65" never reads "+1".
-                    val d = if (w != null && wo != null) (w.roundToInt() - wo.roundToInt()).toDouble() else e["delta"].num() ?: 0.0
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(METRIC[m]?.first ?: m, style = AppType.subhead, modifier = Modifier.weight(1f))
-                        Text(w?.let { metricValue(m, it) } ?: "—", style = AppType.subhead, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.End, modifier = Modifier.width(76.dp))
-                        Text(wo?.let { metricValue(m, it) } ?: "—", style = AppType.subhead, color = c.secondaryLabel, textAlign = TextAlign.End, modifier = Modifier.width(76.dp))
-                        Text(metricDelta(m, d, null), style = AppType.subhead, color = effectColor(m, d), textAlign = TextAlign.End, modifier = Modifier.width(76.dp))
-                    }
-                }
-                Text("$nWith days with a dose, $nWithout without, since $since.", style = AppType.footnote, color = c.secondaryLabel)
-                val bt = med?.get("by_time").obj()
-                val later = (bt?.get("all") as? JsonArray)?.mapNotNull { it.obj() }?.firstOrNull { it["metric"].str() == "bed_start" }?.get("delta").num()
-                if (bt?.get("status").str() == "ok" && later != null && kotlin.math.abs(later) >= 5) Text(
-                    "Doses after ${clock(bt?.get("split").str().orEmpty())}: you tended to fall asleep ${kotlin.math.abs(later).roundToInt()} min ${if (later > 0) "later" else "earlier"}.",
-                    style = AppType.subhead,
-                )
-            } else {
-                val before = rhr.lastOrNull { (it["date"].str() ?: "") < started && it["baseline"].num() != null }?.get("baseline").num()
-                val after = rhr.lastOrNull { it["baseline"].num() != null }?.takeIf { (it["date"].str() ?: "") >= started }?.get("baseline").num()
-                Text(
-                    if (before != null && after != null) "Since you started ($since): resting HR ${before.roundToInt()} → ${after.roundToInt()} bpm" else "Since you started ($since)",
-                    style = AppType.headline,
-                )
-                Text(
-                    "Days with and without a dose are compared once there are 3 of each. So far: $nWith with, $nWithout without.",
-                    style = AppType.subhead, color = c.secondaryLabel,
-                )
-            }
-            val levels = Api.doseLevels(med)
-            if (levels.isNotEmpty()) {
-                Hairline(Modifier.padding(vertical = AppSpace.xs))
-                ByDose(levels)
-            }
-            Text("Averages from your own data. Other things may play a part. Not medical advice.", style = AppType.footnote, color = c.secondaryLabel)
-        }
-    }
-}
-
-// Rows of the By dose table: label and the value as shown ("—" when null: under 3 dose days).
-internal val BY_DOSE:List<Pair<String, (Map<String, Double?>) -> String?>> = listOf(
-    "Resting HR" to { m -> m["rhr"]?.let { "${it.roundToInt()} bpm" } },
-    "Time asleep" to { m -> m["total_min"]?.roundToInt()?.let { "${it / 60} h ${"%02d".format(it % 60)}" } },
-    "Bedtime" to { m -> m["bed_start"]?.let(::bedClock) },
-    "Energy" to { m -> m["energy"]?.let { "%.1f".format(it) } },
-    "Mood" to { m -> m["valence"]?.let { "%.1f".format(it) } },
-    "Focus" to { m -> m["focus"]?.let { "%.1f".format(it) } },
-    "Appetite" to { m -> m["appetite"]?.let { "%.1f".format(it) } },
-    "Crash" to { m -> m["crash"]?.let { "%.1f".format(it) } },
-    "Blood pressure" to { m -> m["sys"]?.let { s -> m["dia"]?.let { d -> "${s.roundToInt()}/${d.roundToInt()}" } } },
-)
-
-/**
- * Steps as columns, measures as rows (as the with / without table above). The label column stays put; the step
- * columns share one scroll state, so from three steps on they slide together and open at the latest.
- */
-@Composable
-private fun ByDose(levels: List<Api.DoseLevel>) {
-    val c = AppTheme.colors
-    val scroll = rememberScrollState()
-    LaunchedEffect(scroll.maxValue) { scroll.scrollTo(scroll.maxValue) }
-    val fmt = DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())
-    val min = (12 + 84 * LocalDensity.current.fontScale).dp // "11:37 PM" plus a gap, at any text size
-    Text("By dose", style = AppType.headline)
-    BoxWithConstraints {
-        // Narrow screen or large text: a label beside the values would leave room for one step only, so it goes above them.
-        val stack = levels.size > 1 && (maxWidth - 112.dp) / min < 2f
-        val room = if (stack) maxWidth else maxWidth - 112.dp
-        // Whole columns only at rest: when the steps overflow, the visible ones widen to fill the space exactly.
-        val fit = maxOf(1, (room / min).toInt())
-        val col = Modifier.width(if (levels.size <= fit) min else room / fit)
-        Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-            @Composable
-            fun Line(label: String, cells: @Composable (Api.DoseLevel) -> Unit) {
-                @Composable
-                fun Values(m: Modifier) = Row(m.horizontalScroll(scroll), horizontalArrangement = Arrangement.End) {
-                    levels.forEach { Box(col, contentAlignment = Alignment.CenterEnd) { cells(it) } }
-                }
-                if (stack) Column {
-                    if (label.isNotEmpty()) Text(label, style = AppType.footnote, color = c.secondaryLabel)
-                    Values(Modifier.fillMaxWidth())
-                } else Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(label, style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.width(112.dp))
-                    Values(Modifier.weight(1f))
-                }
-            }
-            Line("") { l ->
-                Column(horizontalAlignment = Alignment.End) {
-                    Text(
-                        Api.mgLabel(l.mg), style = AppType.footnote.copy(fontWeight = FontWeight.SemiBold), color = c.pill, maxLines = 1,
-                        modifier = Modifier.clip(CircleShape).background(c.pill.copy(alpha = 0.16f)).padding(horizontal = AppSpace.s, vertical = 2.dp),
-                    )
-                    Text(l.from.format(fmt), style = AppType.footnote, color = c.secondaryLabel, maxLines = 1, modifier = Modifier.padding(top = 2.dp))
-                }
-            }
-            Line("Dose days") { Text(it.n.toString(), style = AppType.subhead, fontWeight = FontWeight.SemiBold) }
-            BY_DOSE.forEach { (label, value) ->
-                Hairline()
-                Line(label) { l ->
-                    val v = value(l.means)
-                    Text(v ?: "—", style = AppType.subhead, color = if (v == null) c.secondaryLabel else c.label, maxLines = 1)
-                }
-            }
-            Text(
-                (if (levels.size > fit) "Swipe the table for earlier steps. " else "") +
-                    "Each step runs from the date under it. Scales are 1 to 5. “—”: under 3 dose days on that step.",
-                style = AppType.footnote, color = c.secondaryLabel,
-            )
         }
     }
 }
