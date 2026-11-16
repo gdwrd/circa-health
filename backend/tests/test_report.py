@@ -398,9 +398,21 @@ def test_update_heart_rate_and_calm() -> None:
 
 def test_timeline() -> None:
     ev = report.timeline({"start": _ts(MON, 0, 0) - 3600, "end": _ts(MON, 7, 5)}, [WALK],
-                         [{"kind": "coffee", "ts": _ts(MON, 8, 0)}], [_ts(MON, 9, 0)])
+                         [{"kind": "coffee", "ts": _ts(MON, 8, 0)}], [_ts(MON, 9, 0)], {}, False)
     assert [(e["kind"], e["label"]) for e in ev] == [("wake", "Woke"), ("coffee", "Coffee"), ("dose", "Dose"),
                                                      ("walk", "Walk · 40 min")]
+
+
+def test_timeline_active_hours() -> None:
+    # 10:00 active, 11:00 under 500, 13:00 overlapped by the 13:00-13:40 walk
+    steps = {_ts(MON, 10, 0): 2866.0, _ts(MON, 11, 0): 499.0, _ts(MON, 13, 0): 3000.0}
+    ev = report.timeline(None, [WALK], [], [], steps, False)
+    assert [e for e in ev if e["kind"] == "steps"] == [
+        {"t": _ts(MON, 10, 0), "kind": "steps", "label": "2,866 steps", "steps": 2866}]
+    ride = {"kind": "ride", "minutes": 40, "start": _ts(MON, 13, 0)}  # a ride does not hide the hour's steps
+    assert len([e for e in report.timeline(None, [ride], [], [], steps, False) if e["kind"] == "steps"]) == 2
+    calm = [e for e in report.timeline(None, [], [], [], steps, True) if e["kind"] == "steps"]
+    assert [e["label"] for e in calm] == ["An active hour", "An active hour"]
 
 
 def test_timeline_and_update_endpoints() -> None:
@@ -411,12 +423,12 @@ def test_timeline_and_update_endpoints() -> None:
     db.save_day(d, (80, 75, 70), {"inputs": {}, "signals": CALM_SIG, "workouts": [], "session":
                                   {"start": now.timestamp() - 40000, "end": now.timestamp() - 10000}}, {})
     t = now.timestamp() - 60
-    load({"moment_coffee": {t: 1.0}})
+    load({"moment_coffee": {t: 1.0}, "biometric_steps": {samples.midnight(d).timestamp(): 600.0}})
     db.add_journal(d.isoformat(), "medication", "00:00", None, int(t))
     with TestClient(app) as c:
         assert c.get("/timeline").status_code == 401
         j = c.get(f"/timeline?date={d.isoformat()}", headers=H).json()
-        assert j["date"] == d.isoformat() and {"wake", "coffee", "dose"} <= {e["kind"] for e in j["events"]}
+        assert j["date"] == d.isoformat() and {"wake", "coffee", "dose", "steps"} <= {e["kind"] for e in j["events"]}
         assert [e["t"] for e in j["events"]] == sorted(e["t"] for e in j["events"])
         bad = [{"since": "x"}, {"since": int(t), "given": "x"}, {"since": int(t), "moves": [{"kind": "swim"}]},
                {"since": int(now.timestamp()) + 999}]

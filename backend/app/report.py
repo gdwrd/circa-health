@@ -413,10 +413,15 @@ AFTERNOON_H = 14
 STILL_STEPS = 500  # under this many steps since the last note is no movement (scoring.still_hours' hour)
 
 
-def timeline(session: dict | None, workouts: list[dict], moments: list[dict], doses: list[float]) -> list[dict]:
-    """The day's recorded events in time order: the night's end, workouts (the phone's moves included), moments, doses."""
+def timeline(session: dict | None, workouts: list[dict], moments: list[dict], doses: list[float],
+             steps: dict[float, float], calm: bool) -> list[dict]:
+    """The day's recorded events in time order: the night's end, workouts (the phone's moves included), moments, doses,
+    active hours (steps: hour start epoch s -> steps; an hour a walk or run overlaps is left out, the workout says it)."""
     ev = [{"t": w["start"], "kind": w["kind"], "label": f"{w['kind'].capitalize()} · {_duration(w['minutes'])}"}
           for w in workouts]
+    moving = [(w["start"], w["start"] + w["minutes"] * 60) for w in workouts if w["kind"] in ("walk", "run")]
+    ev += [{"t": t, "kind": "steps", "label": "An active hour" if calm else f"{round(v):,} steps", "steps": round(v)}
+           for t, v in steps.items() if v >= STILL_STEPS and not any(a < t + 3600 and b > t for a, b in moving)]
     ev += [{"t": m["ts"], "kind": m["kind"], "label": LABEL.get(m["kind"], m["kind"].capitalize())} for m in moments]
     ev += [{"t": t, "kind": "dose", "label": LABEL["dose"]} for t in doses]  # shown only, never advised on
     if session and "end" in session:

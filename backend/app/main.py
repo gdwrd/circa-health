@@ -663,8 +663,11 @@ def get_timeline(day: str | None = Query(None, alias="date")) -> dict:
     row = next(iter(db.days(d, d)), {"c": {}})
     doses = [samples.midnight(d).replace(hour=int(e["value"][:2]), minute=int(e["value"][3:])).timestamp()
              for e in db.journal(d.isoformat()) if e["kind"] == "medication" and e["date"] == d.isoformat() and e["value"]]
+    mid = samples.midnight(d)
+    steps = {(mid + timedelta(hours=h)).timestamp(): v for h, v in _hourly("biometric_steps", d).items()}
     return {"date": d.isoformat(),
-            "events": report.timeline(row["c"].get("session"), row["c"].get("workouts") or [], _moments(d), doses)}
+            "events": report.timeline(row["c"].get("session"), row["c"].get("workouts") or [], _moments(d), doses,
+                                      steps, db.settings()["calm"] == "1")}
 
 
 def _move_ok(m: object) -> bool:
