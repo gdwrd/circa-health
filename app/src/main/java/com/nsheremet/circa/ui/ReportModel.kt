@@ -123,7 +123,7 @@ internal fun ReportModelRows(offer: Boolean, onOffered: () -> Unit) {
     when {
         hasModel -> {
             val len = model.length()
-            ValueRow("Model", models.find { it.bytes == len }?.label ?: "Unknown, ${gb(len)}")
+            ValueRow("Model", (models.find { it.bytes == len }?.label ?: "Unknown, ${gb(len)}") + " · on this phone")
             Hairline(Modifier.padding(start = AppSpace.l))
             ButtonRow("Delete model") { model.delete(); hasModel = false }
         }
@@ -135,9 +135,12 @@ internal fun ReportModelRows(offer: Boolean, onOffered: () -> Unit) {
             Hairline(Modifier.padding(start = AppSpace.l))
             ButtonRow("Cancel download") { dm.remove(id); dlId = null }
         }
-        else -> models.forEachIndexed { i, m ->
-            if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
-            ButtonRow("Download ${m.label} (${gb(m.bytes)})") { download(m) }
+        else -> {
+            ValueRow("Model", "Not downloaded")
+            models.forEach { m ->
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ButtonRow("Download ${m.label} (${gb(m.bytes)})") { download(m) }
+            }
         }
     }
     if (!hasModel) msg?.let { Text(it, style = AppType.footnote, color = c.activity, modifier = Modifier.padding(start = AppSpace.l, end = AppSpace.l, bottom = AppSpace.s)) }

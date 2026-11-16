@@ -1025,7 +1025,10 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Icon(Icons.Rounded.AutoAwesome, null, tint = c.tint, modifier = Modifier.size(20.dp))
-                    Text("Turn on written reports", style = AppType.body, color = c.tint, modifier = Modifier.padding(start = AppSpace.m).weight(1f))
+                    Text(
+                        if (ctx.reportWriter) "Download the model to get written notes" else "Turn on written reports",
+                        style = AppType.body, color = c.tint, modifier = Modifier.padding(start = AppSpace.m).weight(1f),
+                    )
                     Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = c.secondaryLabel)
                 }
             }
