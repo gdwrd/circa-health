@@ -188,6 +188,9 @@ data class AppColors(
     val steadyWash: Color = ReadinessGreen.copy(alpha = 0.12f),
     val easyWash: Color = Color(0x1F00C7BE),
     val restWash: Color = SleepIndigo.copy(alpha = 0.12f),
+    /** Settings group tiles without a fitting colour: Medication (iOS teal), Mind (iOS purple). */
+    val pill: Color = Color(0xFF30B0C7),
+    val mind: Color = Color(0xFFAF52DE),
 ) {
     /** Lighter gradient partner of a score colour (the arc head); other colours pair with themselves. */
     fun light(c: Color): Color = when (c) {
@@ -247,6 +250,7 @@ private val DarkColors = AppColors(
     emptySegment = Color(0x598E8E93), sleepBand = SleepIndigo.copy(alpha = 0.3f),
     pushWash = ActivityPink.copy(alpha = 0.18f), steadyWash = ReadinessGreen.copy(alpha = 0.18f),
     easyWash = Color(0x2E63E6E2), restWash = SleepIndigo.copy(alpha = 0.22f),
+    pill = Color(0xFF40C8E0), mind = Color(0xFFBF5AF2),
 )
 
 /** Bundled OFL Nunito: rounded numerals and titles; body text stays on the platform sans. */

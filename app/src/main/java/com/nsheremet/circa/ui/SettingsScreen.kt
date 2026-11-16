@@ -54,6 +54,32 @@ import androidx.compose.material3.SelectableDates
 import androidx.compose.material3.Switch
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Article
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.IosShare
+import androidx.compose.material.icons.rounded.Medication
+import androidx.compose.material.icons.rounded.Notifications
+import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.Psychology
+import androidx.compose.material.icons.rounded.RadioButtonUnchecked
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.graphics.luminance
 import androidx.core.content.ContextCompat
 import kotlinx.serialization.json.JsonObject
@@ -305,16 +331,124 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
     }
 
+    // MH0: null is the root list of groups; a group's name opens its page (pages, not nav routes, as Sync log is).
+    var page by rememberSaveable { mutableStateOf<String?>(null) }
+    BackHandler(enabled = page != null) { page = null }
+
     if (showLog) return SyncLogScreen { showLog = false }
     if (showLab) return RingLabScreen { showLab = false }
 
+    fun synced(ms: Long) = if (ms == 0L) "Never" else SimpleDateFormat("d MMM, ", Locale.getDefault()).format(Date(ms)) + clock(ms / 1000.0)
+    fun open(group: String) { haptic.tick(); page = group }
+    val reduce = LocalReduceMotion.current
+    AnimatedContent(
+        page, label = "page",
+        transitionSpec = {
+            // iOS push: the page comes in from the right over the root, which drifts a third to the left; Back reverses it.
+            val push = targetState != null
+            val move = spring<IntOffset>(Spring.DampingRatioNoBouncy, Spring.StiffnessMediumLow)
+            when {
+                reduce -> EnterTransition.None togetherWith ExitTransition.None
+                push -> slideInHorizontally(move) { it } togetherWith slideOutHorizontally(move) { -it / 3 }
+                else -> (slideInHorizontally(move) { -it / 3 } togetherWith slideOutHorizontally(move) { it }).apply { targetContentZIndex = -1f }
+            }
+        },
+    ) { p ->
     LargeTitleScaffold(
-        "Settings",
-        back = { Text("‹ $backTo", style = AppType.headline, color = c.tint, modifier = Modifier.clickable(onClick = onBack).padding(start = AppSpace.xs, bottom = AppSpace.xs)) },
+        p ?: "Settings",
+        back = {
+            if (p == null) Text("‹ $backTo", style = AppType.headline, color = c.tint, modifier = Modifier.clickable(onClick = onBack).padding(start = AppSpace.xs, bottom = AppSpace.xs))
+            else Text("‹ Settings", style = AppType.headline, color = c.tint, modifier = Modifier.clickable { page = null }.padding(start = AppSpace.xs, bottom = AppSpace.xs))
+        },
     ) {
+        when (p) {
+        null -> {
         item {
-            Section("Ring", "Each sync reads new data from the ring and pushes it to the server.") {
-                ValueRow("Last sync", if (lastSync == 0L) "Never" else SimpleDateFormat("d MMM, ", Locale.getDefault()).format(Date(lastSync)) + clock(lastSync / 1000.0))
+            // The ring itself: its battery as the app's ring, its name, the last sync.
+            val battery = ctx.lastBatteryPct
+            val low = battery in 0..20
+            val tone = if (low) c.signalHigh else c.readiness
+            val name = remember(ring) {
+                if (ring.isEmpty()) "No ring set"
+                else runCatching { (ctx.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter.getRemoteDevice(ring).name }.getOrNull() ?: "Your ring"
+            }
+            InsetCard {
+                Row(
+                    Modifier.fillMaxWidth().background(Brush.horizontalGradient(listOf(tone.copy(alpha = 0.12f), tone.copy(alpha = 0f))))
+                        .clickable(role = Role.Button) { open("Ring") }.padding(AppSpace.l),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ScoreRing(if (battery < 0) 0f else battery / 100f, tone, Modifier.size(76.dp), stroke = 8.dp, animate = !reduce) {
+                        Text(if (battery < 0) "—" else "$battery%", style = AppType.headline.copy(fontFamily = AppType.title.fontFamily, fontWeight = FontWeight.ExtraBold))
+                    }
+                    Column(Modifier.weight(1f).padding(start = AppSpace.l)) {
+                        Text(name, style = AppType.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            when { battery < 0 -> "Battery not read yet"; ctx.lastCharging -> "Charging"; low -> "Battery low"; else -> "Battery" },
+                            style = AppType.subhead, color = if (low && !ctx.lastCharging) c.badText else c.secondaryLabel,
+                        )
+                        Text(
+                            when {
+                                lastSync == 0L -> "Never synced"
+                                android.text.format.DateUtils.isToday(lastSync) -> "Synced " + clock(lastSync / 1000.0)
+                                else -> "Synced " + SimpleDateFormat("d MMM", Locale.getDefault()).format(Date(lastSync))
+                            }, style = AppType.subhead, color = c.secondaryLabel)
+                    }
+                }
+            }
+        }
+        item {
+            InsetCard {
+                GroupRow(Icons.Rounded.RadioButtonUnchecked, c.sleep, "Ring", if (interval <= 0) "Sync off" else "Every ${intervalLabel(interval)}") { open("Ring") }
+                GroupHairline()
+                GroupRow(Icons.Rounded.Person, c.tint, "You", steps.toIntOrNull()?.let { "%,d steps".format(it) }.orEmpty()) { open("You") }
+            }
+        }
+        med?.let { s ->
+            item {
+                InsetCard {
+                    val started = (s["medication_started"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                    GroupRow(Icons.Rounded.Medication, c.pill, "Medication", if (started.isEmpty()) "Off" else clock((s["medication_time"] as? JsonPrimitive)?.contentOrNull.orEmpty())) { open("Medication") }
+                    GroupHairline()
+                    val n = things.count(String::isNotBlank)
+                    GroupRow(Icons.Rounded.Psychology, c.mind, "Mind", when (n) { 0 -> "None"; 1 -> "1 thing"; else -> "$n things" }) { open("Mind") }
+                }
+            }
+        }
+        item {
+            InsetCard {
+                val muted = (med?.get("muted") as? JsonPrimitive)?.contentOrNull.orEmpty().split(',')
+                val on = (if (med == null) 0 else NOTIFY_GROUPS.sumOf { g -> g.second.count { it.first !in muted } }) + (if (ctx.batteryAlerts) 1 else 0)
+                GroupRow(Icons.Rounded.Notifications, c.heart, "Notifications", if (!notifyGranted || on == 0) "Off" else "$on on") { open("Notifications") }
+                GroupHairline()
+                val phone = listOf(phoneOn, holdOn, movesOn).count { it }
+                GroupRow(Icons.Rounded.PhoneAndroid, c.readiness, "Phone", if (phone == 0) "Off" else "$phone on") { open("Phone") }
+                GroupHairline()
+                GroupRow(Icons.AutoMirrored.Rounded.Article, c.stageAwake, "Reports", if (writerOn) "On" else "Off") { open("Reports") }
+                if (med != null) {
+                    GroupHairline()
+                    GroupRow(Icons.Rounded.IosShare, c.secondaryLabel, "Data", "") { open("Data") }
+                }
+            }
+        }
+        item {
+            Column(Modifier.fillMaxWidth().padding(vertical = AppSpace.xl), horizontalAlignment = Alignment.CenterHorizontally) {
+                // The mark on its launcher tile reads as the app icon; alone, an open ring reads as a spinner.
+                // 66 dp = the 108 dp adaptive canvas cropped to its 72 dp visible area in a 44 dp tile, like the launcher.
+                Box(Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).background(c.brandTile), contentAlignment = Alignment.Center) {
+                    Image(painterResource(R.drawable.ic_launcher_fg), contentDescription = null, modifier = Modifier.requiredSize(66.dp))
+                }
+                Text(
+                    "Circa " + ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName,
+                    style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.xs),
+                )
+            }
+        }
+        }
+        "Ring" -> {
+        item {
+            Section(null, "Each sync reads new data from the ring and pushes it to the server.") {
+                ValueRow("Last sync", synced(lastSync))
                 Hairline(Modifier.padding(start = AppSpace.l))
                 ButtonRow("Sync now") {
                     SyncWorker.runNow(ctx)
@@ -336,7 +470,166 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             }
         }
         item {
-            Section("Phone", "Screen on/off times fix nights where you scrolled in bed. Only the times are sent." +
+            Section(
+                "Setup",
+                "Point the server at the backend (:8429). " +
+                    "Android delays background sync while battery optimisation is on.\n\n" +
+                    if (stored.first == 0) "Stored on this phone: no samples yet"
+                    else "Stored on this phone: ${"%,d".format(stored.first)} samples since " +
+                        SimpleDateFormat("d MMM yyyy", Locale.getDefault()).format(Date(stored.second)) + " · ${"%,d".format(stored.third)} waiting to send",
+            ) {
+                FieldRow("Address", ring, "Not configured") { ring = it.trim(); ctx.ringAddress = ring.takeIf { a -> a.isNotEmpty() }; if (ring.isNotEmpty() && url.isNotEmpty()) SyncWorker.schedule(ctx) }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ButtonRow(if (scanning) "Scanning…" else "Scan for ring", enabled = !scanning, onClick = ::startScan)
+                Hairline(Modifier.padding(start = AppSpace.l))
+                FieldRow("URL", url, "http://host:8429", KeyboardType.Uri) { url = it.trim(); ctx.vmUrl = url; if (ring.isNotEmpty() && url.isNotEmpty()) SyncWorker.schedule(ctx) }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                FieldRow("Token", token, "Optional", KeyboardType.Password, password = true) { token = it.trim(); ctx.apiToken = token }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ChevronRow("Android battery", if (batteryOk) "Unrestricted" else "Optimised") {
+                    if (!batteryOk) MainActivity.requestBatteryExemption(ctx)
+                    else Toast.makeText(ctx, "Already unrestricted", Toast.LENGTH_SHORT).show()
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ButtonRow("Clear cached data") {
+                    Api.clearCache(ctx)
+                    Toast.makeText(ctx, "Cache cleared", Toast.LENGTH_SHORT).show()
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ButtonRow("Send all history") {
+                    activity.lifecycleScope.launch {
+                        withContext(Dispatchers.IO) { SampleStore.get(ctx).markAllUnsent() }
+                        storedTick++
+                        SyncWorker.runNow(ctx)
+                        Toast.makeText(ctx, "Sync started", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+        }
+        "You" -> {
+        item {
+            Section(null, "Your birth year sets your maximum heart rate for cardio zones. Goals shape the Activity and Sleep scores." +
+                if (med != null) " Wake times set tonight's bedtime plan; weekends mean the nights before Saturday and Sunday." +
+                    " Calm mode: words instead of numbers. Numbers stay one tap away." +
+                    " Guess first: say how recovered you feel before the scores show." else "") {
+                // Birth year is stored by the backend; without one there are no cardio zones.
+                if (med != null) {
+                    FieldRow("Birth year", birth, "Not set", KeyboardType.Number) {
+                        birth = it.filter(Char::isDigit).take(4)
+                        val y = birth.toIntOrNull()
+                        if (birth.isEmpty()) patchMed("birth_year", JsonPrimitive(""))
+                        else if (y != null && birth.length == 4 && y in 1900..LocalDate.now().year) patchMed("birth_year", JsonPrimitive(birth))
+                    }
+                    Hairline(Modifier.padding(start = AppSpace.l))
+                }
+                // Out of range (NaN and Infinity fail both comparisons): nothing is stored or sent, the row shows the range.
+                fun goal(s: String) = s.toIntOrNull()?.takeIf { it in 1000..100000 }
+                fun need(s: String) = s.replace(',', '.').toFloatOrNull()?.takeIf { it > 4f && it <= 12f }
+                FieldRow("Step goal", steps, "8000", KeyboardType.Number, supporting = if (goal(steps) == null) "1000 to 100000" else null) {
+                    steps = it.filter(Char::isDigit)
+                    saveGoal("step_goal", goal(steps))
+                }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                FieldRow("Sleep need (h)", sleepNeed, "7.5", KeyboardType.Decimal, supporting = if (need(sleepNeed) == null) "Above 4, up to 12" else null) {
+                    sleepNeed = it
+                    saveGoal("sleep_need_min", need(it)?.let { h -> (h * 60).roundToInt() })
+                }
+                med?.let { s ->
+                    listOf("wake_weekday" to "Wake up · weekdays", "wake_weekend" to "Wake up · weekends").forEach { (k, title) ->
+                        Hairline(Modifier.padding(start = AppSpace.l))
+                        ChevronRow(title, (s[k] as? JsonPrimitive)?.contentOrNull.orEmpty().ifEmpty { null }?.let(::clock) ?: "Off") { pickWake = k }
+                    }
+                    Hairline(Modifier.padding(start = AppSpace.l))
+                    key(patchFailed) {
+                        SwitchRow("Calm mode", (s["calm"] as? JsonPrimitive)?.contentOrNull == "1") { on ->
+                            haptic.tick()
+                            patchMed("calm", JsonPrimitive(if (on) "1" else ""))
+                        }
+                    }
+                    Hairline(Modifier.padding(start = AppSpace.l))
+                    key(patchFailed) {
+                        SwitchRow("Guess first", (s["guess"] as? JsonPrimitive)?.contentOrNull == "1") { on ->
+                            haptic.tick()
+                            patchMed("guess", JsonPrimitive(if (on) "1" else ""))
+                        }
+                    }
+                }
+            }
+        }
+        med?.let { s ->
+            item {
+                Section("Workouts", "The ring can't tell cycling from a gym session — both show few steps. Pick what you do most; you can change any session on the Heart screen.") {
+                    ChevronRow("Low-step sessions are", lowStepLabel((s["low_step_kind"] as? JsonPrimitive)?.contentOrNull)) { pickLowStep = true }
+                }
+            }
+        }
+        }
+        "Medication" -> med?.let { s ->
+            val started = (s["medication_started"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+            item {
+                Section(null, "Used to mark doses on the Heart screen and to compare your heart rate with the days before you started.") {
+                    key(patchFailed) {
+                        SwitchRow("I take medication", started.isNotEmpty()) { on ->
+                            patchMed("medication_started", JsonPrimitive(if (on) LocalDate.now().toString() else ""))
+                        }
+                    }
+                    if (started.isNotEmpty()) {
+                        Hairline(Modifier.padding(start = AppSpace.l))
+                        ChevronRow("Started on", runCatching { LocalDate.parse(started).format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())) }.getOrDefault(started)) { pickStart = true }
+                        Hairline(Modifier.padding(start = AppSpace.l))
+                        ChevronRow("Usual time", clock((s["medication_time"] as? JsonPrimitive)?.contentOrNull.orEmpty())) { pickTime = true }
+                        Hairline(Modifier.padding(start = AppSpace.l))
+                        ChevronRow("Active window", "${(s["medication_window_h"] as? JsonPrimitive)?.doubleOrNull?.toInt() ?: "—"} h") { pickWindow = true }
+                    }
+                }
+            }
+        }
+        "Mind" -> if (med != null) {
+            item {
+                Section("Things to mark", "Name something that comes and goes: a migraine, an afternoon crash, heartburn. Tap it when it happens and " +
+                    "Circa shows what your body did the day before. Clear the name to stop; old marks are kept.") {
+                    things.forEachIndexed { i, name ->
+                        if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
+                        FieldRow("Thing ${i + 1}", name, "Not set") {
+                            things = things.toMutableList().also { l -> l[i] = it.take(24) }
+                            saveMark(i + 1, things[i])
+                        }
+                    }
+                }
+            }
+        }
+        "Notifications" -> {
+            val muted = (med?.get("muted") as? JsonPrimitive)?.contentOrNull.orEmpty().split(',').filter(String::isNotEmpty)
+            // Without the backend only the phone's own Ring battery alert is left (in Day).
+            val groups = NOTIFY_GROUPS.filter { med != null || it.first == "Day" }
+            groups.forEachIndexed { gi, (header, kinds) ->
+                item {
+                    Section(
+                        header,
+                        if (gi < groups.lastIndex) null
+                        else if (notifyGranted) "Notifications arrive with a sync, so they can run a few minutes late."
+                        else "Allow notifications for Circa in Android settings to receive these.",
+                    ) {
+                        if (med != null) kinds.forEachIndexed { i, (kind, title) ->
+                            if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
+                            key(patchFailed) {
+                                SwitchRow(title, kind !in muted, enabled = notifyGranted) { on ->
+                                    patchMed("muted", JsonPrimitive((if (on) muted - kind else muted + kind).joinToString(",")))
+                                }
+                            }
+                        }
+                        if (header == "Day") {
+                            if (med != null) Hairline(Modifier.padding(start = AppSpace.l))
+                            SwitchRow("Ring battery", ctx.batteryAlerts, enabled = notifyGranted) { ctx.batteryAlerts = it }
+                        }
+                    }
+                }
+            }
+        }
+        "Phone" -> {
+        item {
+            Section(null, "Screen on/off times fix nights where you scrolled in bed. Only the times are sent." +
                 (if (phoneOn && !usageOk) " Allow Usage access for Circa to start. Greyed out? In App info, tap ⋮ › Allow restricted settings first." else "") +
                 "\n\nHold my place shows where in a podcast or audiobook you fell asleep. Android calls the permission notification access; " +
                 "Circa only uses it to see what is playing and never reads your notifications." +
@@ -391,94 +684,10 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 }
             }
         }
-        item {
-            Section("You", "Your birth year sets your maximum heart rate for cardio zones. Goals shape the Activity and Sleep scores." +
-                if (med != null) " Wake times set tonight's bedtime plan; weekends mean the nights before Saturday and Sunday." +
-                    " Calm mode: words instead of numbers. Numbers stay one tap away." +
-                    " Guess first: say how recovered you feel before the scores show." else "") {
-                // Birth year is stored by the backend; without one there are no cardio zones.
-                if (med != null) {
-                    FieldRow("Birth year", birth, "Not set", KeyboardType.Number) {
-                        birth = it.filter(Char::isDigit).take(4)
-                        val y = birth.toIntOrNull()
-                        if (birth.isEmpty()) patchMed("birth_year", JsonPrimitive(""))
-                        else if (y != null && birth.length == 4 && y in 1900..LocalDate.now().year) patchMed("birth_year", JsonPrimitive(birth))
-                    }
-                    Hairline(Modifier.padding(start = AppSpace.l))
-                }
-                // Out of range (NaN and Infinity fail both comparisons): nothing is stored or sent, the row shows the range.
-                fun goal(s: String) = s.toIntOrNull()?.takeIf { it in 1000..100000 }
-                fun need(s: String) = s.replace(',', '.').toFloatOrNull()?.takeIf { it > 4f && it <= 12f }
-                FieldRow("Step goal", steps, "8000", KeyboardType.Number, supporting = if (goal(steps) == null) "1000 to 100000" else null) {
-                    steps = it.filter(Char::isDigit)
-                    saveGoal("step_goal", goal(steps))
-                }
-                Hairline(Modifier.padding(start = AppSpace.l))
-                FieldRow("Sleep need (h)", sleepNeed, "7.5", KeyboardType.Decimal, supporting = if (need(sleepNeed) == null) "Above 4, up to 12" else null) {
-                    sleepNeed = it
-                    saveGoal("sleep_need_min", need(it)?.let { h -> (h * 60).roundToInt() })
-                }
-                med?.let { s ->
-                    listOf("wake_weekday" to "Wake up · weekdays", "wake_weekend" to "Wake up · weekends").forEach { (k, title) ->
-                        Hairline(Modifier.padding(start = AppSpace.l))
-                        ChevronRow(title, (s[k] as? JsonPrimitive)?.contentOrNull.orEmpty().ifEmpty { null }?.let(::clock) ?: "Off") { pickWake = k }
-                    }
-                    Hairline(Modifier.padding(start = AppSpace.l))
-                    key(patchFailed) {
-                        SwitchRow("Calm mode", (s["calm"] as? JsonPrimitive)?.contentOrNull == "1") { on ->
-                            haptic.tick()
-                            patchMed("calm", JsonPrimitive(if (on) "1" else ""))
-                        }
-                    }
-                    Hairline(Modifier.padding(start = AppSpace.l))
-                    key(patchFailed) {
-                        SwitchRow("Guess first", (s["guess"] as? JsonPrimitive)?.contentOrNull == "1") { on ->
-                            haptic.tick()
-                            patchMed("guess", JsonPrimitive(if (on) "1" else ""))
-                        }
-                    }
-                }
-            }
         }
-        med?.let { s ->
-            val started = (s["medication_started"] as? JsonPrimitive)?.contentOrNull.orEmpty()
-            item {
-                Section("Medication", "Used to mark doses on the Heart screen and to compare your heart rate with the days before you started.") {
-                    key(patchFailed) {
-                        SwitchRow("I take medication", started.isNotEmpty()) { on ->
-                            patchMed("medication_started", JsonPrimitive(if (on) LocalDate.now().toString() else ""))
-                        }
-                    }
-                    if (started.isNotEmpty()) {
-                        Hairline(Modifier.padding(start = AppSpace.l))
-                        ChevronRow("Started on", runCatching { LocalDate.parse(started).format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())) }.getOrDefault(started)) { pickStart = true }
-                        Hairline(Modifier.padding(start = AppSpace.l))
-                        ChevronRow("Usual time", clock((s["medication_time"] as? JsonPrimitive)?.contentOrNull.orEmpty())) { pickTime = true }
-                        Hairline(Modifier.padding(start = AppSpace.l))
-                        ChevronRow("Active window", "${(s["medication_window_h"] as? JsonPrimitive)?.doubleOrNull?.toInt() ?: "—"} h") { pickWindow = true }
-                    }
-                }
-            }
-            item {
-                Section("Workouts", "The ring can't tell cycling from a gym session — both show few steps. Pick what you do most; you can change any session on the Heart screen.") {
-                    ChevronRow("Low-step sessions are", lowStepLabel((s["low_step_kind"] as? JsonPrimitive)?.contentOrNull)) { pickLowStep = true }
-                }
-            }
-            item {
-                Section("Things to mark", "Name something that comes and goes: a migraine, an afternoon crash, heartburn. Tap it when it happens and " +
-                    "Circa shows what your body did the day before. Clear the name to stop; old marks are kept.") {
-                    things.forEachIndexed { i, name ->
-                        if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
-                        FieldRow("Thing ${i + 1}", name, "Not set") {
-                            things = things.toMutableList().also { l -> l[i] = it.take(24) }
-                            saveMark(i + 1, things[i])
-                        }
-                    }
-                }
-            }
-        }
+        "Reports" -> {
         item {
-            Section("Reports", "Circa can write each report card as a short note, on this phone, with an open model (Gemma 4). " +
+            Section(null, "Circa can write each report card as a short note, on this phone, with an open model (Gemma 4). " +
                 "Nothing you write or measure leaves the phone for it. Without the model the cards show their plain text.") {
                 SwitchRow("Write reports", writerOn) { on ->
                     haptic.tick()
@@ -491,83 +700,18 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 ReportModelRows(offerModel) { offerModel = false }
             }
         }
-        item {
-            Section(
-                "Notifications",
-                if (notifyGranted) "Notifications arrive with a sync, so they can run a few minutes late."
-                else "Allow notifications for Circa in Android settings to receive these.",
-            ) {
-                med?.let { s ->
-                    val muted = (s["muted"] as? JsonPrimitive)?.contentOrNull.orEmpty().split(',').filter(String::isNotEmpty)
-                    NOTIFY_KINDS.forEach { (kind, title) ->
-                        key(patchFailed) {
-                            SwitchRow(title, kind !in muted, enabled = notifyGranted) { on ->
-                                patchMed("muted", JsonPrimitive((if (on) muted - kind else muted + kind).joinToString(",")))
-                            }
-                        }
-                        Hairline(Modifier.padding(start = AppSpace.l))
-                    }
-                }
-                SwitchRow("Ring battery", ctx.batteryAlerts, enabled = notifyGranted) { ctx.batteryAlerts = it }
-            }
         }
-        if (med != null) item {
-            Section("Data", "The last 90 days as a one-page PDF or a spreadsheet file. Estimates from a consumer ring, not medical measurements.") {
+        "Data" -> if (med != null) {
+        item {
+            Section(null, "The last 90 days as a one-page PDF or a spreadsheet file. Estimates from a consumer ring, not medical measurements.") {
                 ButtonRow("Share report", enabled = !sharing) { share(pdf = true) }
                 Hairline(Modifier.padding(start = AppSpace.l))
                 ButtonRow("Export CSV", enabled = !sharing) { share(pdf = false) }
             }
         }
-        item {
-            Section(
-                "Setup",
-                "Point the server at the backend (:8429). " +
-                    "Android delays background sync while battery optimisation is on.\n\n" +
-                    if (stored.first == 0) "Stored on this phone: no samples yet"
-                    else "Stored on this phone: ${"%,d".format(stored.first)} samples since " +
-                        SimpleDateFormat("d MMM yyyy", Locale.getDefault()).format(Date(stored.second)) + " · ${"%,d".format(stored.third)} waiting to send",
-            ) {
-                FieldRow("Address", ring, "Not configured") { ring = it.trim(); ctx.ringAddress = ring.takeIf { a -> a.isNotEmpty() }; if (ring.isNotEmpty() && url.isNotEmpty()) SyncWorker.schedule(ctx) }
-                Hairline(Modifier.padding(start = AppSpace.l))
-                ButtonRow(if (scanning) "Scanning…" else "Scan for ring", enabled = !scanning, onClick = ::startScan)
-                Hairline(Modifier.padding(start = AppSpace.l))
-                FieldRow("URL", url, "http://host:8429", KeyboardType.Uri) { url = it.trim(); ctx.vmUrl = url; if (ring.isNotEmpty() && url.isNotEmpty()) SyncWorker.schedule(ctx) }
-                Hairline(Modifier.padding(start = AppSpace.l))
-                FieldRow("Token", token, "Optional", KeyboardType.Password, password = true) { token = it.trim(); ctx.apiToken = token }
-                Hairline(Modifier.padding(start = AppSpace.l))
-                ChevronRow("Android battery", if (batteryOk) "Unrestricted" else "Optimised") {
-                    if (!batteryOk) MainActivity.requestBatteryExemption(ctx)
-                    else Toast.makeText(ctx, "Already unrestricted", Toast.LENGTH_SHORT).show()
-                }
-                Hairline(Modifier.padding(start = AppSpace.l))
-                ButtonRow("Clear cached data") {
-                    Api.clearCache(ctx)
-                    Toast.makeText(ctx, "Cache cleared", Toast.LENGTH_SHORT).show()
-                }
-                Hairline(Modifier.padding(start = AppSpace.l))
-                ButtonRow("Send all history") {
-                    activity.lifecycleScope.launch {
-                        withContext(Dispatchers.IO) { SampleStore.get(ctx).markAllUnsent() }
-                        storedTick++
-                        SyncWorker.runNow(ctx)
-                        Toast.makeText(ctx, "Sync started", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
         }
-        item {
-            Column(Modifier.fillMaxWidth().padding(vertical = AppSpace.xl), horizontalAlignment = Alignment.CenterHorizontally) {
-                // The mark on its launcher tile reads as the app icon; alone, an open ring reads as a spinner.
-                // 66 dp = the 108 dp adaptive canvas cropped to its 72 dp visible area in a 44 dp tile, like the launcher.
-                Box(Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).background(c.brandTile), contentAlignment = Alignment.Center) {
-                    Image(painterResource(R.drawable.ic_launcher_fg), contentDescription = null, modifier = Modifier.requiredSize(66.dp))
-                }
-                Text(
-                    "Circa " + ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName,
-                    style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.xs),
-                )
-            }
         }
+    }
     }
 
     if (pickInterval) {
@@ -799,11 +943,36 @@ private fun intervalLabel(m: Int) = if (m <= 0) "Off" else "$m min"
 
 private fun lowStepLabel(k: String?) = if (k == "ride") "Rides" else "Workouts"
 
-/** Backend notification kinds (`/settings.muted`) in Settings order. */
-private val NOTIFY_KINDS = listOf(
-    "morning" to "Morning sleep", "bedtime" to "Wind down", "stillup" to "Still up", "ringoff" to "Ring still off at bedtime", "inactivity" to "Time to move",
-    "strain" to "Body signals", "receipt" to "Back to normal", "checkin" to "Journal check-in", "workout" to "Workout check", "experiment" to "Experiment", "weekly" to "Your week", "monthly" to "Your month",
+/** Backend notification kinds (`/settings.muted`) by when they arrive, in Settings order; Day also gets the phone's Ring battery. */
+private val NOTIFY_GROUPS = listOf(
+    "Morning" to listOf(
+        "morning" to "Morning sleep", "checkin" to "Journal check-in", "strain" to "Body signals", "receipt" to "Back to normal",
+        "experiment" to "Experiment", "weekly" to "Your week", "monthly" to "Your month",
+    ),
+    "Day" to listOf("inactivity" to "Time to move", "workout" to "Workout check"),
+    "Evening" to listOf("bedtime" to "Wind down", "stillup" to "Still up", "ringoff" to "Ring still off at bedtime"),
 )
+
+/** Root row of a Settings group: tinted icon tile, name, short current value, chevron. */
+@Composable
+private fun GroupRow(icon: ImageVector, tint: Color, title: String, value: String, onClick: () -> Unit) {
+    val c = AppTheme.colors
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable(role = Role.Button, onClick = onClick).padding(start = AppSpace.l, end = AppSpace.s),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(30.dp).background(tint.copy(alpha = 0.16f), RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
+            Icon(icon, null, tint = tint, modifier = Modifier.size(18.dp))
+        }
+        Text(title, style = AppType.body, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(start = AppSpace.m))
+        Text(value, style = AppType.body, color = c.secondaryLabel, maxLines = 1, modifier = Modifier.padding(start = AppSpace.s))
+        Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = c.secondaryLabel)
+    }
+}
+
+/** Separator under a [GroupRow], inset to the text like iOS (16 + 30 tile + 12). */
+@Composable
+private fun GroupHairline() = Hairline(Modifier.padding(start = 58.dp))
 
 /** Temporary debug view of [SyncLog]: ring reads and server pushes, newest first. */
 @Composable
@@ -850,9 +1019,10 @@ private fun SyncLogScreen(onBack: () -> Unit) {
 // ── iOS grouped-list pieces ────────────────────────────────────────────────
 
 @Composable
-internal fun Section(header: String, footer: String? = null, rows: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
+internal fun Section(header: String?, footer: String? = null, rows: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
     Column {
-        Text(
+        // null: the page's large title already names it.
+        if (header != null) Text(
             header, style = AppType.title,
             modifier = Modifier.padding(start = AppSpace.xs, bottom = AppSpace.s),
         )
