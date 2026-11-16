@@ -58,6 +58,7 @@
         </activity>
 
         <receiver android:name=".WorkoutActionReceiver" android:exported="false" />
+        <receiver android:name=".DoseActionReceiver" android:exported="false" />
         <receiver android:name=".MoveReceiver" android:exported="false" />
 
         <!-- Drive check: ACL_CONNECTED is on the implicit-broadcast exception list, so this runs with the app closed -->

@@ -589,6 +589,8 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                     notif.addAction(0, label, PendingIntent.getBroadcast(ctx, id * 2 + n, reply, flags))
                 }
             }
+            if (o["kind"]?.jsonPrimitive?.content == "dose") notif.addAction(0, "Taken",
+                PendingIntent.getBroadcast(ctx, id * 2, Intent(ctx, DoseActionReceiver::class.java).putExtra("notif", 1000 + id), flags))
             nm.notify(1000 + id, notif.build()) // offset keeps clear of the sync notification id
             shown++
         }

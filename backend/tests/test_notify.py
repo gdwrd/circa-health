@@ -981,3 +981,87 @@ def test_phq_not_twice_inside_14_days_unanswered(monkeypatch) -> None:
     at(monkeypatch, 13, day=D + timedelta(14))  # 14 days after it fired at 12:00
     notify.evaluate(set())
     assert phq() == [PHQ]
+
+
+def nudge(kind: str) -> list[tuple[str, str]]:
+    return [(n["title"], n["body"]) for n in notify.pending() if n["kind"] == kind]
+
+
+DOSE = [("Dose logged?", "Nothing logged today. Usual time 08:00.")]
+
+
+def test_dose_fires_once_60_min_after_usual_time(monkeypatch) -> None:
+    walk()
+    db.set_settings({"medication_started": "2026-10-01"})
+    at(monkeypatch, 8, 59)
+    notify.evaluate(set())
+    assert nudge("dose") == []
+    at(monkeypatch, 9)
+    notify.evaluate(set())
+    assert nudge("dose") == DOSE
+    notify.ack(notify.pending()[0]["id"])
+    at(monkeypatch, 11)
+    notify.evaluate(set())
+    assert nudge("dose") == []  # once a day, even after it was shown
+
+
+def test_dose_quiet_off_medication_logged_after_14_or_muted(monkeypatch) -> None:
+    walk()
+    at(monkeypatch, 10)
+    notify.evaluate(set())  # medication_started not set
+    db.set_settings({"medication_started": "2026-10-01"})
+    at(monkeypatch, 14)
+    notify.evaluate(set())  # 14:00 and later
+    at(monkeypatch, 10)
+    db.set_settings({"muted": "dose"})
+    notify.evaluate(set())
+    assert nudge("dose") == []
+    db.set_settings({"muted": ""})
+    db.add_journal(D.isoformat(), "medication", "07:30", None, 0)
+    notify.evaluate(set())
+    assert nudge("dose") == []
+    with closing(db.connect()) as con, con:
+        con.execute("DELETE FROM journal")
+    notify.evaluate(set())
+    assert nudge("dose") == DOSE
+
+
+MEAL = [("Nothing eaten since your dose?", "No meal logged since 08:05.")]
+
+
+def meal(h: int, m: int, v: float = 1.0) -> None:
+    load({"moment_meal": {datetime(D.year, D.month, D.day, h, m).timestamp(): v}})
+
+
+def test_meal_fires_once_4_h_after_dose_inside_window(monkeypatch) -> None:
+    walk()
+    db.add_journal(D.isoformat(), "medication", "08:05", None, 0)
+    meal(7, 30)  # before the dose: does not count
+    at(monkeypatch, 12, 4)
+    notify.evaluate(set())
+    assert nudge("meal") == []
+    at(monkeypatch, 12, 5)
+    notify.evaluate(set())
+    notify.evaluate(set())
+    assert nudge("meal") == MEAL
+
+
+def test_meal_quiet_without_dose_after_meal_past_window_or_muted(monkeypatch) -> None:
+    walk()
+    at(monkeypatch, 13)
+    notify.evaluate(set())  # no dose today
+    db.add_journal((D - timedelta(1)).isoformat(), "medication", "08:05", None, 0)
+    notify.evaluate(set())  # yesterday's dose
+    db.add_journal(D.isoformat(), "medication", "08:05", None, 0)
+    at(monkeypatch, 16, 5)
+    notify.evaluate(set())  # window 8 h ends 16:05
+    at(monkeypatch, 13)
+    db.set_settings({"muted": "meal"})
+    notify.evaluate(set())
+    db.set_settings({"muted": ""})
+    meal(10, 0)
+    notify.evaluate(set())
+    assert nudge("meal") == []
+    meal(10, 0, 2.0)  # cancelled
+    notify.evaluate(set())
+    assert nudge("meal") == MEAL

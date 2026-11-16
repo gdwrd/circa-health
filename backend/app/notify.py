@@ -226,6 +226,34 @@ def _phq(now: datetime, dates: set[date]) -> None:
         _add("phq", "Two-minute check", "The depression questionnaire, every two weeks.", now, {"open": "phq"})
 
 
+def _doses(now: datetime) -> list[str]:
+    d = now.date().isoformat()
+    return [e["value"] for e in db.journal(d) if e["kind"] == "medication" and e["date"] == d and e["value"]]
+
+
+def _dose(now: datetime, dates: set[date]) -> None:
+    """On medication, no dose logged today, 60+ min after the usual time and before 14:00; once a day. Never says take."""
+    s = db.settings()
+    h, m = map(int, s["medication_time"].split(":"))
+    if not s["medication_started"] or not h * 60 + m + 60 <= now.hour * 60 + now.minute < 840 \
+            or _fired("dose", now) or _doses(now):
+        return
+    _add("dose", "Dose logged?", f"Nothing logged today. Usual time {s['medication_time']}.", now)
+
+
+def _meal(now: datetime, dates: set[date]) -> None:
+    """4 h+ after today's latest dose, inside its active window, no meal moment since it; once a day."""
+    dose = max(_doses(now), default=None)  # HH:MM sorts as text: latest by clock time
+    if not dose or _fired("meal", now):
+        return
+    h, m = map(int, dose.split(":"))
+    at = samples.midnight(now.date()) + timedelta(hours=h, minutes=m)
+    if not at + timedelta(hours=4) <= now < at + timedelta(hours=float(db.setting("medication_window_h"))):
+        return
+    if 1 not in samples.raw("moment_meal", at, now).values():  # 2 at the same second cancels a meal
+        _add("meal", "Nothing eaten since your dose?", f"No meal logged since {dose}.", now)
+
+
 def _evening(now: datetime, dates: set[date]) -> None:
     """Once per evening, inside 2 h of the planned bedtime (report.WIND_DOWN_MIN; report imports notify); the phone
     writes the wind-down note at this sync and shows it, this body only when nothing is written."""
@@ -487,7 +515,7 @@ def _receipt(now: datetime, dates: set[date]) -> None:
 
 
 KINDS = ("readiness", "bedtime", "bedtime_soon", "inactivity", "strain", "checkin", "weekly", "morning", "monthly", "stillup",
-         "experiment", "workout", "receipt", "evening", "ringoff", "phq")
+         "experiment", "workout", "receipt", "evening", "ringoff", "phq", "dose", "meal")
 
 
 def evaluate(dates: set[date]) -> None:
@@ -497,7 +525,7 @@ def evaluate(dates: set[date]) -> None:
                        (_weekly, "weekly"), (_strain, "strain"), (_checkin, "checkin"), (_morning, "morning"),
                        (_monthly, "monthly"), (_stillup, "stillup"), (_experiment, "experiment"),
                        (_workout, "workout"), (_receipt, "receipt"), (_evening, "evening"),
-                       (_ringoff, "ringoff"), (_phq, "phq")):
+                       (_ringoff, "ringoff"), (_phq, "phq"), (_dose, "dose"), (_meal, "meal")):
         if kind in muted:
             continue
         try:

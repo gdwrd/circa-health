@@ -1167,9 +1167,9 @@ private fun lowStepLabel(k: String?) = if (k == "ride") "Rides" else "Workouts"
 private val NOTIFY_GROUPS = listOf(
     "Morning" to listOf(
         "morning" to "Morning sleep", "checkin" to "Journal check-in", "strain" to "Body signals", "receipt" to "Back to normal",
-        "experiment" to "Experiment", "weekly" to "Your week", "monthly" to "Your month",
+        "experiment" to "Experiment", "weekly" to "Your week", "monthly" to "Your month", "dose" to "Dose not logged",
     ),
-    "Day" to listOf("inactivity" to "Time to move", "workout" to "Workout check"),
+    "Day" to listOf("inactivity" to "Time to move", "workout" to "Workout check", "meal" to "No meal since dose"),
     "Evening" to listOf("bedtime" to "Wind down", "stillup" to "Still up", "ringoff" to "Ring still off at bedtime"),
 )
 
