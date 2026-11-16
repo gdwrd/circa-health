@@ -149,18 +149,31 @@ internal fun reportCards(ctx: Context, reply: JsonElement?): List<ReportCard> {
 }
 
 /** LW5: `/report/week` cards in the backend's order with their notes from `filesDir/weeks.json`; advice lines end with a full stop. Blocking I/O. */
-internal fun weekCards(ctx: Context, reply: JsonObject?): List<ReportCard> {
-    val start = (reply?.get("start") as? JsonPrimitive)?.content ?: return emptyList()
-    return cardsOf(reply, start, if (reportsOff(ctx)) null else savedReports(ctx, "weeks.json"))
+internal fun weekCards(ctx: Context, reply: JsonObject?, start: String? = null): List<ReportCard> {
+    val day = (reply?.get("start") as? JsonPrimitive)?.content ?: start ?: return emptyList()
+    val saved = if (reportsOff(ctx)) null else savedReports(ctx, "weeks.json")
+    // PW1: no reply (offline): the week's stored entries, in stored order, without graphs.
+    val o = reply ?: JsonObject(mapOf("cards" to JsonArray(saved.orEmpty().filterKeys { it.startsWith("$day/") }
+        .mapNotNull { (k, e) -> (e as? JsonObject)?.let { JsonObject(it + ("kind" to JsonPrimitive(k.substringAfter("/")))) } })))
+    return cardsOf(o, day, saved)
         .map { c -> c.copy(advice = c.advice.map { if (it.trimEnd().endsWith(".")) it else it.trimEnd() + "." }) }
 }
 
-/** "9 to 15 Nov"; across months "30 Nov to 6 Dec". */
-private fun weekRange(reply: JsonObject?): String {
-    val s = (reply?.get("start") as? JsonPrimitive)?.content?.let(LocalDate::parse) ?: return ""
-    val e = (reply["end"] as? JsonPrimitive)?.content?.let(LocalDate::parse) ?: s.plusDays(6)
+/** PW1: the week starts in weeks.json other than [last], newest first, each with its stored focus line. Blocking I/O. */
+private fun pastWeeks(ctx: Context, last: String): List<Pair<String, String?>> {
+    val s = savedReports(ctx, "weeks.json")
+    return s.keys.map { it.substringBefore("/") }.distinct().filter { it != last }.sortedDescending().map { d ->
+        d to ((s["$d/week_overview"] as? JsonObject)?.get("advice") as? JsonArray)?.firstOrNull()?.let { (it as? JsonPrimitive)?.content }
+    }
+}
+
+/** "9 to 15 Nov"; across months "30 Nov to 6 Dec"; another year "2 to 8 Nov 2025". */
+private fun weekRange(start: String): String {
+    val s = LocalDate.parse(start)
+    val e = s.plusDays(6)
     val m = java.time.format.DateTimeFormatter.ofPattern("MMM", Locale.getDefault())
-    return "${s.dayOfMonth}${if (s.month != e.month) " " + s.format(m) else ""} to ${e.dayOfMonth} ${e.format(m)}"
+    return "${s.dayOfMonth}${if (s.month != e.month) " " + s.format(m) else ""} to ${e.dayOfMonth} ${e.format(m)}" +
+        if (e.year != LocalDate.now().year) " ${e.year}" else ""
 }
 
 /** The reply's cards with their stored notes, `saved` keyed `"<day>/<kind>"`. */
@@ -742,9 +755,9 @@ private fun LastWeekCard(overview: ReportCard, range: String, writing: Boolean, 
     }
 }
 
-/** LW5: the week from [start] (a Monday): the overview, then one card per section with its note, advice and graph. */
+/** LW5: the week from [start] (a Monday): the overview, then one card per section with its note, advice and graph. [past] (PW1): titled by its range, back to the list, never written. */
 @Composable
-private fun WeekPage(start: String, writing: Boolean, onBack: () -> Unit) {
+private fun WeekPage(start: String, writing: Boolean, past: Boolean = false, onBack: () -> Unit) {
     BackHandler(onBack = onBack)
     val c = AppTheme.colors
     val ctx = LocalContext.current
@@ -754,16 +767,45 @@ private fun WeekPage(start: String, writing: Boolean, onBack: () -> Unit) {
         reply = Api.reportWeek(ctx, start)
         // While a write runs, re-read weeks.json as the notes land; the effect restarts once it ends.
         while (true) {
-            cards = withContext(Dispatchers.IO) { weekCards(ctx, reply) }
+            cards = withContext(Dispatchers.IO) { weekCards(ctx, reply, start) }
             if (!writing) break
             delay(1500)
         }
     }
-    LargeTitleScaffold("Last week", back = {
+    LargeTitleScaffold(if (past) weekRange(start) else "Last week", back = {
+        Text(if (past) "‹ Past weeks" else "‹ Reports", style = AppType.headline, color = c.tint, modifier = Modifier.clickable(onClick = onBack).padding(start = AppSpace.xs, bottom = AppSpace.xs))
+    }) {
+        if (!past) item { Text(weekRange(start), style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.xs)) }
+        cards.forEach { card -> item(key = card.kind) { ReportCardView(card, writing = writing, week = reply) } }
+    }
+}
+
+/** PW1: one row per stored past week, its range and, under it, its focus line. */
+@Composable
+private fun PastWeeksPage(weeks: List<Pair<String, String?>>, onOpen: (String) -> Unit, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    LargeTitleScaffold("Past weeks", back = {
         Text("‹ Reports", style = AppType.headline, color = c.tint, modifier = Modifier.clickable(onClick = onBack).padding(start = AppSpace.xs, bottom = AppSpace.xs))
     }) {
-        item { Text(weekRange(reply), style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.xs)) }
-        cards.forEach { card -> item(key = card.kind) { ReportCardView(card, writing = writing, week = reply) } }
+        item {
+            InsetCard {
+                weeks.forEachIndexed { i, (start, focus) ->
+                    if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
+                    Row(
+                        Modifier.fillMaxWidth().heightIn(min = 44.dp).clickable(role = Role.Button) { haptic.tick(); onOpen(start) }.padding(horizontal = AppSpace.l, vertical = AppSpace.m),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(weekRange(start), style = AppType.body)
+                            focus?.let { Text(if (it.trimEnd().endsWith(".")) it else it.trimEnd() + ".", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = 2.dp)) }
+                        }
+                        Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = c.secondaryLabel)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -794,9 +836,16 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
     var week by remember { mutableStateOf<JsonObject?>(null) }
     var weekList by remember { mutableStateOf<List<ReportCard>>(emptyList()) }
     var openWeek by rememberSaveable { mutableStateOf<String?>(null) }
+    // PW1: the stored weeks before it (start, focus line) and whether their list is open.
+    var past by remember { mutableStateOf<List<Pair<String, String?>>>(emptyList()) }
+    var pastOpen by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         week = Api.reportWeek(ctx)
         weekList = withContext(Dispatchers.IO) { weekCards(ctx, week) }
+        // Offline: the last finished week is the Monday before this week's.
+        val last = (week?.get("start") as? JsonPrimitive)?.content
+            ?: LocalDate.now().with(java.time.temporal.TemporalAdjusters.previousOrSame(java.time.DayOfWeek.MONDAY)).minusWeeks(1).toString()
+        past = withContext(Dispatchers.IO) { pastWeeks(ctx, last) }
     }
     suspend fun loadDay(d: LocalDate) {
         val ev = (Api.timeline(ctx, d)?.get("events") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
@@ -879,11 +928,24 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
             Text(if (writing) "Writing…" else "Regenerate", style = AppType.body, color = color, modifier = Modifier.padding(start = AppSpace.xs))
         }
     }
-    openWeek?.let { return WeekPage(it, writing) { openWeek = null } }
+    openWeek?.let { s -> return if (pastOpen) WeekPage(s, false, past = true) { openWeek = null } else WeekPage(s, writing) { openWeek = null } }
+    if (pastOpen) return PastWeeksPage(past, { openWeek = it }) { pastOpen = false }
     val weekWriting = writing
     val lastWeek: LazyListScope.() -> Unit = {
         weekList.firstOrNull { it.kind == "week_overview" }?.let { o ->
-            item(key = "last_week") { LastWeekCard(o, weekRange(week), weekWriting) { openWeek = o.date.toString() } }
+            item(key = "last_week") { LastWeekCard(o, weekRange(o.date.toString()), weekWriting) { openWeek = o.date.toString() } }
+        }
+        if (past.isNotEmpty()) item(key = "past_weeks") {
+            InsetCard {
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = 44.dp).clickable(role = Role.Button) { haptic.tick(); pastOpen = true }.padding(horizontal = AppSpace.l, vertical = AppSpace.m),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Past weeks", style = AppType.body, modifier = Modifier.weight(1f))
+                    Text("${past.size}", style = AppType.body, color = c.secondaryLabel)
+                    Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = c.secondaryLabel)
+                }
+            }
         }
     }
     LargeTitleScaffold("Reports", back = back, action = regenerate.takeIf { isToday && !off && !cards.isNullOrEmpty() }) {
