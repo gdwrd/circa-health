@@ -10,7 +10,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
-from math import ceil
+from math import ceil, isfinite
 from statistics import mean, median
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request, Response
@@ -942,7 +942,22 @@ def mind(days: int = 90) -> dict:
         d = start + timedelta(i)
         out.append({"date": d.isoformat()} | _mind_day(by, d)
                    | {"load": sorted(load.get(d.isoformat(), [])), "mg": insights.mg(steps, d.isoformat())})
-    return {"days": out, "phq": [{"ts": t, "total": v} for t, v in samples.raw("phq9_total", lo, hi).items()]}
+    return {"days": out, "phq": _phq(lo, hi)}
+
+
+def _phq(lo: datetime, hi: datetime) -> list[dict]:
+    return [{"ts": t, "total": v} for t, v in samples.raw("phq9_total", lo, hi).items()]
+
+
+@api.delete("/mind/phq")
+def delete_phq(ts: float) -> dict:
+    """Removes one questionnaire result (ts as /mind gives it); replies with the results /mind lists by default."""
+    if not isfinite(ts) or ts <= 0:
+        raise HTTPException(422, "bad ts")
+    if not samples.delete_phq(round(ts * 1000)):
+        raise HTTPException(404, "no result there")
+    end = _today()
+    return {"phq": _phq(samples.midnight(end - timedelta(89)), samples.midnight(end + timedelta(1)))}
 
 
 @api.post("/journal")

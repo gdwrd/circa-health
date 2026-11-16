@@ -57,6 +57,15 @@ def put(rows: list[tuple[str, int, float]]) -> None:
                         "SET value = excluded.value WHERE excluded.value > value", rows)
 
 
+def delete_phq(ts_ms: int) -> bool:
+    """Removes the questionnaire result at ts_ms (the user's own entry; nothing else is ever deleted). False if none."""
+    with closing(db.connect()) as con, con:
+        if not con.execute("SELECT 1 FROM samples WHERE metric='phq9_total' AND ts=?", (ts_ms,)).fetchone():
+            return False
+        con.execute("DELETE FROM samples WHERE metric IN ('phq9_total', 'phq9_item9') AND ts=?", (ts_ms,))
+    return True
+
+
 def raw(metric: str, start: datetime, end: datetime) -> dict[float, float]:
     """Samples in [start, end] as {unix_s: value}, ascending."""
     with closing(db.connect()) as con:

@@ -353,6 +353,18 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     BackHandler(enabled = page != null) { page = null }
     var phqOpen by remember { mutableStateOf(false) }
     if (phqOpen) PhqSheet { phqOpen = false }
+    // ED6: questionnaire results (ts s, total), newest first; read again when Mind opens or the sheet closes.
+    fun phqList(j: JsonObject?) = (j?.get("phq") as? JsonArray)?.mapNotNull { o ->
+        val p = o as? JsonObject ?: return@mapNotNull null
+        ((p["ts"] as? JsonPrimitive)?.doubleOrNull ?: return@mapNotNull null) to ((p["total"] as? JsonPrimitive)?.doubleOrNull ?: return@mapNotNull null)
+    }?.reversed()
+    var phq by remember { mutableStateOf(emptyList<Pair<Double, Double>>()) }
+    var removePhq by remember { mutableStateOf<Pair<Double, Double>?>(null) }
+    LaunchedEffect(page, phqOpen) { if (page == "Mind" && !phqOpen) phqList(Api.mind(ctx, 90))?.let { phq = it } }
+    fun phqLabel(r: Pair<Double, Double>): Pair<String, String> {
+        val d = java.time.Instant.ofEpochMilli((r.first * 1000).toLong()).atZone(java.time.ZoneId.systemDefault()).toLocalDate()
+        return d.format(DateTimeFormatter.ofPattern(if (d.year == LocalDate.now().year) "d MMM" else "d MMM yyyy", Locale.getDefault())) to "${r.second.toInt()} of 27"
+    }
 
     if (showLog) return SyncLogScreen { showLog = false }
     if (showLab) return RingLabScreen { showLab = false }
@@ -658,6 +670,15 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                     ChevronRow("Answer now", "") { haptic.tick(); phqOpen = true }
                 }
             }
+            if (phq.isNotEmpty()) item {
+                Section("Results", "Tap a result to remove it. To correct one, remove it and answer again.") {
+                    phq.forEachIndexed { i, r ->
+                        if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
+                        val (day, total) = phqLabel(r)
+                        Box(Modifier.clickable(onClickLabel = "Remove") { haptic.tick(); removePhq = r }) { ValueRow(day, total) }
+                    }
+                }
+            }
         }
         "Notifications" -> {
             val muted = (med?.get("muted") as? JsonPrimitive)?.contentOrNull.orEmpty().split(',').filter(String::isNotEmpty)
@@ -949,6 +970,34 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 }, enabled = mg != null) { Text("Add", color = if (mg != null) c.tint else c.secondaryLabel) }
             },
             dismissButton = { TextButton({ addStep = null }) { Text("Cancel", color = c.tint) } },
+        )
+    }
+
+    removePhq?.let { r ->
+        val (day, total) = phqLabel(r)
+        AlertDialog(
+            onDismissRequest = { removePhq = null },
+            containerColor = c.card,
+            title = { Text("Remove this result?") },
+            text = { Text("$day · $total", style = AppType.body) },
+            confirmButton = {
+                TextButton({
+                    removePhq = null
+                    activity.lifecycleScope.launch {
+                        val left = phqList(Api.deletePhq(ctx, r.first))
+                        if (left == null) Toast.makeText(ctx, "Could not remove the result", Toast.LENGTH_SHORT).show()
+                        else {
+                            phq = left
+                            // The phone's copy too, or "Send all history" would push it back.
+                            withContext(Dispatchers.IO) {
+                                SampleStore.get(ctx).writableDatabase.delete("samples", "name IN ('phq9_total', 'phq9_item9') AND ts = ?",
+                                    arrayOf(Math.round(r.first * 1000).toString()))
+                            }
+                        }
+                    }
+                }) { Text("Remove", color = c.badText) }
+            },
+            dismissButton = { TextButton({ removePhq = null }) { Text("Cancel", color = c.tint) } },
         )
     }
 

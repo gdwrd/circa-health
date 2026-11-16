@@ -27,6 +27,22 @@ def test_mind_cleared_rating() -> None:
         assert [(x["focus"], x["crash"]) for x in j] == [(2.0, None), (None, None)]
 
 
+def test_delete_phq() -> None:
+    y = samples.midnight(date.today() - timedelta(1)).timestamp()
+    a, b = y + 600.5, y + 7200
+    load({"phq9_total": {a: 12.0, b: 7.0}, "phq9_item9": {a: 1.0, b: 0.0}, "mood_energy": {a: 3.0}})
+    with TestClient(app) as c:
+        assert c.delete(f"/mind/phq?ts={a}").status_code == 401
+        assert c.delete("/mind/phq?ts=x", headers=H).status_code == 422
+        assert c.delete("/mind/phq?ts=nan", headers=H).status_code == 422
+        assert c.delete(f"/mind/phq?ts={a + 1}", headers=H).status_code == 404
+        assert c.delete(f"/mind/phq?ts={a}", headers=H).json() == {"phq": [{"ts": b, "total": 7.0}]}
+        assert c.delete(f"/mind/phq?ts={a}", headers=H).status_code == 404
+        assert c.get("/mind?days=3", headers=H).json()["phq"] == [{"ts": b, "total": 7.0}]
+    rows = [tuple(r) for r in db.query("SELECT metric, ts FROM samples ORDER BY metric, ts")]
+    assert rows == [("mood_energy", round(a * 1000)), ("phq9_item9", round(b * 1000)), ("phq9_total", round(b * 1000))]
+
+
 def test_mind_and_today_mood(monkeypatch) -> None:
     monkeypatch.setattr(main, "_vitals", lambda: {})
     d = date.today()

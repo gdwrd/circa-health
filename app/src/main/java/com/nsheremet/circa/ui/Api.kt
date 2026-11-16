@@ -139,6 +139,9 @@ object Api {
     /** GET /mind: `{days: [{date, energy, valence, focus, appetite, crash, feelings, load, mg}], phq: [{ts, total}]}`. */
     suspend fun mind(ctx: Context, days: Int) = get(ctx, "/mind?days=$days") as? JsonObject
 
+    /** DELETE /mind/phq: removes one questionnaire result (ts as /mind gives it); `{phq: [{ts, total}]}`, 90 days. */
+    suspend fun deletePhq(ctx: Context, ts: Double) = call(ctx, "/mind/phq?ts=$ts", "DELETE") as? JsonObject
+
     class DoseStep(val from: LocalDate, val mg: Double)
 
     /** "30 mg", "2.5 mg". */
