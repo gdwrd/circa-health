@@ -436,7 +436,7 @@ private fun MedicationCard(med: JsonObject?, started: String, rhr: List<JsonObje
 }
 
 // Rows of the By dose table: label and the value as shown ("—" when null: under 3 dose days).
-private val BY_DOSE: List<Pair<String, (Map<String, Double?>) -> String?>> = listOf(
+internal val BY_DOSE:List<Pair<String, (Map<String, Double?>) -> String?>> = listOf(
     "Resting HR" to { m -> m["rhr"]?.let { "${it.roundToInt()} bpm" } },
     "Time asleep" to { m -> m["total_min"]?.roundToInt()?.let { "${it / 60} h ${"%02d".format(it % 60)}" } },
     "Bedtime" to { m -> m["bed_start"]?.let(::bedClock) },

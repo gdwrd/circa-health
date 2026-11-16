@@ -10,6 +10,7 @@ import android.content.ClipData
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.Intent
+import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
@@ -83,11 +84,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.graphics.luminance
 import androidx.core.content.ContextCompat
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import java.time.LocalDate
+import java.time.LocalTime
+import java.time.temporal.ChronoUnit
 import java.time.format.DateTimeFormatter
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -315,17 +319,18 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var storedTick by remember { mutableIntStateOf(0) }
     LaunchedEffect(storedTick) { stored = withContext(Dispatchers.IO) { SampleStore.get(ctx).stats() } }
 
-    // "Share report" / "Export CSV": the last 90 days into cacheDir/share/, then the system share sheet.
+    // The Data page's files: [load] fetches the data and returns the writer (null: could not load); the file goes
+    // into cacheDir/share/[name], then the system share sheet.
     var sharing by remember { mutableStateOf(false) }
-    fun share(pdf: Boolean) {
+    fun share(name: String, mime: String, load: suspend () -> ((File) -> Unit)?) {
         haptic.tick()
         sharing = true
         activity.lifecycleScope.launch {
-            val uri = Api.exportCsv(ctx)?.let { csv ->
+            val uri = load()?.let { write ->
                 withContext(Dispatchers.IO) {
                     runCatching {
-                        val file = File(File(ctx.cacheDir, "share").apply { mkdirs() }, if (pdf) "circa-report.pdf" else "circa-export.csv")
-                        if (pdf) writeReport(ctx, csv, file) else file.writeText(csv)
+                        val file = File(File(ctx.cacheDir, "share").apply { mkdirs() }, name)
+                        write(file)
                         FileProvider.getUriForFile(ctx, ctx.packageName + ".share", file)
                     }.onFailure { Log.w("Settings", "Share failed", it) }.getOrNull()
                 }
@@ -333,7 +338,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             sharing = false
             if (uri == null) Toast.makeText(ctx, "Could not load your data", Toast.LENGTH_SHORT).show()
             else ctx.startActivity(Intent.createChooser(
-                Intent(Intent.ACTION_SEND).setType(if (pdf) "application/pdf" else "text/csv").putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     .apply { clipData = ClipData.newRawUri(null, uri) }, // the grant travels with the chooser only through ClipData
                 null,
             ))
@@ -737,12 +742,31 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             }
         }
         }
-        "Data" -> if (med != null) {
+        "Data" -> med?.let { s ->
         item {
             Section(null, "The last 90 days as a one-page PDF or a spreadsheet file. Estimates from a consumer ring, not medical measurements.") {
-                ButtonRow("Share report", enabled = !sharing) { share(pdf = true) }
+                ButtonRow("Share report", enabled = !sharing) {
+                    share("circa-report.pdf", "application/pdf") { Api.exportCsv(ctx)?.let { csv -> { f: File -> writeReport(ctx, csv, f) } } }
+                }
                 Hairline(Modifier.padding(start = AppSpace.l))
-                ButtonRow("Export CSV", enabled = !sharing) { share(pdf = false) }
+                ButtonRow("Export CSV", enabled = !sharing) {
+                    share("circa-export.csv", "text/csv") { Api.exportCsv(ctx)?.let { csv -> { f: File -> f.writeText(csv) } } }
+                }
+            }
+        }
+        // MH6: shown once there is a dose step.
+        Api.doseSteps(s).firstOrNull()?.let { first ->
+            item {
+                Section(null, "Dose steps, averages by dose, blood pressure by step and the last 14 days of mood on one page, for your prescriber.") {
+                    ButtonRow("Titration summary (PDF)", enabled = !sharing) {
+                        share("circa-titration.pdf", "application/pdf") {
+                            val m = ((Api.insights(ctx) as? JsonObject)?.get("kinds") as? JsonObject)?.get("medication") as? JsonObject
+                            val j = Api.journal(ctx, ChronoUnit.DAYS.between(first.from, LocalDate.now()).toInt() + 1) as? JsonObject
+                            val mind = Api.mind(ctx, 14)
+                            if (m == null || j == null || mind == null) null else { f: File -> writeTitration(ctx, f, s, m, j, mind) }
+                        }
+                    }
+                }
             }
         }
         }
@@ -927,60 +951,41 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     }
 }
 
-/** One A4 page from the `/export.csv` body: period, average scores, four small charts. Fixed light colours: it is paper, not UI. */
-private fun writeReport(ctx: Context, csv: String, out: File) {
-    val lines = csv.trim().lines()
-    val col = lines.first().split(',').withIndex().associate { it.value to it.index }
-    // Days before the first ring data are dropped. The journal is the last column, so a plain split is safe for the rest.
-    val rows = lines.drop(1).map { it.split(',') }.dropWhile { r -> r.drop(1).dropLast(1).all(String::isEmpty) }
-    fun series(name: String) = rows.map { it.getOrNull(col[name] ?: -1)?.toFloatOrNull() }
-    fun day(r: List<String>?) = r?.let { runCatching { LocalDate.parse(it[0]).format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())) }.getOrNull() } ?: "—"
-
+/** What both PDFs draw with: fixed light colours (it is paper, not UI), the report's fonts, the Circa heading, the line plot. */
+private class Sheet(ctx: Context, val cv: Canvas) {
     val ink = 0xFF1C1C1E.toInt(); val grey = 0xFF8E8E93.toInt(); val rule = 0xFFE5E5EA.toInt()
     val indigo = 0xFF5E5CE6.toInt(); val green = 0xFF30D158.toInt(); val pink = 0xFFFF375F.toInt(); val red = 0xFFFF2D55.toInt(); val blue = 0xFF0A84FF.toInt()
-    val nunito = ctx.resources.getFont(R.font.nunito_extrabold)
-    val text = Paint(Paint.ANTI_ALIAS_FLAG)
+    val orange = 0xFFFF9F0A.toInt()
+    private val nunito = ctx.resources.getFont(R.font.nunito_extrabold)
+    private val text = Paint(Paint.ANTI_ALIAS_FLAG)
     val mark = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeCap = Paint.Cap.ROUND }
-    val doc = PdfDocument()
-    val page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, 1).create()) // A4 in points
-    val cv = page.canvas
+
     fun put(s: String, x: Float, y: Float, size: Float, color: Int = ink, title: Boolean = false, align: Paint.Align = Paint.Align.LEFT) {
         text.textSize = size; text.color = color; text.typeface = if (title) nunito else Typeface.DEFAULT; text.textAlign = align
         cv.drawText(s, x, y, text)
     }
 
-    // The Circa mark: an open ring.
-    mark.style = Paint.Style.STROKE; mark.strokeWidth = 5f; mark.color = ink
-    cv.drawArc(50f, 46f, 76f, 72f, -50f, 290f, false, mark)
-    mark.style = Paint.Style.FILL; mark.strokeWidth = 1.5f
-    put("Circa report", 90f, 68f, 24f, title = true)
-    put("${day(rows.firstOrNull())} – ${day(rows.lastOrNull())} · averages over ${rows.size} days", 48f, 100f, 11f, grey)
-    listOf(Triple("Sleep", "sleep_score", indigo), Triple("Readiness", "readiness_score", green), Triple("Activity", "activity_score", pink)).forEachIndexed { i, (name, key, color) ->
-        val x = 48f + i * 166f
-        put("$name score", x, 140f, 10f, grey)
-        put(series(key).filterNotNull().takeIf { it.isNotEmpty() }?.average()?.let { "%.0f".format(it) } ?: "—", x, 178f, 34f, color, title = true)
-    }
-    mark.color = rule; cv.drawLine(48f, 200f, 547f, 200f, mark)
+    fun hairline(x0: Float, x1: Float, y: Float) { mark.color = rule; cv.drawLine(x0, y, x1, y, mark) }
 
-    // The one chart helper: title, average, min / max rules, then a line per series (neighbouring days joined, every day a dot).
-    fun chart(i: Int, title: String, unit: String, digits: Int, per: Float, vararg keys: Pair<String, Int>) {
-        val x = 48f + (i % 2) * 261.5f; val y = 224f + (i / 2) * 270f; val w = 237.5f
-        val top = y + 34f; val bottom = y + 230f; val left = x + 30f
-        val ss = keys.map { k -> series(k.first).map { it?.div(per) } }
-        val all = ss.flatten().filterNotNull()
-        put(title, x, y + 12f, 12f, title = true)
-        if (all.isEmpty()) return put("No data", x, y + 34f, 10f, grey)
-        fun f(v: Float) = "%.${digits}f".format(v)
-        put(ss.joinToString(" / ") { s -> f(s.filterNotNull().average().toFloat()) } + " $unit average", x + w, y + 12f, 10f, grey, align = Paint.Align.RIGHT)
-        val lo = all.min(); val hi = maxOf(all.max(), lo + 1f)
-        mark.color = rule; cv.drawLine(left, top, x + w, top, mark); cv.drawLine(left, bottom, x + w, bottom, mark)
-        put(f(hi), left - 6f, top + 3f, 8f, grey, align = Paint.Align.RIGHT); put(f(lo), left - 6f, bottom + 3f, 8f, grey, align = Paint.Align.RIGHT)
-        ss.forEachIndexed { k, s ->
-            mark.color = keys[k].second
+    /** The Circa mark (an open ring), [title], and [sub] in grey under it. */
+    fun head(title: String, sub: String) {
+        mark.style = Paint.Style.STROKE; mark.strokeWidth = 5f; mark.color = ink
+        cv.drawArc(50f, 46f, 76f, 72f, -50f, 290f, false, mark)
+        mark.style = Paint.Style.FILL; mark.strokeWidth = 1.5f
+        put(title, 90f, 68f, 24f, title = true)
+        put(sub, 48f, 100f, 11f, grey)
+    }
+
+    /** Rules at [lo] and [hi] with their values, then a line per series (neighbouring days joined, every day a dot). */
+    fun lines(left: Float, top: Float, right: Float, bottom: Float, lo: Float, hi: Float, label: (Float) -> String, ss: List<Pair<List<Float?>, Int>>) {
+        mark.color = rule; cv.drawLine(left, top, right, top, mark); cv.drawLine(left, bottom, right, bottom, mark)
+        put(label(hi), left - 6f, top + 3f, 8f, grey, align = Paint.Align.RIGHT); put(label(lo), left - 6f, bottom + 3f, 8f, grey, align = Paint.Align.RIGHT)
+        ss.forEach { (s, color) ->
+            mark.color = color
             var px = 0f; var py = 0f; var joined = false
             s.forEachIndexed { d, v ->
                 if (v != null) {
-                    val nx = left + 4f + (x + w - left - 8f) * d / maxOf(s.size - 1, 1); val ny = bottom - 6f - (bottom - top - 12f) * (v - lo) / (hi - lo)
+                    val nx = left + 4f + (right - left - 8f) * d / maxOf(s.size - 1, 1); val ny = bottom - 6f - (bottom - top - 12f) * (v - lo) / (hi - lo)
                     if (joined) cv.drawLine(px, py, nx, ny, mark)
                     cv.drawCircle(nx, ny, 1.6f, mark)
                     px = nx; py = ny
@@ -989,15 +994,167 @@ private fun writeReport(ctx: Context, csv: String, out: File) {
             }
         }
     }
+}
+
+/** One A4 page drawn by [draw], written to [out]. */
+private fun onePage(ctx: Context, out: File, draw: Sheet.() -> Unit) {
+    val doc = PdfDocument()
+    val page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, 1).create()) // A4 in points
+    Sheet(ctx, page.canvas).draw()
+    doc.finishPage(page)
+    out.outputStream().use(doc::writeTo)
+    doc.close()
+}
+
+/** One A4 page from the `/export.csv` body: period, average scores, four small charts. */
+private fun writeReport(ctx: Context, csv: String, out: File) = onePage(ctx, out) {
+    val lines = csv.trim().lines()
+    val col = lines.first().split(',').withIndex().associate { it.value to it.index }
+    // Days before the first ring data are dropped. The journal is the last column, so a plain split is safe for the rest.
+    val rows = lines.drop(1).map { it.split(',') }.dropWhile { r -> r.drop(1).dropLast(1).all(String::isEmpty) }
+    fun series(name: String) = rows.map { it.getOrNull(col[name] ?: -1)?.toFloatOrNull() }
+    fun day(r: List<String>?) = r?.let { runCatching { LocalDate.parse(it[0]).format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())) }.getOrNull() } ?: "—"
+
+    head("Circa report", "${day(rows.firstOrNull())} – ${day(rows.lastOrNull())} · averages over ${rows.size} days")
+    listOf(Triple("Sleep", "sleep_score", indigo), Triple("Readiness", "readiness_score", green), Triple("Activity", "activity_score", pink)).forEachIndexed { i, (name, key, color) ->
+        val x = 48f + i * 166f
+        put("$name score", x, 140f, 10f, grey)
+        put(series(key).filterNotNull().takeIf { it.isNotEmpty() }?.average()?.let { "%.0f".format(it) } ?: "—", x, 178f, 34f, color, title = true)
+    }
+    hairline(48f, 547f, 200f)
+
+    // The one chart helper: title, average, then the plot.
+    fun chart(i: Int, title: String, unit: String, digits: Int, per: Float, vararg keys: Pair<String, Int>) {
+        val x = 48f + (i % 2) * 261.5f; val y = 224f + (i / 2) * 270f; val w = 237.5f
+        val ss = keys.map { k -> series(k.first).map { it?.div(per) } }
+        val all = ss.flatten().filterNotNull()
+        put(title, x, y + 12f, 12f, title = true)
+        if (all.isEmpty()) return put("No data", x, y + 34f, 10f, grey)
+        fun f(v: Float) = "%.${digits}f".format(v)
+        put(ss.joinToString(" / ") { s -> f(s.filterNotNull().average().toFloat()) } + " $unit average", x + w, y + 12f, 10f, grey, align = Paint.Align.RIGHT)
+        val lo = all.min()
+        lines(x + 30f, y + 34f, x + w, y + 230f, lo, maxOf(all.max(), lo + 1f), { f(it) }, ss.zip(keys.map { it.second }))
+    }
     chart(0, "Resting heart rate", "bpm", 0, 1f, "rhr" to red)
     chart(1, "Heart rate variability", "ms", 0, 1f, "hrv" to blue)
     chart(2, "Time asleep", "h", 1, 60f, "sleep_min" to indigo)
     chart(3, "Blood pressure", "mmHg", 0, 1f, "bp_sys" to red, "bp_dia" to ink)
     put("Estimates from a consumer ring, not medical measurements.", 297.5f, 806f, 9f, grey, align = Paint.Align.CENTER)
+}
 
-    doc.finishPage(page)
-    out.outputStream().use(doc::writeTo)
-    doc.close()
+/**
+ * MH6: one A4 page for the prescriber from GET /settings, `insights.kinds.medication`, GET /journal (since the first
+ * step) and GET /mind?days=14. Only what was logged: no advice, no verdicts. A section with nothing to show is left out.
+ */
+private fun writeTitration(ctx: Context, out: File, settings: JsonObject, medication: JsonObject, journal: JsonObject, mind: JsonObject) = onePage(ctx, out) {
+    fun str(o: JsonObject, k: String) = (o[k] as? JsonPrimitive)?.contentOrNull
+    val today = LocalDate.now()
+    val long = DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault()); val short = DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())
+    val all = Api.doseSteps(settings)
+    // shortcut: the latest 6 steps only, so everything fits one page; a longer titration would need a second page.
+    val steps = all.takeLast(6)
+    fun end(i: Int) = minOf(steps.getOrNull(i + 1)?.from?.minusDays(1) ?: today, today)
+    fun stepOf(d: LocalDate) = steps.indexOfLast { it.from <= d } // -1: before the first step shown
+    val entries = (journal["entries"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+    fun logged(kind: String) = entries.filter { str(it, "kind") == kind }
+        .mapNotNull { e -> runCatching { LocalDate.parse(str(e, "date")) to str(e, "value")!! }.getOrNull() }.sortedBy { it.first }
+    fun section(title: String, y: Float, note: String) { put(title, 48f, y, 13f, title = true); put(note, 547f, y, 9f, grey, align = Paint.Align.RIGHT) }
+
+    val name = str(settings, "medication_name")?.trim().orEmpty().ifEmpty { "Medication" }
+    head("Titration summary", "$name · ${all.size} dose step${if (all.size == 1) "" else "s"} since ${all.first().from.format(long)}" +
+        (if (all.size > steps.size) ", the latest ${steps.size} shown" else "") + " · prepared ${today.format(long)}")
+
+    // Dose steps, with what the dose log says about each.
+    var y = 140f
+    section("Dose steps", y, str(settings, "medication_time")?.takeIf { it.isNotBlank() }?.let { "usual dose time set in the app: ${clock(it)}" }.orEmpty())
+    y += 22f
+    put("Dose", 48f, y, 9f, grey); put("From", 120f, y, 9f, grey); put("To", 215f, y, 9f, grey)
+    put("Days", 345f, y, 9f, grey, align = Paint.Align.RIGHT); put("Days with a dose logged", 460f, y, 9f, grey, align = Paint.Align.RIGHT)
+    put("Median dose time", 547f, y, 9f, grey, align = Paint.Align.RIGHT)
+    val first = logged("medication").mapNotNull { (d, v) -> runCatching { d to LocalTime.parse(v) }.getOrNull() }
+        .groupBy({ it.first }, { it.second }).mapValues { it.value.min() } // the day's first dose
+    steps.forEachIndexed { i, st ->
+        hairline(48f, 547f, y + 6f); y += 18f
+        val days = (ChronoUnit.DAYS.between(st.from, end(i)) + 1).coerceAtLeast(0)
+        val times = first.filterKeys { stepOf(it) == i }.values.sorted()
+        put(Api.mgLabel(st.mg), 48f, y, 10f, title = true)
+        put(st.from.format(long), 120f, y, 10f)
+        put(if (i == steps.lastIndex) "today (current)" else end(i).format(long), 215f, y, 10f)
+        put("$days", 345f, y, 10f, align = Paint.Align.RIGHT)
+        put("${times.size}", 460f, y, 10f, align = Paint.Align.RIGHT)
+        put(times.getOrNull(times.size / 2)?.let(::clock) ?: "—", 547f, y, 10f, if (times.isEmpty()) grey else ink, align = Paint.Align.RIGHT)
+    }
+
+    // By dose: the Heart card's table (same rows, same formatting), steps as columns.
+    val levels = Api.doseLevels(medication).takeLast(steps.size)
+    if (levels.isNotEmpty()) {
+        y += 40f
+        section("By dose", y, "means over each step's days with a dose logged")
+        val w = minOf(90f, 369f / levels.size)
+        fun right(i: Int) = 547f - (levels.size - 1 - i) * w
+        y += 22f
+        levels.forEachIndexed { i, l -> put(Api.mgLabel(l.mg), right(i), y, 10f, title = true, align = Paint.Align.RIGHT) }
+        y += 12f
+        levels.forEachIndexed { i, l -> put("from " + l.from.format(short), right(i), y, 9f, grey, align = Paint.Align.RIGHT) }
+        BY_DOSE.forEach { (label, value) ->
+            hairline(48f, 547f, y + 6f); y += 17f
+            val unit = when (label) { "Blood pressure" -> " (mmHg)"; "Resting HR", "Time asleep", "Bedtime" -> ""; else -> " (1–5)" }
+            put(label + unit, 48f, y, 10f, grey)
+            levels.forEachIndexed { i, l -> val v = value(l.means); put(v ?: "—", right(i), y, 10f, if (v == null) grey else ink, align = Paint.Align.RIGHT) }
+        }
+        y += 16f
+        put("— : fewer than 3 days with a dose logged and that value. Ratings are the user's own: 1 to 5; Crash 1 none … 5 strong.", 48f, y, 8f, grey)
+    }
+
+    // Blood pressure readings as logged, under the step their date falls in; the latest ones when there are many.
+    val bp = logged("bp").mapNotNull { (d, v) -> v.split("/").mapNotNull { it.trim().toIntOrNull() }.takeIf { it.size == 2 }?.let { Triple(d, it[0], it[1]) } }
+        .groupBy { stepOf(it.first) }
+    if (steps.indices.any { bp[it] != null }) {
+        y += 36f
+        section("Blood pressure by step", y, "mmHg, as logged")
+        val cap = 5 * (if (steps.size <= 3) 2 else 1) // 5 readings a line
+        steps.forEachIndexed { i, st ->
+            val rs = bp[i] ?: return@forEachIndexed
+            hairline(48f, 547f, y + 6f); y += 18f
+            put(Api.mgLabel(st.mg), 48f, y, 10f, title = true)
+            val shown = if (rs.size > cap) rs.takeLast(cap - 1) else rs
+            val cells = (if (rs.size > cap) listOf(null) else emptyList()) + shown
+            cells.forEachIndexed { k, r ->
+                if (k > 0 && k % 5 == 0) y += 15f
+                val x = 120f + (k % 5) * 85.4f
+                if (r == null) put("${rs.size - shown.size} earlier", x, y, 9f, grey)
+                else { put(r.first.format(short), x, y, 9f, grey); put("${r.second}/${r.third}", x + 34f, y, 10f) }
+            }
+        }
+    }
+
+    // The last 14 days of energy and mood (daily means of the user's ratings), on the fixed 1 to 5 scale.
+    val days = (mind["days"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.takeLast(14)
+    fun scale(k: String) = days.map { d -> (d[k] as? JsonPrimitive)?.contentOrNull?.toFloatOrNull()?.takeIf { it in 1f..5f } }
+    val energy = scale("energy"); val mood = scale("valence")
+    if ((energy + mood).any { it != null }) {
+        y += 40f
+        section("Energy and mood, last 14 days", y, "the user's own ratings, daily mean; gaps are days without one")
+        y += 18f
+        mark.color = orange; cv.drawCircle(52f, y - 3f, 3f, mark); put("Energy (1 flat … 5 wired)", 60f, y, 9f)
+        mark.color = indigo; cv.drawCircle(202f, y - 3f, 3f, mark); put("Mood (1 bad … 5 good)", 210f, y, 9f)
+        val top = y + 14f; val bottom = maxOf(minOf(top + 150f, 770f), top + 60f)
+        hairline(72f, 547f, (top + bottom) / 2)
+        put("3", 66f, (top + bottom) / 2 + 3f, 8f, grey, align = Paint.Align.RIGHT)
+        // Every day's date under its point, and a rule with the new dose where the step changes.
+        val step = 467f / maxOf(days.size - 1, 1) // same x as `lines` puts the points
+        days.forEachIndexed { d, o ->
+            val x = 76f + step * d
+            str(o, "date")?.let { runCatching { LocalDate.parse(it).format(short) }.getOrNull() }?.let { put(it, x, bottom + 13f, 7.5f, grey, align = Paint.Align.CENTER) }
+            val mg = str(o, "mg")?.toDoubleOrNull()
+            if (d > 0 && mg != null && mg != str(days[d - 1], "mg")?.toDoubleOrNull()) {
+                mark.color = grey; cv.drawLine(x - step / 2, top, x - step / 2, bottom, mark)
+                put(Api.mgLabel(mg), x - step / 2 + 3f, top + 10f, 8f, grey)
+            }
+        }
+        lines(72f, top, 547f, bottom, 1f, 5f, { "%.0f".format(it) }, listOf(energy to orange, mood to indigo))
+    }
+    put("Estimates from a consumer ring and the user's own ratings, not medical measurements.", 297.5f, 806f, 9f, grey, align = Paint.Align.CENTER)
 }
 
 private val INTERVALS = listOf(5, 15, 30, 60, 0)
