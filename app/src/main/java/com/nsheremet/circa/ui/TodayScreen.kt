@@ -7,6 +7,11 @@ import androidx.compose.material.icons.rounded.FitnessCenter
 import androidx.compose.material.icons.rounded.Bedtime
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Coffee
+import androidx.compose.material.icons.rounded.Cookie
+import androidx.compose.material.icons.rounded.ElectricBolt
+import androidx.compose.material.icons.rounded.Hotel
+import androidx.compose.material.icons.rounded.SmokingRooms
+import com.nsheremet.circa.Prefs.hiddenTiles
 import androidx.compose.material.icons.rounded.HorizontalRule
 import androidx.compose.material.icons.rounded.Medication
 import androidx.compose.material.icons.rounded.Restaurant
@@ -495,7 +500,7 @@ private fun DaySoFar(d: JsonObject, today: List<Entry>, onFix: () -> Unit) {
     val zone = ZoneId.systemDefault()
     val now = d["now"].obj()
     val feel = feelingLooks()
-    val had = mapOf("coffee" to Icons.Rounded.Coffee, "alcohol" to Icons.Rounded.WineBar, "meal" to Icons.Rounded.Restaurant)
+    val had = INTAKES.associate { it.first to it.third }
     // Scale taps are not in `/today.moments`: read the day's from the phone's own store, where a cancel (9) overwrote its tap.
     val ctx = LocalContext.current
     val taps by produceState(emptyList<Triple<Long, String, Int>>(), d) {
@@ -528,7 +533,7 @@ private fun DaySoFar(d: JsonObject, today: List<Entry>, onFix: () -> Unit) {
         (d["moments"] as? JsonArray).orEmpty().mapNotNull { it.obj() }.mapNotNull { m ->
             val s = m["ts"].num() ?: return@mapNotNull null
             val k = m["kind"].str().orEmpty()
-            DayLine(Instant.ofEpochSecond(s.toLong()).atZone(zone).toLocalTime(), k.replaceFirstChar { it.uppercase() }, null, feel[k]?.first ?: had[k] ?: Icons.Rounded.HorizontalRule, feel[k]?.second)
+            DayLine(Instant.ofEpochSecond(s.toLong()).atZone(zone).toLocalTime(), intakeLabel(k), null, feel[k]?.first ?: had[k] ?: Icons.Rounded.HorizontalRule, feel[k]?.second)
         } +
         (d["workouts"] as? JsonArray).orEmpty().mapNotNull { it.obj() }.mapNotNull { w ->
             val s = w["start"].num() ?: return@mapNotNull null
@@ -1797,13 +1802,16 @@ private fun RightNow(day: String, mood: JsonObject?, scope: CoroutineScope, onFe
     }
     LaunchedEffect(just) { if (just != null) { delay(10_000); just = null } }
     val nowMs = { System.currentTimeMillis() / 1000 * 1000 }
-    val tiles = @Composable { kinds: List<Triple<String, ImageVector, Color?>> ->
+    // A short row keeps the tile width of a full one ([cols] slots), left-aligned.
+    val tiles = @Composable { kinds: List<Triple<String, ImageVector, Color?>>, cols: Int ->
         Row(Modifier.fillMaxWidth()) {
             kinds.forEach { (k, icon, color) ->
-                NowTile(k.replaceFirstChar { it.uppercase() }, icon, color, just?.kind == k, Modifier.weight(1f), { pick = k to null }) { put(k, nowMs()) }
+                NowTile(intakeLabel(k), icon, color, just?.kind == k && just?.v == null, Modifier.weight(1f), { pick = k to null }) { put(k, nowMs()) }
             }
+            repeat(cols - kinds.size) { Spacer(Modifier.weight(1f)) }
         }
     }
+    val hidden = ctx.hiddenTiles
     val looks = feelingLooks()
     // Today's latest, or the dot just tapped until the reload answers.
     fun shown(scale: String, key: String) = just?.takeIf { it.kind == scale }?.v ?: mood?.get(key).num()?.roundToInt()
@@ -1814,16 +1822,16 @@ private fun RightNow(day: String, mood: JsonObject?, scope: CoroutineScope, onFe
                 Text("I feel", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l))
                 DotScale("Energy", "Flat", "Wired", c.energy, shown("energy", "energy"), { pick = "energy" to it }) { put("energy", nowMs(), it) }
                 DotScale("Mood", "Low", "Good", c.mood, shown("mood", "valence"), { pick = "mood" to it }) { put("mood", nowMs(), it) }
-                FEELINGS.chunked(3).forEach { row -> tiles(row.map { k -> looks.getValue(k).let { (i, col) -> Triple(k, i, col) } }) }
-                Hairline(Modifier.padding(start = AppSpace.l))
-                Text("I just had", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l))
-                tiles(listOf(
-                    Triple("coffee", Icons.Rounded.Coffee, null), Triple("alcohol", Icons.Rounded.WineBar, null),
-                    Triple("meal", Icons.Rounded.Restaurant, null), Triple("dose", Icons.Rounded.Medication, null),
-                ))
+                FEELINGS.chunked(3).forEach { row -> tiles(row.map { k -> looks.getValue(k).let { (i, col) -> Triple(k, i, col) } }, 3) }
+                val shownIntakes = INTAKES.filter { it.first !in hidden }
+                if (shownIntakes.isNotEmpty()) {
+                    Hairline(Modifier.padding(start = AppSpace.l))
+                    Text("I just had", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l))
+                    shownIntakes.chunked(4).forEach { row -> tiles(row.map { (k, _, icon) -> Triple(k, icon, null) }, 4) }
+                }
                 just?.let { j ->
                     Row(Modifier.padding(start = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
-                        Text("${j.kind.replaceFirstChar { it.uppercase() }}${j.v?.let { " $it" }.orEmpty()} · ${clock(j.ts / 1000.0)}", style = AppType.subhead, color = c.secondaryLabel)
+                        Text("${if (j.v == null) intakeLabel(j.kind) else j.kind.replaceFirstChar { it.uppercase() }}${j.v?.let { " $it" }.orEmpty()} · ${clock(j.ts / 1000.0)}", style = AppType.subhead, color = c.secondaryLabel)
                         Text(
                             "Undo", style = AppType.footnote.copy(fontWeight = FontWeight.Medium), color = c.tint,
                             modifier = Modifier.padding(start = AppSpace.xs).clip(RoundedCornerShape(50)).clickable(role = Role.Button) { haptic.tick(); undo(j) }.padding(horizontal = AppSpace.m, vertical = 9.dp),
@@ -1842,6 +1850,16 @@ private fun RightNow(day: String, mood: JsonObject?, scope: CoroutineScope, onFe
         }
     }
 }
+
+/** The "I just had" tiles in order: kind (`moment_<kind>`, or "dose" = a medication journal row), label, icon. Settings › Right now tiles hides any of them. */
+internal val INTAKES = listOf(
+    Triple("coffee", "Coffee", Icons.Rounded.Coffee), Triple("alcohol", "Alcohol", Icons.Rounded.WineBar),
+    Triple("meal", "Meal", Icons.Rounded.Restaurant), Triple("dose", "Dose", Icons.Rounded.Medication),
+    Triple("snack", "Snack", Icons.Rounded.Cookie), Triple("energy", "Energy drink", Icons.Rounded.ElectricBolt),
+    Triple("nicotine", "Nicotine", Icons.Rounded.SmokingRooms), Triple("nap", "Nap", Icons.Rounded.Hotel),
+)
+
+private fun intakeLabel(kind: String) = INTAKES.firstOrNull { it.first == kind }?.second ?: kind.replaceFirstChar { it.uppercase() }
 
 /** The tap Undo takes back: [kind] (a feeling, an intake, "dose", or the scale "energy" / "mood" with its value [v]), at [ts] epoch ms; [id] = the dose's journal row. */
 private class Just(val kind: String, val ts: Long, val id: Int? = null, val v: Int? = null)

@@ -35,6 +35,10 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bedtime
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Coffee
+import androidx.compose.material.icons.rounded.Cookie
+import androidx.compose.material.icons.rounded.ElectricBolt
+import androidx.compose.material.icons.rounded.Hotel
+import androidx.compose.material.icons.rounded.SmokingRooms
 import androidx.compose.material.icons.rounded.DirectionsBike
 import androidx.compose.material.icons.rounded.FitnessCenter
 import androidx.compose.material.icons.rounded.HorizontalRule
@@ -366,6 +370,10 @@ private fun EventChip(kind: String) {
         "alcohol" -> Icons.Rounded.WineBar to null
         "meal" -> Icons.Rounded.Restaurant to null
         "dose" -> Icons.Rounded.Medication to null
+        "snack" -> Icons.Rounded.Cookie to null
+        "energy" -> Icons.Rounded.ElectricBolt to null
+        "nicotine" -> Icons.Rounded.SmokingRooms to null
+        "nap" -> Icons.Rounded.Hotel to null
         else -> Icons.Rounded.HorizontalRule to null
     }
     Box(

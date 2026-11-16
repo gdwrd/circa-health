@@ -41,6 +41,7 @@ object Prefs {
     private const val KEY_MOVES_REG       = "moves_registered"
     private const val KEY_REPORT_WRITER   = "report_writer"
     private const val KEY_REPORT_NAME     = "report_name"
+    private const val KEY_HIDDEN_TILES    = "hidden_tiles"
 
     private fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -128,6 +129,11 @@ object Prefs {
     var Context.reportName: String
         get() = prefs(this).getString(KEY_REPORT_NAME, "") ?: ""
         set(v) = prefs(this).edit().putString(KEY_REPORT_NAME, v).apply()
+
+    /** Settings › Right now tiles: the "I just had" tile kinds left off Today. */
+    var Context.hiddenTiles: Set<String>
+        get() = prefs(this).getStringSet(KEY_HIDDEN_TILES, null)?.toSet() ?: setOf("nicotine", "nap")
+        set(v) = prefs(this).edit().putStringSet(KEY_HIDDEN_TILES, v).apply()
 
     /** Notification access, granted by the user in system Settings; needed to see what is playing. */
     val Context.notificationAccess: Boolean

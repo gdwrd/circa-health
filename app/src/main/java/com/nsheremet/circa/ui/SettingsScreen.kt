@@ -71,6 +71,8 @@ import androidx.compose.material.icons.rounded.IosShare
 import androidx.compose.material.icons.rounded.Medication
 import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.Coffee
+import com.nsheremet.circa.Prefs.hiddenTiles
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.RadioButtonUnchecked
@@ -198,6 +200,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var notifyGranted by remember { mutableStateOf(notifyOk()) }
     var car by remember { mutableStateOf(ctx.carName) }
     var writerOn by remember { mutableStateOf(ctx.reportWriter) }
+    var hiddenTiles by remember { mutableStateOf(ctx.hiddenTiles) }
     var reportName by remember { mutableStateOf(ctx.reportName) }
     var offerModel by remember { mutableStateOf(false) }
     var pickCar by remember { mutableStateOf<List<BluetoothDevice>?>(null) } // the bonded devices while the Car dialog is open
@@ -418,6 +421,8 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 GroupRow(Icons.Rounded.RadioButtonUnchecked, c.sleep, "Ring", if (interval <= 0) "Sync off" else "Every ${intervalLabel(interval)}") { open("Ring") }
                 GroupHairline()
                 GroupRow(Icons.Rounded.Person, c.tint, "You", steps.toIntOrNull()?.let { "%,d steps".format(it) }.orEmpty()) { open("You") }
+                GroupHairline()
+                GroupRow(Icons.Rounded.Coffee, c.energy, "Right now tiles", "${INTAKES.count { it.first !in hiddenTiles }} on") { open("Right now tiles") }
             }
         }
         med?.let { s ->
@@ -736,6 +741,20 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                     Text("Right now", style = AppType.body)
                     Text(facts?.let { "Last 24 h: ${it.asleep} asleep · awake ${it.awake}" } ?: "No fresh ring data", style = AppType.subhead, color = c.secondaryLabel)
                     facts?.let(::driveWarning)?.let { Text(it.first, style = AppType.subhead, color = c.signalHigh) }
+                }
+            }
+        }
+        }
+        "Right now tiles" -> {
+        item {
+            Section(null, "The \"I just had\" tiles on Today. A hidden tile keeps what it already logged.") {
+                INTAKES.forEachIndexed { i, (kind, label, _) ->
+                    if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
+                    SwitchRow(label, kind !in hiddenTiles) { on ->
+                        haptic.tick()
+                        hiddenTiles = if (on) hiddenTiles - kind else hiddenTiles + kind
+                        ctx.hiddenTiles = hiddenTiles
+                    }
                 }
             }
         }
