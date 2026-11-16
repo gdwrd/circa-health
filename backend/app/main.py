@@ -648,12 +648,23 @@ def get_report(day: str | None = Query(None, alias="date"), given: list[str] = Q
     ready = next((r["readiness_score"] for r in rows if r["date"] == d), None)
     m, eps = notify.cardio_base(d)[0], notify.episodes(d)[0]
     ctx = {"calm": cfg["calm"] == "1", "guess_pending": cfg["guess"] == "1" and d.isoformat() not in db.guesses(d, d),
-           "need_min": db.setting("sleep_need_min"), "plan": notify.tonight(d), "window": notify.bedtime_window(d),
-           "debt": debt(d), "target": cardio.target(ready, m) if cfg["birth_year"] else None, "cardio_base": m,
+           "plan": notify.tonight(d), "window": notify.bedtime_window(d),
+           "debt": debt(d), "target": cardio.target(ready, m) if cfg["birth_year"] else None,
            "moments": _moments(d - timedelta(1)), "because": notify.because(d - timedelta(1), d),
            "explain": notify.explain(d), "tz": samples.tz(), "given": given,
            "closed": next((e for i in range(3) if (e := insights.closed_today(eps, d - timedelta(i)))), None)}
-    return {"date": d.isoformat(), "cards": report.cards(d, rows, _week(d - timedelta(1)), _week(d - timedelta(8)), ctx)}
+    return {"date": d.isoformat(), "cards": report.cards(d, rows, ctx)}
+
+
+@api.get("/report/week")
+def get_report_week(start: str | None = None) -> dict:
+    """The Last week report's data: a finished Mon to Sun week (default the last one), per-day values and cards."""
+    t = _today()
+    s = _day(start) if start else t - timedelta(t.weekday() + 7)
+    if s.weekday() != 0 or s + timedelta(6) >= t:
+        raise HTTPException(422, "start must be the Monday of a finished week")
+    return report.week_cards(s, db.days(s - timedelta(14), s + timedelta(6)),
+                             {"calm": db.settings()["calm"] == "1", "need_min": db.setting("sleep_need_min")})
 
 
 @api.get("/timeline")

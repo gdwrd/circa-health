@@ -325,36 +325,6 @@ def _spread_fact(spread: float | None, calm: bool) -> str | None:
     return f"Bedtimes varied by about {_duration(spread)}" if spread >= 15 else "Bedtimes were regular"
 
 
-def _week(d: date, rows: list[dict], week: dict, prev: dict, calm: bool) -> dict | None:
-    if week["scored_days"] < 3:
-        return None
-    this = [r for r in rows if d - timedelta(7) <= r["date"] < d]
-    before = [r for r in rows if r["date"] < d - timedelta(7)]
-
-    def avg(rs: list[dict], k: str) -> float | None:
-        v = [x for r in rs if (x := GET[k](r)) is not None]
-        return mean(v) if len(v) >= 3 else None
-
-    # only the differences from the week before: totals, workouts and best nights are on the Trends page
-    a, b, sa, sb, spread = week["sleep_avg_min"], prev["sleep_avg_min"], week["steps_total"], prev["steps_total"], _spread(rows, d)
-    full = prev["scored_days"] >= 3  # a week the ring was mostly off is no reference
-    facts = [full and a is not None and b and abs(a - b) >= 15
-             and f"Slept {'' if calm else _duration(abs(a - b)) + ' '}{'more' if a > b else 'less'} a night than the week before"]
-    for k in ("rhr", "hrv"):
-        x, ref = avg(this, k), avg(before, k)
-        if g := _gap(k, x, ref):
-            noun, unit, _, hi, lo = BODY[k]
-            gap, more, less = UNITS[unit]
-            facts.append(f"{noun} {'' if calm else gap(x - ref, ref) + ' '}{more if g > 0 else less} than the week before: "
-                         + (hi if g > 0 else lo))
-    facts += [full and sa is not None and sb and abs(sa - sb) > SAME * sb
-              and f"Walked {'' if calm else f'{round(100 * abs(sa - sb) / sb)} % '}{'more' if sa > sb else 'less'} than the week before",
-              spread is not None and spread > SPREAD_MAX_MIN and _spread_fact(spread, calm)]
-    facts = [f for f in facts if f][:3]
-    line = "Nothing stood out this week"
-    return _card("week", None, facts) if facts else _card("week", None, [line], (), line + ".")
-
-
 def _next_week(d: date, rows: list[dict], week: dict, ctx: dict) -> dict | None:
     if d.weekday() > 2 or week["scored_days"] < 3:
         return None
@@ -480,9 +450,9 @@ def update(now: float, since: float, day: dict, given: list[str], ctx: dict) -> 
             **{k: c[k] for k in ("facts", "advice", "fallback")}}
 
 
-def cards(d: date, rows: list[dict], week: dict, prev: dict, ctx: dict) -> list[dict]:
-    """rows: db.days(d - 13, d); week / prev: main._week ending d - 1 and d - 8; ctx: calm, guess_pending, need_min,
-    plan (notify.tonight), window (notify.bedtime_window), debt, target (cardio.target), cardio_base, moments and
+def cards(d: date, rows: list[dict], ctx: dict) -> list[dict]:
+    """rows: db.days(d - 13, d); ctx: calm, guess_pending,
+    plan (notify.tonight), window (notify.bedtime_window), debt, target (cardio.target), moments and
     because (of d - 1), explain (notify.explain), closed (episode closed in the last 3 days or None), tz (for clock times),
     given (advice lines shown on d - 1, followed up in today)."""
     row, found = _on(rows, d), _findings(d, rows, ctx["calm"])
@@ -499,6 +469,97 @@ def cards(d: date, rows: list[dict], week: dict, prev: dict, ctx: dict) -> list[
         rest = [t for t in mine if t not in used]
         return rest if rest or not mine else None
 
-    out = [today, _yesterday(d, rows, left("yesterday")), _night(row, left("night")), _tonight(ctx),
-           _week(d, rows, week, prev, ctx["calm"]), _next_week(d, rows, week, ctx), _body(row, ctx)]
+    out = [today, _yesterday(d, rows, left("yesterday")), _night(row, left("night")), _tonight(ctx), _body(row, ctx)]
     return [c for c in out if c and c["facts"]]
+
+
+MAX_WEEK_FACTS = 5
+
+
+def _night_of(d: date) -> str:
+    return f"the night into {d:%A}"  # a row's night ends on its date
+
+
+def _week_sleep(start: date, rows: list[dict], before: list[dict], full: bool, ctx: dict) -> dict | None:
+    calm, need = ctx["calm"], ctx["need_min"]
+    nights = [(r["date"], x) for r in rows if (x := r["inputs"].get("sleep_min")) is not None]
+    if not nights:
+        return None
+    a = mean(x for _, x in nights)
+    b = [x for r in before if (x := r["inputs"].get("sleep_min")) is not None]
+    b = mean(b) if full and len(b) >= 3 else None  # a week the ring was mostly off is no reference
+    short, long = min(nights, key=lambda n: n[1]), max(nights, key=lambda n: n[1])
+    under = sum(x < need for _, x in nights)
+    vs_need = "Slept " + _than(a, need, "you need", "more", "less") if calm else \
+        f"Slept {_duration(a)} a night on average, your need is {_duration(need)}"
+    facts = [
+        vs_need + (": can leave you less rested" if a < need - SLEEP_SHORT_MIN else ""),
+        b is not None and ("Nights about as long as the week before" if abs(a - b) < 15 else
+                           f"Slept {'' if calm else _duration(abs(a - b)) + ' '}{'more' if a > b else 'less'} a night "
+                           "than the week before"),
+        len(nights) >= 2 and (f"Shortest night was {_night_of(short[0])}, the longest {_night_of(long[0])}" if calm else
+                              f"Shortest night was {_night_of(short[0])} ({_duration(short[1])}), "
+                              f"the longest {_night_of(long[0])} ({_duration(long[1])})"),
+        _spread_fact(_spread(rows, start + timedelta(7)), calm),
+        ("No night under your need" if under == 0 else "Every night under your need" if under == len(nights)
+         else "Some nights under your need") if calm else f"{under} of {len(nights)} nights under your need"]
+    return _card("week_sleep", None, [f for f in facts if f][:MAX_WEEK_FACTS])
+
+
+def _week_activity(rows: list[dict], before: list[dict], full: bool, base: float | None, calm: bool) -> dict | None:
+    days = [(r["date"], x) for r in rows if (x := r["inputs"].get("steps")) is not None]
+    ws = [w for r in rows for w in r["c"].get("workouts") or []]
+    loads = [x for r in rows if (x := r["inputs"].get("cardio_load")) is not None]
+    if not days and not ws and not loads:
+        return None
+    total = sum(x for _, x in days)
+    prev = [x for r in before if (x := r["inputs"].get("steps")) is not None]
+    steps = days and (f"Walked {round(total):,} steps this week" if not calm else "")
+    if days and full and prev and (p := sum(prev)):
+        if abs(total - p) <= SAME * p:
+            steps = "Walked about as much as the week before" if calm else f"{steps}, about as much as the week before"
+        else:
+            w = "more" if total > p else "less"
+            steps = (f"Walked {w} than the week before" if calm
+                     else f"{steps}, {round(100 * abs(total - p) / p)} % {w} than the week before") \
+                + (": a more active week" if total > p else ": a quieter week")
+    hi, lo = max(days, key=lambda n: n[1], default=None), min(days, key=lambda n: n[1], default=None)
+    kinds = _join(sorted({w["kind"] for w in ws})) if ws else ""
+    load = mean(loads) if loads else None
+    facts = [
+        steps,
+        len(days) >= 2 and (f"Most active day {hi[0]:%A}, least active {lo[0]:%A}" if calm else
+                            f"Most active day {hi[0]:%A} ({round(hi[1]):,} steps), least active {lo[0]:%A} "
+                            f"({round(lo[1]):,} steps)"),
+        "No workouts this week" if not ws else f"Workouts this week: {kinds}" if calm else
+        f"{len(ws)} workout{'s' if len(ws) > 1 else ''}, {_duration(sum(w['minutes'] for w in ws))} in all: {kinds}",
+        load is not None and base and (("Cardio load " + _than(load, base, "usual")) if calm else
+                                       f"Cardio load {round(load)} a day, your usual is {round(base)}")
+        + (": a lighter week for your heart" if load < MOVE_RATIO * base
+           else ": a heavier week for your heart" if load > (1 + LOAD_SAME) * base else "")]
+    return _card("week_activity", None, [f for f in facts if f][:MAX_WEEK_FACTS])
+
+
+def week_cards(start: date, rows: list[dict], ctx: dict) -> dict:
+    """The finished week start (a Monday) to start + 6. rows: db.days(start - 14, start + 6); ctx: calm, need_min.
+    LW2 / LW3 append their days keys and cards here."""
+    end = start + timedelta(6)
+    wk = [r for r in rows if start <= r["date"] <= end]
+    before = [r for r in rows if start - timedelta(7) <= r["date"] < start]
+
+    def scored(rs: list[dict]) -> int:
+        return sum(any(r.get(k) is not None for k in ("sleep_score", "readiness_score", "activity_score")) for r in rs)
+
+    days = []
+    for i in range(7):
+        r = _on(rows, start + timedelta(i))
+        days.append({"date": (start + timedelta(i)).isoformat(), "sleep_min": r["inputs"].get("sleep_min"),
+                     "need_min": ctx["need_min"], "bed_min": r["inputs"].get("bed_start"), "steps": r["inputs"].get("steps"),
+                     "load": r["inputs"].get("cardio_load"),
+                     "workout_min": sum(w["minutes"] for w in r["c"].get("workouts") or [])})
+    out = []
+    if scored(wk) >= 3:
+        full = scored(before) >= 3
+        base = scoring.baseline([r["inputs"].get("cardio_load") for r in rows if r["date"] < start])  # notify.cardio_base(start)
+        out = [_week_sleep(start, wk, before, full, ctx), _week_activity(wk, before, full, base, ctx["calm"])]
+    return {"start": start.isoformat(), "end": end.isoformat(), "days": days, "cards": [c for c in out if c]}

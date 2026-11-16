@@ -45,8 +45,8 @@ def _ctx(**kw: object) -> dict:
             "moments": [], "because": [], "explain": [], "closed": None, "tz": timezone.utc, "given": []} | kw
 
 
-def _cards(rows: list[dict] | None = None, d: date = MON, week: dict | None = None, **kw: object) -> dict[str, dict]:
-    out = report.cards(d, rows or _rows(d), week or _week(), _week(), _ctx(**kw))
+def _cards(rows: list[dict] | None = None, d: date = MON, **kw: object) -> dict[str, dict]:
+    out = report.cards(d, rows or _rows(d), _ctx(**kw))
     for c in out:
         assert 1 <= len(c["facts"]) <= report.MAX_FACTS and len(c["advice"]) <= report.MAX_ADVICE and c["fallback"]
         assert isinstance(c["quiet"], bool)
@@ -127,7 +127,7 @@ def test_quiet_cards() -> None:
     assert cs["night"] == {"kind": "night", "verdict": None, "facts": ["A usual night for you"], "advice": [], "quiet": True,
                            "fallback": "A usual night for you."}
     assert cs["yesterday"]["quiet"] and cs["yesterday"]["fallback"] == "A usual day for you."
-    assert cs["week"]["quiet"] and not cs["next_week"]["quiet"]
+    assert "week" not in cs and "next_week" not in cs  # LW1: the Last week report replaces them
     no_session = _rows()[:-1] + [_row(MON) | {"c": {"signals": CALM_SIG}}]
     assert "night" not in _cards(no_session)
     off = _row(MON - timedelta(1))
@@ -203,7 +203,7 @@ def test_no_score_numbers() -> None:
         cs = _cards(rows, calm=calm, target=TARGET, debt=DEBT, because=LATE_COFFEE,
                     moments=[{"kind": "coffee", "ts": _ts(MON - timedelta(1), 16, 20)}],
                     window={"status": "ok", "start_min": 630, "end_min": 690})
-        assert {"today", "yesterday", "night", "tonight", "week", "next_week"} <= set(cs)
+        assert {"today", "yesterday", "night", "tonight"} <= set(cs)
         for c in cs.values():
             assert not re.search(r"\b(91|83|67)\b", _text(c)), (c["kind"], _text(c))
             assert "score" not in _text(c).lower(), (c["kind"], _text(c))
@@ -241,36 +241,19 @@ def test_yesterday_and_week_wording() -> None:
 
 
 
-def test_week_differences_only() -> None:
-    w = _cards()["week"]
-    assert w == {"kind": "week", "verdict": None, "facts": ["Nothing stood out this week"], "advice": [], "quiet": True,
-                 "fallback": "Nothing stood out this week."}
-    one = _cards(week=_week(asleep=400.0))["week"]
-    assert not one["quiet"] and one["facts"] == ["Slept 50 min less a night than the week before"]
-    assert _cards(week=_week(asleep=440.0))["week"]["quiet"]  # under 15 min: not a difference
-    hr = [_row(MON - timedelta(i), rhr=60.0 if i <= 7 else 55.0) for i in range(13, 0, -1)] + [_row(MON)]
-    steps = _week() | {"steps_total": 50000.0}
-    many = _cards(hr, week=steps | {"sleep_avg_min": 400.0})["week"]
-    assert many["facts"] == ["Slept 50 min less a night than the week before",
-                             "Resting heart rate 5 bpm higher than the week before: can mean your body is still recovering",
-                             "Walked 22 % less than the week before"]
-    assert not re.search(r"63,801|50,000|7 h|60|workout|Best|resilience", _text(many)), _text(many)
-    calm = _cards(hr, week=steps, calm=True)["week"]
-    assert calm["facts"] == ["Resting heart rate higher than the week before: can mean your body is still recovering",
-                             "Walked less than the week before"]
-    assert not re.search(r"\d", _text(calm)) and not re.search(r"\d", _text(_cards(calm=True)["week"]))
+def _next(rows: list[dict] | None = None, d: date = MON, week: dict | None = None, **kw: object) -> dict | None:
+    return report._next_week(d, rows or _rows(d), week or _week(), _ctx(**kw))  # kept for LW3's focus line
 
 
 def test_next_week_focus() -> None:
-    n = _cards(week=_week(asleep=420.0))["next_week"]
+    n = _next(week=_week(asleep=420.0))
     assert n["verdict"] == "sleep" and n["advice"] == ["Aim for 8 h of sleep a night"]
     spread = [_row(MON - timedelta(i), bed_start=540.0 + 150 * (i % 2)) for i in range(13, 0, -1)] + [_row(MON)]
-    assert _cards(spread)["next_week"]["verdict"] == "regular"
-    assert _cards(_rows(), cardio_base=40.0)["next_week"]["verdict"] == "move"
-    assert _cards()["next_week"]["verdict"] == "keep"
+    assert _next(spread)["verdict"] == "regular"
+    assert _next(cardio_base=40.0)["verdict"] == "move"
+    assert _next()["verdict"] == "keep"
     thu = MON + timedelta(3)
-    assert "next_week" not in _cards(_rows(thu), d=thu)
-    assert "week" not in _cards(week=_week(scored=2)) and "next_week" not in _cards(week=_week(scored=2))
+    assert _next(_rows(thu), d=thu) is None and _next(week=_week(scored=2)) is None
 
 
 def test_calm_mode_has_no_digits() -> None:
@@ -283,7 +266,7 @@ def test_calm_mode_has_no_digits() -> None:
                     explain=["alcohol"], target=TARGET, debt=DEBT,
                     given=[PLANNED, "Skip coffee after 14:00", "Keep exercise light"],
                     window={"status": "ok", "start_min": 630, "end_min": 690})
-        assert set(cs) == {"today", "yesterday", "night", "tonight", "week", "next_week", "body"}
+        assert set(cs) == {"today", "yesterday", "night", "tonight", "body"}
         assert cs["today"]["advice"] and cs["tonight"]["advice"] and not cs["today"]["quiet"]
         for c in cs.values():
             assert not re.search(r"\d", _text(c)), (c["kind"], _text(c))
@@ -476,3 +459,79 @@ def test_report_endpoint() -> None:
     assert j["date"] == d.isoformat() and kinds[:2] == ["today", "yesterday"] and "body" not in kinds
     assert all(set(x) == {"kind", "verdict", "facts", "advice", "fallback", "quiet"} for x in j["cards"])
     assert j["cards"][0]["quiet"] and g["cards"][0]["facts"] == ["No alcohol yesterday, as planned"]
+
+
+WEEK = MON - timedelta(7)  # Mon 9 to Sun 15 Nov 2026
+DAY_KEYS = {"date", "sleep_min", "need_min", "bed_min", "steps", "load", "workout_min"}
+
+
+def _lw(this: dict[int, dict] | None = None, calm: bool = False) -> dict:
+    """The week WEEK..WEEK+6 (day i gets this[i] as _row kwargs) after 14 days of _row defaults."""
+    rows = [_row(WEEK - timedelta(i)) for i in range(14, 0, -1)] + \
+           [_row(WEEK + timedelta(i), **(this or {}).get(i, {})) for i in range(7)]
+    out = report.week_cards(WEEK, rows, {"calm": calm, "need_min": 480.0})
+    for c in out["cards"]:
+        assert 1 <= len(c["facts"]) <= report.MAX_WEEK_FACTS and c["fallback"] and not c["quiet"]
+        assert not re.search(r"score|oura", _text(c).lower()), _text(c)
+    return out
+
+
+BUSY = {i: {"asleep": a, "steps": s, "cardio_load": 12.0}
+        for i, (a, s) in enumerate(zip((400, 420, 440, 460, 480, 500, 300), (8000, 8000, 8000, 21000, 8000, 8000, 3000)))}
+
+
+def test_week_shape() -> None:
+    w = _lw(BUSY)
+    assert (w["start"], w["end"]) == ("2026-11-09", "2026-11-15") and len(w["days"]) == 7
+    assert all(set(d) == DAY_KEYS for d in w["days"])
+    assert w["days"][3] == {"date": "2026-11-12", "sleep_min": 460, "need_min": 480.0, "bed_min": 660.0, "steps": 21000,
+                            "load": 12.0, "workout_min": 35}
+    assert [c["kind"] for c in w["cards"]] == ["week_sleep", "week_activity"]
+
+
+def test_week_sleep() -> None:
+    assert _lw(BUSY)["cards"][0]["facts"] == [
+        "Slept 7 h 9 min a night on average, your need is 8 h: can leave you less rested",
+        "Slept 21 min less a night than the week before",
+        "Shortest night was the night into Sunday (5 h), the longest the night into Saturday (8 h 20 min)",
+        "Bedtimes were regular",
+        "5 of 7 nights under your need"]
+    same = _lw()["cards"][0]["facts"]
+    assert "Nights about as long as the week before" in same and "7 of 7 nights under your need" in same
+
+
+def test_week_activity() -> None:
+    assert _lw(BUSY)["cards"][1]["facts"] == [
+        "Walked 64,000 steps this week, 14 % more than the week before: a more active week",
+        "Most active day Thursday (21,000 steps), least active Sunday (3,000 steps)",
+        "7 workouts, 4 h 5 min in all: walk",
+        "Cardio load 12 a day, your usual is 20: a lighter week for your heart"]
+    assert _lw()["cards"][1]["facts"][0] == "Walked 56,000 steps this week, about as much as the week before"
+
+
+def test_week_calm_and_few_days() -> None:
+    for c in _lw(BUSY, calm=True)["cards"]:
+        assert not re.search(r"\d", _text(c)), _text(c)
+        assert len(c["facts"]) >= 3
+    few = _lw({i: {"ready": None, "sleep": None, "act": None} for i in range(5)})
+    assert few["cards"] == [] and len(few["days"]) == 7  # under 3 scored days: the graphs only
+
+
+def test_report_week_endpoint() -> None:
+    from app.main import _today
+    t = _today()
+    mon = t - timedelta(t.weekday() + 7)
+    for i in range(21):
+        db.save_day(mon + timedelta(6 - i), (80, 75, 70), {"inputs": {"sleep_min": 450.0, "steps": 8000.0},
+                                                           "signals": CALM_SIG}, {})
+    with TestClient(app) as c:
+        assert c.get("/report/week").status_code == 401
+        j = c.get("/report/week", headers=H).json()
+        assert c.get(f"/report/week?start={mon.isoformat()}", headers=H).json() == j
+        for bad in (mon + timedelta(1), t - timedelta(t.weekday()), mon + timedelta(7), "bad"):
+            assert c.get(f"/report/week?start={bad}", headers=H).status_code == 422, bad
+        assert c.get(f"/report/week?start={(mon - timedelta(7)).isoformat()}", headers=H).status_code == 200
+        r = c.get("/report", headers=H).json()
+    assert j["start"] == mon.isoformat() and j["end"] == (mon + timedelta(6)).isoformat() and len(j["days"]) == 7
+    assert [x["kind"] for x in j["cards"]] == ["week_sleep", "week_activity"]
+    assert not {"week", "next_week"} & {x["kind"] for x in r["cards"]}
