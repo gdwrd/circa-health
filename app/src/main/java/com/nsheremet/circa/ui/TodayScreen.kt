@@ -164,6 +164,8 @@ import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -479,7 +481,7 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
         testing = false
         scope.launch { Api.startExperiment(ctx, kind, metric)?.let { exp = it["active"].obj() } }
     }
-    if (sheet) CheckInSheet(journal, medTime, scope, sheetDay, data, ::loadJournal) { sheet = false; sheetDay = null }
+    if (sheet) CheckInSheet(journal, medTime, medStarted, scope, sheetDay, data, ::loadJournal) { sheet = false; sheetDay = null }
 }
 
 /** One Day so far line; [color] null = a quiet intake (rounded square), else a disc in that colour, as the Right now tiles. */
@@ -1016,8 +1018,10 @@ private fun parseJournal(json: JsonElement?): List<Entry> = (json.obj()?.get("en
 internal val KIND_LABEL = mapOf(
     "alcohol" to "Alcohol", "caffeine_late" to "Late caffeine", "late_meal" to "Late meal", "workout" to "Workout",
     "sick" to "Sick", "travel" to "Travel", "stress" to "Stress", "medication" to "Medication", "bp" to "BP", "note" to "Note",
-    "breathe" to "Breathe",
+    "breathe" to "Breathe", "load_social" to "Social load", "load_sensory" to "Sensory load", "load_masking" to "Masking",
 )
+
+private val LOAD = listOf("load_social" to "Social", "load_sensory" to "Sensory", "load_masking" to "Masking")
 
 private val QUESTIONS = listOf(
     "alcohol" to "Alcohol?", "caffeine_late" to "Caffeine after 2 PM?", "late_meal" to "Late meal?", "workout" to "Workout?",
@@ -1036,6 +1040,9 @@ private val WHY = mapOf(
     "bp" to "From a cuff reading; the ring cannot measure blood pressure.",
     "note" to "Anything else worth remembering about the day.",
     "breathe" to "Sessions log themselves; we compare the hour and the night after with the rest.",
+    "load_social" to "People, calls and conversation take energy, even when they go well.",
+    "load_sensory" to "Noise, light, crowds and busy places wear on you over the day.",
+    "load_masking" to "Holding back how you would naturally act takes effort that adds up.",
 )
 
 @Composable
@@ -1079,7 +1086,7 @@ private fun SuggestChip(label: String, logged: Boolean, hint: String = "Suggeste
 /** Writes go to [scope] (outlives the sheet) so a pending note or BP is saved when the sheet closes. [today] is the `/today` body. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CheckInSheet(entries: List<Entry>, medTime: String, scope: CoroutineScope, startDay: Int?, today: JsonObject?, reload: suspend () -> Unit, onDismiss: () -> Unit) {
+private fun CheckInSheet(entries: List<Entry>, medTime: String, medStarted: String?, scope: CoroutineScope, startDay: Int?, today: JsonObject?, reload: suspend () -> Unit, onDismiss: () -> Unit) {
     val c = AppTheme.colors
     val haptic = LocalHapticFeedback.current
     var day by remember { mutableIntStateOf(startDay ?: if (LocalTime.now().hour < 12) 0 else 1) }
@@ -1097,7 +1104,7 @@ private fun CheckInSheet(entries: List<Entry>, medTime: String, scope: Coroutine
             val date = LocalDate.now().minusDays(1L - day)
             // `/today.suggest` belongs to the wake date; what it suggests happened the evening before.
             val suggest = today?.get("suggest").obj()?.takeIf { today?.get("date").str() ==date.plusDays(1).toString() }
-            key(date) { DayForm(date.toString(), entries.filter { it.date == date.toString() }, medTime, scope, suggest, reload) }
+            key(date) { DayForm(date.toString(), entries.filter { it.date == date.toString() }, medTime, medStarted, scope, suggest, reload) }
         }
     }
 }
@@ -1109,7 +1116,7 @@ private fun bpOk(s: String): Boolean {
 
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
-private fun DayForm(date: String, es: List<Entry>, medTime: String, scope: CoroutineScope, suggest: JsonObject?, reload: suspend () -> Unit) {
+private fun DayForm(date: String, es: List<Entry>, medTime: String, medStarted: String?, scope: CoroutineScope, suggest: JsonObject?, reload: suspend () -> Unit) {
     val ctx = LocalContext.current
     val c = AppTheme.colors
     val haptic = LocalHapticFeedback.current
@@ -1135,16 +1142,27 @@ private fun DayForm(date: String, es: List<Entry>, medTime: String, scope: Corou
         }
     }
 
-    InsetCard {
-        QUESTIONS.forEachIndexed { i, (kind, q) ->
-            if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
-            val e = es.firstOrNull { it.kind == kind }
-            ToggleRow(q, WHY[kind], e != null) { on ->
-                haptic.tick()
-                run { if (on) Api.addJournal(ctx, date, kind) else e?.let { Api.deleteJournal(ctx, it.id) } }
+    val toggles = @Composable { rows: List<Pair<String, String>> ->
+        InsetCard {
+            rows.forEachIndexed { i, (kind, q) ->
+                if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
+                val e = es.firstOrNull { it.kind == kind }
+                ToggleRow(q, WHY[kind], e != null) { on ->
+                    haptic.tick()
+                    run { if (on) Api.addJournal(ctx, date, kind) else e?.let { Api.deleteJournal(ctx, it.id) } }
+                }
             }
         }
     }
+    // A grouped-list header: a quiet caption just above its card.
+    val section = @Composable { title: String, body: @Composable () -> Unit ->
+        Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+            Text(title, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.l))
+            body()
+        }
+    }
+    toggles(QUESTIONS)
+    section("The day took") { toggles(LOAD) }
 
     val doses = es.filter { it.kind == "medication" }.sortedBy { it.value }
     var editing by remember { mutableStateOf<Entry?>(null) }
@@ -1186,6 +1204,29 @@ private fun DayForm(date: String, es: List<Entry>, medTime: String, scope: Corou
     if (adding) {
         val second = runCatching { LocalTime.parse(doses.first().value).plusHours(4).toString() }.getOrDefault(medTime)
         TimePickDialog(second, { adding = false }) { t -> adding = false; run { Api.addJournal(ctx, date, "medication", t) } }
+    }
+
+    // A day's rating is its latest `rate_*` sample (`/mind`), or the dot just tapped.
+    val mind by produceState<JsonObject?>(null) { value = (Api.mind(ctx, 2)?.get("days") as? JsonArray)?.mapNotNull { it.obj() }?.firstOrNull { it["date"].str() == date } }
+    val picked = remember { mutableStateMapOf<String, Int>() }
+    var last by remember { mutableLongStateOf(0L) }
+    fun rate(k: String, v: Int) {
+        // An earlier day: 21:00 plus a 24th of today's clock (still 21:xx), so a later re-rating lands on a later second; at one second the larger value wins.
+        val at = if (date == LocalDate.now().toString()) System.currentTimeMillis() / 1000 * 1000
+        else LocalDate.parse(date).atTime(21, 0).atZone(ZoneId.systemDefault()).toEpochSecond() * 1000 + LocalTime.now().toSecondOfDay() / 24 * 1000L
+        val ts = maxOf(at, last + 1000).also { last = it }
+        picked[k] = v
+        scope.launch { pushSample(ctx, "rate_$k", v.toDouble(), ts) }
+    }
+    fun shown(k: String) = picked[k] ?: mind?.get(k).num()?.roundToInt()
+    if (!medStarted.isNullOrEmpty() && doses.isNotEmpty()) section(if (date == LocalDate.now().toString()) "Medication today" else "Medication yesterday") {
+        InsetCard {
+            Column(Modifier.fillMaxWidth().padding(vertical = AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
+                DotScale("Focus", "Low", "Sharp", c.focused, shown("focus"), null) { rate("focus", it) }
+                DotScale("Appetite", "None", "Hungry", c.energy, shown("appetite"), null) { rate("appetite", it) }
+                DotScale("Evening crash", "None", "Strong", c.mind, shown("crash"), null) { rate("crash", it) }
+            }
+        }
     }
 
     val bp = es.firstOrNull { it.kind == "bp" }?.value.orEmpty()
@@ -1633,7 +1674,7 @@ private fun replyFor(scale: String, v: Int) = when {
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun DotScale(name: String, low: String, high: String, color: Color, value: Int?, onLong: (Int) -> Unit, onTap: (Int) -> Unit) {
+private fun DotScale(name: String, low: String, high: String, color: Color, value: Int?, onLong: ((Int) -> Unit)?, onTap: (Int) -> Unit) {
     val c = AppTheme.colors
     val haptic = LocalHapticFeedback.current
     val reduce = LocalReduceMotion.current
@@ -1660,10 +1701,10 @@ private fun DotScale(name: String, low: String, high: String, color: Color, valu
                 Box(
                     Modifier.weight(1f).height(48.dp)
                         .combinedClickable(
-                            remember { MutableInteractionSource() }, null, role = Role.Button, onLongClickLabel = "Pick an earlier time",
-                            onLongClick = { haptic.tick(); onLong(i) },
+                            remember { MutableInteractionSource() }, null, role = Role.Button, onLongClickLabel = onLong?.let { "Pick an earlier time" },
+                            onLongClick = onLong?.let { { haptic.tick(); it(i) } },
                         ) { haptic.tick(); popped++; onTap(i) }
-                        .semantics { contentDescription = "$name $i of 5"; if (chosen) stateDescription = "Latest today" },
+                        .semantics { contentDescription = "$name $i of 5"; if (chosen) stateDescription = "Latest" },
                     contentAlignment = Alignment.Center,
                 ) {
                     val on = fill >= i - 0.01f
