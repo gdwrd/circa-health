@@ -664,9 +664,17 @@ def get_report_week(start: str | None = None) -> dict:
     if s.weekday() != 0 or s + timedelta(6) >= t:
         raise HTTPException(422, "start must be the Monday of a finished week")
     by = _by_day(MIND, s - timedelta(7), s + timedelta(6))
+    on: dict[str, set[str]] = {}  # kind -> the week's evenings that had it (auto rows too)
+    for e in db.journal(s.isoformat()):
+        if e["kind"] in report.WEEK_EFFECTS and e["date"] <= (s + timedelta(6)).isoformat():
+            on.setdefault(e["kind"], set()).add(e["date"])
+    # the effect as known after the week's last night; notify.because lists every night kind of the day it is given
+    effects = [{**b, "nights": len(ds)} for k, ds in on.items() if len(ds) >= 2
+               for b in notify.because(date.fromisoformat(min(ds)), s + timedelta(7)) if b["kind"] == k]
     return report.week_cards(s, db.days(s - timedelta(14), s + timedelta(6)),
                              {"calm": db.settings()["calm"] == "1", "need_min": db.setting("sleep_need_min"),
-                              "mind": {s + timedelta(i): _mind_day(by, s + timedelta(i)) for i in range(-7, 7)}})
+                              "mind": {s + timedelta(i): _mind_day(by, s + timedelta(i)) for i in range(-7, 7)},
+                              "effects": effects})
 
 
 @api.get("/timeline")

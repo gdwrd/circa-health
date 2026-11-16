@@ -22,8 +22,8 @@ MAX_ADVICE = 3
 
 LEAD = {"push": "A good day to push.", "steady": "A steady day, keep to your usual.", "easy": "Take it easy today.",
         "rest": "Rest today.", "usual": "Your usual bedtime works tonight.", "earlier": "Go to bed a little earlier tonight.",
-        "sleep": "Next week, put sleep first.", "regular": "Next week, keep a regular bedtime.",
-        "move": "Next week, move a bit more.", "keep": "Next week, keep doing what you do.",
+        "sleep": "This week, put sleep first.", "regular": "This week, keep a regular bedtime.",
+        "move": "This week, move a bit more.", "keep": "This week, keep doing what you do.",
         "watch": "Your body may be under strain, so rest and hydrate.",
         "back": "Your body signals are back in your usual range."}
 NOTED = {"tired": "feeling tired", "flat": "feeling flat", "wired": "feeling wired", "good": "feeling good",
@@ -325,24 +325,17 @@ def _spread_fact(spread: float | None, calm: bool) -> str | None:
     return f"Bedtimes varied by about {_duration(spread)}" if spread >= 15 else "Bedtimes were regular"
 
 
-def _next_week(d: date, rows: list[dict], week: dict, ctx: dict) -> dict | None:
-    if d.weekday() > 2 or week["scored_days"] < 3:
-        return None
+def _next_week(start: date, wk: list[dict], base: float | None, ctx: dict) -> tuple[str, list[str]]:
+    """The focus for the week after the finished week wk (start to start + 6): (verdict, [focus sentence, tip])."""
     calm, need = ctx["calm"], ctx["need_min"]
-    wk = [r["inputs"] for r in rows if d - timedelta(7) <= r["date"] < d]
-    asleep, spread = week["sleep_avg_min"], _spread(rows, d)
-    loads, base = [i["cardio_load"] for i in wk if i.get("cardio_load") is not None], ctx["cardio_base"]
-    load = mean(loads) if loads else None
+    sleeps = [x for r in wk if (x := r["inputs"].get("sleep_min")) is not None]
+    loads = [x for r in wk if (x := r["inputs"].get("cardio_load")) is not None]
+    asleep, load, spread = mean(sleeps) if sleeps else None, mean(loads) if loads else None, _spread(wk, start + timedelta(7))
     verdict = "sleep" if asleep is not None and asleep < need - SLEEP_SHORT_MIN \
         else "regular" if spread is not None and spread > SPREAD_MAX_MIN \
         else "move" if load is not None and base and load < MOVE_RATIO * base else "keep"
     tip = NEXT.get(verdict) or ("Aim for a full night's sleep every night" if calm else f"Aim for {_duration(need)} of sleep a night")
-    return _card("next_week", verdict, [
-        asleep is not None and ("Slept " + _than(asleep, need, "you need", "more", "less") if calm
-                                else f"Slept {_duration(asleep)} a night, your need is {_duration(need)}"),
-        _spread_fact(spread, calm),
-        load is not None and base and ("Cardio load " + _than(load, base, "usual") if calm
-                                       else f"Cardio load {round(load)} a day, your usual is {round(base)}")], [tip])
+    return verdict, [LEAD[verdict][:-1], tip]
 
 
 def _body(row: dict, ctx: dict) -> dict | None:
@@ -604,10 +597,30 @@ def _week_mind(start: date, mind: dict[date, dict], calm: bool) -> dict | None:
     return c | {"fallback": " ".join(f + "." for f in c["facts"])}  # all of it, in the card's order
 
 
+WEEK_EFFECTS = ("alcohol", "caffeine_late", "late_meal", "workout")  # caffeine_late counts energy drinks (scoring.CAFFEINE)
+MAX_EFFECTS = 3
+
+
+def _week_effects(effects: list[dict], calm: bool) -> dict | None:
+    """effects: notify.because entries of the week's kinds plus nights (how many evenings of the week had it).
+    A kind needs 2+ nights and an effect; most nights first."""
+    out = [f"{LOGGED[b['kind']].capitalize()} on {'more than one night' if calm else str(b['nights']) + ' nights'} "
+           f"this week: after it {_effect(b['effect'], calm)}"
+           for b in sorted(effects, key=lambda b: -b["nights"]) if b["nights"] >= 2 and b["effect"]]
+    return _card("week_effects", None, out[:MAX_EFFECTS]) if out else None
+
+
+def _week_overview(sections: list[dict], focus: tuple[str, list[str]]) -> dict | None:
+    """The first (strongest: each section orders its own) fact of each section, the focus line as advice."""
+    if not sections:
+        return None
+    return _card("week_overview", None, [c["facts"][0] for c in sections], focus[1]) | {"verdict": focus[0]}
+
+
 def week_cards(start: date, rows: list[dict], ctx: dict) -> dict:
     """The finished week start (a Monday) to start + 6. rows: db.days(start - 14, start + 6); ctx: calm, need_min,
-    mind ({date: /mind's day: energy, valence, feelings} for start - 7 to start + 6).
-    baseline: the 14-day usual's "about the same" band of rhr and hrv, for the body graph. LW3 appends its cards here."""
+    mind ({date: /mind's day: energy, valence, feelings} for start - 7 to start + 6), effects (see _week_effects).
+    baseline: the 14-day usual's "about the same" band of rhr and hrv, for the body graph."""
     end = start + timedelta(6)
     wk = [r for r in rows if start <= r["date"] <= end]
     before = [r for r in rows if start - timedelta(7) <= r["date"] < start]
@@ -634,7 +647,9 @@ def week_cards(start: date, rows: list[dict], ctx: dict) -> dict:
     if scored(wk) >= 3:
         full = scored(before) >= 3
         base = scoring.baseline([r["inputs"].get("cardio_load") for r in rows if r["date"] < start])  # notify.cardio_base(start)
-        out = [_week_sleep(start, wk, before, full, ctx), _week_activity(wk, before, full, base, ctx["calm"]),
-               _week_body(start, rows, wk, before, full, ctx["calm"]), _week_mind(start, ctx["mind"], ctx["calm"])]
+        out = [c for c in (_week_sleep(start, wk, before, full, ctx), _week_activity(wk, before, full, base, ctx["calm"]),
+                           _week_body(start, rows, wk, before, full, ctx["calm"]), _week_mind(start, ctx["mind"], ctx["calm"]),
+                           _week_effects(ctx["effects"], ctx["calm"])) if c]
+        out = [_week_overview(out, _next_week(start, wk, base, ctx))] + out
     return {"start": start.isoformat(), "end": end.isoformat(), "days": days, "baseline": band,
             "cards": [c for c in out if c]}
