@@ -113,65 +113,12 @@ fun StressScreen(backend: Boolean?, header: @Composable () -> Unit) {
     LaunchedEffect(Unit) { Api.today(ctx).obj()?.let { today = it } }
 
     val c = AppTheme.colors
+    val openBreathe = LocalOpenBreathe.current
     LargeTitleScaffold("Body", refreshing = refreshing, onRefresh = {
         scope.launch { refreshing = true; try { load(); Api.today(ctx).obj()?.let { today = it } } finally { refreshing = false } }
     }) {
         item { Box(Modifier.padding(bottom = AppSpace.m)) { header() } }
-        val d = data ?: return@LargeTitleScaffold
-        val st = d["stress"].obj()
-        val zones = listOf(
-            Triple("restored", "Restored", c.zoneRestored), Triple("relaxed", "Relaxed", c.zoneRelaxed),
-            Triple("engaged", "Engaged", c.zoneEngaged), Triple("stressed", "Stressed", c.zoneStressed),
-        ).map { (key, name, col) -> Triple(name, (st?.get(key).num() ?: 0.0).roundToInt() * 30, col) }
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                DayPicker(date) { date = it }
-                InsetCard {
-                    if (zones.all { it.second == 0 }) {
-                        EmptyState(Icons.Rounded.Spa, if (date == LocalDate.now()) "No stress data yet today" else "No stress data for this day", "Stress is read every 30 minutes while you wear the ring.")
-                    } else {
-                        Row(Modifier.fillMaxWidth().padding(AppSpace.l), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                            zones.filter { it.second > 0 }.forEach { (_, min, col) ->
-                                Box(Modifier.weight(min.toFloat()).height(16.dp).clip(CircleShape).background(Brush.verticalGradient(listOf(col.copy(alpha = 0.75f), col))))
-                            }
-                        }
-                        zones.forEach { (name, min, col) ->
-                            Hairline(Modifier.padding(start = AppSpace.l))
-                            Row(Modifier.fillMaxWidth().padding(AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
-                                Box(Modifier.size(10.dp).background(col, CircleShape))
-                                Text(name, style = AppType.body, modifier = Modifier.weight(1f).padding(start = AppSpace.m))
-                                Text(duration(min), style = AppType.body, color = c.secondaryLabel)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if (samples.isNotEmpty()) item { ThroughTheDay(samples, starts) }
-        val restorative = d["inputs"].obj()?.get("restorative_min").num()
-        val breathe = d["breathe"].obj()
-        if (st != null || restorative != null || breathe != null) item {
-            val tiles = listOfNotNull(
-                Triple("Daytime stress load", st?.get("stressed_hours").num()?.let { it * 60 }, "in the stressed zone while awake"),
-                Triple("Calm and still", restorative, "calm heart rate, little movement"),
-                breathe?.let { Triple("Mindful minutes", it["today_min"].num(), "${it["week_min"].num()?.roundToInt() ?: 0} min this week") },
-            )
-            Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                Text("Load and recovery", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-                tiles.chunked(2).forEach { row -> Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                    row.forEach { (label, min, line) ->
-                        InsetCard(Modifier.weight(1f).fillMaxHeight()) {
-                            Column(Modifier.padding(AppSpace.l)) {
-                                Text(label, style = AppType.footnote, color = c.secondaryLabel)
-                                Text(min?.let { duration(it.roundToInt()) } ?: "—", style = AppType.title)
-                                Text(line, style = AppType.footnote, color = c.secondaryLabel)
-                            }
-                        }
-                    }
-                    if (row.size == 1) Spacer(Modifier.weight(1f))
-                } }
-            }
-        }
+        item { DayPicker(date) { date = it } }
         today?.let { t -> item {
             val level = (t["resilience"] as? JsonPrimitive)?.contentOrNull
             val idx = LEVELS.indexOfFirst { it.first == level }
@@ -198,8 +145,60 @@ fun StressScreen(backend: Boolean?, header: @Composable () -> Unit) {
                     )
                     }
                 }
+                openBreathe?.let { open -> TintButton("Breathe") { open() } }
             }
         } }
+        val d = data ?: return@LargeTitleScaffold
+        val st = d["stress"].obj()
+        val zones = listOf(
+            Triple("restored", "Restored", c.zoneRestored), Triple("relaxed", "Relaxed", c.zoneRelaxed),
+            Triple("engaged", "Engaged", c.zoneEngaged), Triple("stressed", "Stressed", c.zoneStressed),
+        ).map { (key, name, col) -> Triple(name, (st?.get(key).num() ?: 0.0).roundToInt() * 30, col) }
+        item {
+            InsetCard {
+                if (zones.all { it.second == 0 }) {
+                    EmptyState(Icons.Rounded.Spa, if (date == LocalDate.now()) "No stress data yet today" else "No stress data for this day", "Stress is read every 30 minutes while you wear the ring.")
+                } else {
+                    Row(Modifier.fillMaxWidth().padding(AppSpace.l), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                        zones.filter { it.second > 0 }.forEach { (_, min, col) ->
+                            Box(Modifier.weight(min.toFloat()).height(16.dp).clip(CircleShape).background(Brush.verticalGradient(listOf(col.copy(alpha = 0.75f), col))))
+                        }
+                    }
+                    zones.forEach { (name, min, col) ->
+                        Hairline(Modifier.padding(start = AppSpace.l))
+                        Row(Modifier.fillMaxWidth().padding(AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(10.dp).background(col, CircleShape))
+                            Text(name, style = AppType.body, modifier = Modifier.weight(1f).padding(start = AppSpace.m))
+                            Text(duration(min), style = AppType.body, color = c.secondaryLabel)
+                        }
+                    }
+                }
+            }
+        }
+        if (samples.isNotEmpty()) item { ThroughTheDay(samples, starts) }
+        val restorative = d["inputs"].obj()?.get("restorative_min").num()
+        val breathe = d["breathe"].obj()
+        val tiles = listOfNotNull(
+            Triple("Daytime stress load", st?.get("stressed_hours").num()?.let { it * 60 }, "in the stressed zone while awake"),
+            Triple("Calm and still", restorative, "calm heart rate, little movement"),
+            breathe?.let { Triple("Mindful minutes", it["today_min"].num(), "${it["week_min"].num()?.roundToInt() ?: 0} min this week") },
+        ).filter { (it.second ?: 0.0) > 0 }
+        if (tiles.isNotEmpty()) item {
+            Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                Text("Load and recovery", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
+                tiles.chunked(2).forEach { row -> Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                    row.forEach { (label, min, line) ->
+                        InsetCard(Modifier.weight(1f).fillMaxHeight()) {
+                            Column(Modifier.padding(AppSpace.l)) {
+                                Text(label, style = AppType.footnote, color = c.secondaryLabel)
+                                Text(min?.let { duration(it.roundToInt()) } ?: "—", style = AppType.title)
+                                Text(line, style = AppType.footnote, color = c.secondaryLabel)
+                            }
+                        }
+                    }
+                } }
+            }
+        }
     }
 }
 
@@ -280,7 +279,7 @@ private fun ResilienceDetail(onBack: () -> Unit) {
     val c = AppTheme.colors
     LargeTitleScaffold(
         "Resilience",
-        back = { Text("‹ Stress", style = AppType.headline, color = c.tint, modifier = Modifier.clickable(onClick = onBack).padding(start = AppSpace.xs, bottom = AppSpace.xs)) },
+        back = { Text("‹ Body", style = AppType.headline, color = c.tint, modifier = Modifier.clickable(onClick = onBack).padding(start = AppSpace.xs, bottom = AppSpace.xs)) },
     ) {
         val l = load ?: return@LargeTitleScaffold
         val lv = l.mapNotNull { it.second }
