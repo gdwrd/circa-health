@@ -663,8 +663,10 @@ def get_report_week(start: str | None = None) -> dict:
     s = _day(start) if start else t - timedelta(t.weekday() + 7)
     if s.weekday() != 0 or s + timedelta(6) >= t:
         raise HTTPException(422, "start must be the Monday of a finished week")
+    by = _by_day(MIND, s - timedelta(7), s + timedelta(6))
     return report.week_cards(s, db.days(s - timedelta(14), s + timedelta(6)),
-                             {"calm": db.settings()["calm"] == "1", "need_min": db.setting("sleep_need_min")})
+                             {"calm": db.settings()["calm"] == "1", "need_min": db.setting("sleep_need_min"),
+                              "mind": {s + timedelta(i): _mind_day(by, s + timedelta(i)) for i in range(-7, 7)}})
 
 
 @api.get("/timeline")
@@ -904,6 +906,16 @@ def _by_day(metrics: tuple[str, ...], start: date, end: date) -> dict[str, dict[
     return by
 
 
+MIND = scoring.SCALES + tuple(f"moment_{k}" for k in scoring.FEELINGS + scoring.OLD_FEELINGS)
+
+
+def _mind_day(by: dict[str, dict[date, dict[float, float]]], d: date) -> dict:
+    """A day's scales (see scoring.scale) and feeling taps by kind, from _by_day(MIND, ...)."""
+    return {m.split("_")[1]: scoring.scale(m, by.get(m, {}).get(d, {})) for m in scoring.SCALES} \
+        | {"feelings": {k[7:]: n for k, s in by.items() if k.startswith("moment_")
+                        and (n := sum(v == 1 for v in s.get(d, {}).values()))}}
+
+
 @api.get("/mind")
 def mind(days: int = 90) -> dict:
     """Per day, oldest first: the scales (see scoring.scale), feeling taps by kind, load tags, the dose in mg
@@ -911,7 +923,7 @@ def mind(days: int = 90) -> dict:
     end = _today()
     start = end - timedelta(min(max(days, 1), 365) - 1)
     lo, hi = samples.midnight(start), samples.midnight(end + timedelta(1))
-    by = _by_day(scoring.SCALES + tuple(f"moment_{k}" for k in scoring.FEELINGS + scoring.OLD_FEELINGS), start, end)
+    by = _by_day(MIND, start, end)
     steps = json.loads(db.settings()["medication_doses"])
     load: dict[str, list[str]] = {}
     for e in db.journal(start.isoformat()):
@@ -920,11 +932,8 @@ def mind(days: int = 90) -> dict:
     out = []
     for i in range((end - start).days + 1):
         d = start + timedelta(i)
-        out.append({"date": d.isoformat()}
-                   | {m.split("_")[1]: scoring.scale(m, by.get(m, {}).get(d, {})) for m in scoring.SCALES}
-                   | {"feelings": {k[7:]: n for k, s in by.items() if k.startswith("moment_")
-                                   and (n := sum(v == 1 for v in s.get(d, {}).values()))},
-                      "load": sorted(load.get(d.isoformat(), [])), "mg": insights.mg(steps, d.isoformat())})
+        out.append({"date": d.isoformat()} | _mind_day(by, d)
+                   | {"load": sorted(load.get(d.isoformat(), [])), "mg": insights.mg(steps, d.isoformat())})
     return {"days": out, "phq": [{"ts": t, "total": v} for t, v in samples.raw("phq9_total", lo, hi).items()]}
 
 

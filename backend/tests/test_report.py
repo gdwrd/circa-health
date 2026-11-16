@@ -462,16 +462,19 @@ def test_report_endpoint() -> None:
 
 
 WEEK = MON - timedelta(7)  # Mon 9 to Sun 15 Nov 2026
-DAY_KEYS = {"date", "sleep_min", "need_min", "bed_min", "steps", "load", "workout_min"}
+DAY_KEYS = {"date", "sleep_min", "need_min", "bed_min", "steps", "load", "workout_min", "rhr", "hrv", "stressed_min",
+            "energy", "valence"}
 
 
-def _lw(this: dict[int, dict] | None = None, calm: bool = False) -> dict:
-    """The week WEEK..WEEK+6 (day i gets this[i] as _row kwargs) after 14 days of _row defaults."""
+def _lw(this: dict[int, dict] | None = None, calm: bool = False, mind: dict[int, dict] | None = None) -> dict:
+    """The week WEEK..WEEK+6 (day i gets this[i] as _row kwargs) after 14 days of _row defaults; mind[i] is /mind's
+    day for WEEK + i (i < 0: the week before)."""
     rows = [_row(WEEK - timedelta(i)) for i in range(14, 0, -1)] + \
            [_row(WEEK + timedelta(i), **(this or {}).get(i, {})) for i in range(7)]
-    out = report.week_cards(WEEK, rows, {"calm": calm, "need_min": 480.0})
+    out = report.week_cards(WEEK, rows, {"calm": calm, "need_min": 480.0,
+                                         "mind": {WEEK + timedelta(i): m for i, m in (mind or {}).items()}})
     for c in out["cards"]:
-        assert 1 <= len(c["facts"]) <= report.MAX_WEEK_FACTS and c["fallback"] and not c["quiet"]
+        assert 1 <= len(c["facts"]) <= report.MAX_WEEK_FACTS and c["fallback"] and c["quiet"] == (c["kind"] == "week_mind")
         assert not re.search(r"score|oura", _text(c).lower()), _text(c)
     return out
 
@@ -485,8 +488,10 @@ def test_week_shape() -> None:
     assert (w["start"], w["end"]) == ("2026-11-09", "2026-11-15") and len(w["days"]) == 7
     assert all(set(d) == DAY_KEYS for d in w["days"])
     assert w["days"][3] == {"date": "2026-11-12", "sleep_min": 460, "need_min": 480.0, "bed_min": 660.0, "steps": 21000,
-                            "load": 12.0, "workout_min": 35}
-    assert [c["kind"] for c in w["cards"]] == ["week_sleep", "week_activity"]
+                            "load": 12.0, "workout_min": 35, "rhr": 55.0, "hrv": 45.0, "stressed_min": 60,
+                            "energy": None, "valence": None}
+    assert [c["kind"] for c in w["cards"]] == ["week_sleep", "week_activity", "week_body"]  # no check-in: no mind card
+    assert w["baseline"] == {"rhr": [52.2, 57.8], "hrv": [42.8, 47.2]}
 
 
 def test_week_sleep() -> None:
@@ -517,13 +522,62 @@ def test_week_calm_and_few_days() -> None:
     assert few["cards"] == [] and len(few["days"]) == 7  # under 3 scored days: the graphs only
 
 
+def test_week_days_null_without_a_value() -> None:
+    w = _lw({2: {"rhr": None, "hrv": None, "stress_load": None}}, mind={0: {"energy": 3.0, "valence": None}})
+    assert {k: w["days"][2][k] for k in ("rhr", "hrv", "stressed_min", "energy", "valence")} == dict.fromkeys(
+        ("rhr", "hrv", "stressed_min", "energy", "valence"))  # a gap in the line, never 0
+    assert (w["days"][0]["energy"], w["days"][0]["valence"]) == (3.0, None)
+
+
+STRAINED = {i: {"rhr": 58.0, "hrv": 40.0, "stress_load": 2.0} for i in range(7)} \
+    | {2: {"rhr": 65.0, "hrv": 40.0, "stress_load": 2.0, "sig": STRAIN_SIG}, 3: {"rhr": 58.0, "hrv": 40.0, "stress_load": 2.0, "sig": STRAIN_SIG}}
+
+
+def test_week_body() -> None:
+    body = {c["kind"]: c for c in _lw(STRAINED)["cards"]}["week_body"]
+    assert body["facts"] == [
+        "Resting heart rate 4 bpm higher than your usual: can mean your body is still recovering",  # 14-day baseline 55
+        "HRV 11 % lower than your usual: your body may still be working on something",
+        "Time stressed 1 h longer a day than the week before: a more demanding week",
+        "Wednesday stood out: resting heart rate 10 bpm higher than your usual",
+        "Body signals above calm on Wednesday and Thursday"]
+    assert {c["kind"]: c for c in _lw()["cards"]}["week_body"]["facts"] == [
+        "Resting heart rate about the same as your usual", "HRV about the same as your usual",
+        "Time stressed about the same as the week before"]
+    calm = {c["kind"]: c for c in _lw(STRAINED, calm=True)["cards"]}["week_body"]
+    assert len(calm["facts"]) == report.MAX_WEEK_FACTS and not re.search(r"\d", _text(calm))
+    assert calm["facts"][0] == "Resting heart rate higher than your usual: can mean your body is still recovering"
+
+
+CHECKED = {i: {"energy": 4.0, "valence": 2.0, "feelings": {"anxious": 2, "foggy": 1}} for i in range(4)} \
+    | {-i: {"energy": 2.0, "valence": 2.2, "feelings": {"focused": 5}} for i in range(1, 4)}
+
+
+def test_week_mind() -> None:
+    m = {c["kind"]: c for c in _lw(mind=CHECKED)["cards"]}["week_mind"]
+    assert m["quiet"] and m["facts"] == ["You checked in on 4 of 7 days", "Energy higher than the week before",
+                                         "You most often noted feeling anxious and foggy",
+                                         "Mood about the same as the week before"]
+    assert m["fallback"] == " ".join(f + "." for f in m["facts"])  # fixed sentences, the model is not called
+    calm = {c["kind"]: c for c in _lw(mind=CHECKED, calm=True)["cards"]}["week_mind"]
+    assert calm["facts"][0] == "You checked in on some days" and not re.search(r"\d", _text(calm))
+    every = {i: {"energy": 3.0, "valence": None} for i in range(7)}
+    assert {c["kind"]: c for c in _lw(mind=every)["cards"]}["week_mind"]["facts"] == ["You checked in every day"]
+    taps_only = {i: {"energy": None, "valence": None, "feelings": {"foggy": 3}} for i in range(7)} | {-1: CHECKED[-1]}
+    assert "week_mind" not in {c["kind"] for c in _lw(mind=taps_only)["cards"]}  # no check-in this week: no card
+
+
 def test_report_week_endpoint() -> None:
     from app.main import _today
+    from app import samples
+    from conftest import load
     t = _today()
     mon = t - timedelta(t.weekday() + 7)
     for i in range(21):
         db.save_day(mon + timedelta(6 - i), (80, 75, 70), {"inputs": {"sleep_min": 450.0, "steps": 8000.0},
                                                            "signals": CALM_SIG}, {})
+    m = samples.midnight(mon + timedelta(1)).timestamp()
+    load({"mood_energy": {m + 3600: 2.0, m + 7200: 4.0}, "moment_foggy": {m + 3600: 1.0}})
     with TestClient(app) as c:
         assert c.get("/report/week").status_code == 401
         j = c.get("/report/week", headers=H).json()
@@ -533,5 +587,8 @@ def test_report_week_endpoint() -> None:
         assert c.get(f"/report/week?start={(mon - timedelta(7)).isoformat()}", headers=H).status_code == 200
         r = c.get("/report", headers=H).json()
     assert j["start"] == mon.isoformat() and j["end"] == (mon + timedelta(6)).isoformat() and len(j["days"]) == 7
-    assert [x["kind"] for x in j["cards"]] == ["week_sleep", "week_activity"]
+    assert [x["kind"] for x in j["cards"]] == ["week_sleep", "week_activity", "week_mind"]  # no rhr, hrv, stress: no body
+    assert j["cards"][2]["facts"] == ["You checked in on 1 of 7 days", "You most often noted feeling foggy"]
+    assert (j["days"][1]["energy"], j["days"][1]["valence"], j["days"][1]["rhr"]) == (3.0, None, None)
+    assert j["baseline"] == {"rhr": None, "hrv": None}
     assert not {"week", "next_week"} & {x["kind"] for x in r["cards"]}

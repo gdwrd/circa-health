@@ -540,9 +540,74 @@ def _week_activity(rows: list[dict], before: list[dict], full: bool, base: float
     return _card("week_activity", None, [f for f in facts if f][:MAX_WEEK_FACTS])
 
 
+def _week_body(start: date, rows: list[dict], wk: list[dict], before: list[dict], full: bool, calm: bool) -> dict | None:
+    facts = []
+    for key in ("rhr", "hrv"):  # the week's mean against the 14-day baseline, as the difference
+        xs, u = [x for r in wk if (x := GET[key](r)) is not None], _usual(rows, start, GET[key])
+        if not xs or u is None:
+            continue
+        a, (noun, unit, _, hi, lo) = mean(xs), BODY[key]
+        if not (g := _gap(key, a, u)):
+            facts.append(f"{noun} about the same as your usual")
+            continue
+        gap, more, less = UNITS[unit]
+        m = hi if g > 0 else lo
+        facts.append(f"{noun} {'' if calm else gap(a - u, u) + ' '}{more if g > 0 else less} than your usual"
+                     + (f": {m}" if m else ""))
+    s, p = [x for r in wk if (x := GET["stress"](r)) is not None], [x for r in before if (x := GET["stress"](r)) is not None]
+    if s and full and p:
+        a, b = mean(s), mean(p)
+        g = _gap("stress", a, b)
+        facts.append("Time stressed about the same as the week before" if not g else
+                     f"Time stressed {'' if calm else _duration(abs(a - b)) + ' '}{'longer' if g > 0 else 'shorter'} a day "
+                     f"than the week before: {'a more demanding week' if g > 0 else 'a calmer week'}")
+    out = [(abs(g[0]) / g[1], r["date"], key, g) for r in wk for key in ("rhr", "hrv", "stress")
+           if (g := _dev(key, rows, r["date"]))]
+    if out and (top := max(out, key=lambda o: o[0]))[0] >= UNUSUAL:
+        _, d, key, (dx, _, u) = top
+        noun, unit = BODY[key][0], BODY[key][1]
+        gap, more, less = UNITS[unit]
+        facts.append(f"{d:%A} stood out: {noun if key == 'hrv' else noun.lower()} "
+                     f"{'' if calm else gap(dx, u) + ' '}{more if dx > 0 else less} than your usual")
+    sig = [f"{r['date']:%A}" for r in wk if (r["c"].get("signals") or {}).get("level") not in (None, "calm")]
+    facts.append(sig and f"Body signals above calm on {_join(sig)}")
+    return _card("week_body", None, [f for f in facts if f][:MAX_WEEK_FACTS]) if any(facts) else None
+
+
+MIND_SAME = 0.5  # energy and mood (1 to 5) within half a step of the week before count as about the same
+MOOD = (("energy", "Energy", "higher"), ("valence", "Mood", "brighter"))
+
+
+def _week_mind(start: date, mind: dict[date, dict], calm: bool) -> dict | None:
+    """Quiet: fixed sentences only, the model is not called. None without a check-in (energy or mood) in the week."""
+    this = [mind.get(start + timedelta(i)) or {} for i in range(7)]
+    prev = [mind.get(start - timedelta(i)) or {} for i in range(1, 8)]
+    n = sum(m.get("energy") is not None or m.get("valence") is not None for m in this)
+    if not n:
+        return None
+    facts = ["You checked in every day" if n == 7 else "You checked in on some days" if calm
+             else f"You checked in on {n} of 7 days"]
+    for key, noun, more in MOOD:
+        a, b = [x for m in this if (x := m.get(key)) is not None], [x for m in prev if (x := m.get(key)) is not None]
+        if a and b:
+            dx = mean(a) - mean(b)
+            facts.append(f"{noun} about the same as the week before" if abs(dx) < MIND_SAME else
+                         f"{noun} {more if dx > 0 else 'lower'} than the week before")
+    taps: dict[str, int] = {}
+    for m in this:
+        for k, c in (m.get("feelings") or {}).items():
+            taps[k] = taps.get(k, 0) + c
+    top = sorted(taps, key=lambda k: (-taps[k], k))[:2]
+    if top:
+        facts.append(f"You most often noted feeling {_join(top)}")
+    c = _card("week_mind", None, facts, (), "")
+    return c | {"fallback": " ".join(f + "." for f in c["facts"])}  # all of it, in the card's order
+
+
 def week_cards(start: date, rows: list[dict], ctx: dict) -> dict:
-    """The finished week start (a Monday) to start + 6. rows: db.days(start - 14, start + 6); ctx: calm, need_min.
-    LW2 / LW3 append their days keys and cards here."""
+    """The finished week start (a Monday) to start + 6. rows: db.days(start - 14, start + 6); ctx: calm, need_min,
+    mind ({date: /mind's day: energy, valence, feelings} for start - 7 to start + 6).
+    baseline: the 14-day usual's "about the same" band of rhr and hrv, for the body graph. LW3 appends its cards here."""
     end = start + timedelta(6)
     wk = [r for r in rows if start <= r["date"] <= end]
     before = [r for r in rows if start - timedelta(7) <= r["date"] < start]
@@ -556,10 +621,20 @@ def week_cards(start: date, rows: list[dict], ctx: dict) -> dict:
         days.append({"date": (start + timedelta(i)).isoformat(), "sleep_min": r["inputs"].get("sleep_min"),
                      "need_min": ctx["need_min"], "bed_min": r["inputs"].get("bed_start"), "steps": r["inputs"].get("steps"),
                      "load": r["inputs"].get("cardio_load"),
-                     "workout_min": sum(w["minutes"] for w in r["c"].get("workouts") or [])})
+                     "workout_min": sum(w["minutes"] for w in r["c"].get("workouts") or []),
+                     "rhr": r["inputs"].get("rhr"), "hrv": r["inputs"].get("hrv"),
+                     "stressed_min": None if (x := GET["stress"](r)) is None else round(x),
+                     **{k: (ctx["mind"].get(start + timedelta(i)) or {}).get(k) for k in ("energy", "valence")}})
+    band = {}
+    for key in ("rhr", "hrv"):
+        u = _usual(rows, start, GET[key])
+        b = None if u is None else max(SAME * abs(u), BODY[key][2])  # _gap's "about the same"
+        band[key] = None if u is None else [round(u - b, 1), round(u + b, 1)]
     out = []
     if scored(wk) >= 3:
         full = scored(before) >= 3
         base = scoring.baseline([r["inputs"].get("cardio_load") for r in rows if r["date"] < start])  # notify.cardio_base(start)
-        out = [_week_sleep(start, wk, before, full, ctx), _week_activity(wk, before, full, base, ctx["calm"])]
-    return {"start": start.isoformat(), "end": end.isoformat(), "days": days, "cards": [c for c in out if c]}
+        out = [_week_sleep(start, wk, before, full, ctx), _week_activity(wk, before, full, base, ctx["calm"]),
+               _week_body(start, rows, wk, before, full, ctx["calm"]), _week_mind(start, ctx["mind"], ctx["calm"])]
+    return {"start": start.isoformat(), "end": end.isoformat(), "days": days, "baseline": band,
+            "cards": [c for c in out if c]}
