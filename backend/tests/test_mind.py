@@ -11,8 +11,20 @@ H = {"Authorization": "Bearer secret"}
 
 def test_scale_cancel_mean_and_latest() -> None:
     assert scoring.scale("mood_energy", {10: 2.0, 20: 4.0, 30: 9.0}) == 3.0  # a 9 (cancelled tap) is ignored
-    assert scoring.scale("rate_focus", {30: 9.0, 10: 2.0, 20: 4.0}) == 4.0  # latest valid rating
+    assert scoring.scale("rate_focus", {30: 1.0, 10: 2.0, 20: 4.0}) == 1.0  # the latest rating
+    assert scoring.scale("rate_focus", {30: 9.0, 10: 2.0, 20: 4.0}) is None  # a later 9 cleared it
+    assert scoring.scale("rate_focus", {10: 9.0, 20: 3.0}) == 3.0  # rated again after a clear
     assert scoring.scale("rate_crash", {10: 9.0}) is None and scoring.scale("mood_valence", {}) is None
+
+
+def test_mind_cleared_rating() -> None:
+    d = date.today()
+    m, y = samples.midnight(d).timestamp(), samples.midnight(d - timedelta(1)).timestamp()
+    load({"rate_focus": {m + 3600: 4.0, y + 3600: 9.0, y + 7200: 2.0}, "rate_crash": {y + 3600: 3.0}})
+    load({"rate_focus": {m + 3600: 9.0}, "rate_crash": {y + 5400: 9.0}})  # a 9 at the rating's second, and a later 9
+    with TestClient(app) as c:
+        j = c.get("/mind?days=2", headers=H).json()["days"]
+        assert [(x["focus"], x["crash"]) for x in j] == [(2.0, None), (None, None)]
 
 
 def test_mind_and_today_mood(monkeypatch) -> None:

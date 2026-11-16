@@ -1271,7 +1271,9 @@ private fun DayForm(date: String, es: List<Entry>, medTime: String, medStarted: 
     val mind by produceState<JsonObject?>(null) { value = (Api.mind(ctx, 2)?.get("days") as? JsonArray)?.mapNotNull { it.obj() }?.firstOrNull { it["date"].str() == date } }
     val picked = remember { mutableStateMapOf<String, Int>() }
     var last by remember { mutableLongStateOf(0L) }
-    fun rate(k: String, v: Int) {
+    fun shown(k: String) = (picked[k] ?: mind?.get(k).num()?.roundToInt())?.takeIf { it <= 5 }
+    fun rate(k: String, tapped: Int) {
+        val v = if (tapped == shown(k)) 9 else tapped // a tap on the chosen dot clears it: 9, as the mood scales; the latest sample wins
         // An earlier day: 21:00 plus a 24th of today's clock (still 21:xx), so a later re-rating lands on a later second; at one second the larger value wins.
         val at = if (date == LocalDate.now().toString()) System.currentTimeMillis() / 1000 * 1000
         else LocalDate.parse(date).atTime(21, 0).atZone(ZoneId.systemDefault()).toEpochSecond() * 1000 + LocalTime.now().toSecondOfDay() / 24 * 1000L
@@ -1279,7 +1281,6 @@ private fun DayForm(date: String, es: List<Entry>, medTime: String, medStarted: 
         picked[k] = v
         scope.launch { pushSample(ctx, "rate_$k", v.toDouble(), ts) }
     }
-    fun shown(k: String) = picked[k] ?: mind?.get(k).num()?.roundToInt()
     if (!medStarted.isNullOrEmpty() && doses.isNotEmpty()) section(if (date == LocalDate.now().toString()) "Medication today" else "Medication yesterday") {
         InsetCard {
             Column(Modifier.fillMaxWidth().padding(vertical = AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
@@ -2252,6 +2253,7 @@ private fun MarkCard(t: JsonObject, scope: CoroutineScope, reload: suspend () ->
     var added by remember { mutableStateOf(emptyList<Long>()) }
     var gone by remember { mutableStateOf(emptyList<Long>()) }
     var pick by remember { mutableStateOf(false) }
+    var fixing by remember { mutableStateOf<Long?>(null) } // the mark the fix dialog is open on
     fun put(ts: Long, cancel: Boolean) {
         if (cancel) { gone = gone + ts; just = null } else { added = added + ts; just = ts }
         scope.launch { mark(ctx, "mark_$slot", ts, cancel); reload() }
@@ -2276,6 +2278,19 @@ private fun MarkCard(t: JsonObject, scope: CoroutineScope, reload: suspend () ->
                 }
             }
             if (times.isNotEmpty()) ClockLine(times)
+            // Today's marks by time; a tap fixes one (a widget tap too).
+            if (times.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                times.sorted().forEach { ts ->
+                    Row(
+                        Modifier.clip(RoundedCornerShape(50)).background(c.tint.copy(alpha = 0.14f)).clickable(role = Role.Button, onClickLabel = "Change or remove") { haptic.tick(); fixing = ts }
+                            .padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(clock(ts / 1000.0), style = AppType.footnote.copy(fontWeight = FontWeight.SemiBold), color = c.tint)
+                        Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = c.tint, modifier = Modifier.size(16.dp))
+                    }
+                }
+            }
             if (t["status"].str() != "ok") Text(
                 "Mark it on 3 days to see what comes before. ${t["n_with"].num()?.roundToInt() ?: 0} so far.", style = AppType.subhead, color = c.secondaryLabel,
             ) else {
@@ -2313,6 +2328,10 @@ private fun MarkCard(t: JsonObject, scope: CoroutineScope, reload: suspend () ->
         if (ts > System.currentTimeMillis()) return@TimePickDialog Toast.makeText(ctx, "Pick a time earlier today.", Toast.LENGTH_SHORT).show()
         while (ts in gone) ts += 1000 // an undone second stays undone (the larger value wins): the new mark moves one on
         put(ts, false)
+    }
+    fixing?.let { ts ->
+        // The old second is cancelled either way: drop it here too, or a mark made on this card would stay in `added`.
+        FixTapDialog(t["name"].str().orEmpty(), "mark_$slot", ts, 1.0, 2.0, scope, { gone = gone + ts; if (just == ts) just = null; reload() }) { fixing = null }
     }
 }
 

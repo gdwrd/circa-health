@@ -272,10 +272,13 @@ NOW_NOTES = FEELINGS + ("tired", "wired", "low")  # tired / wired / low: the rep
 
 
 def scale(metric: str, vals: dict[float, float]) -> float | None:
-    """A day's value of a scale from {ts: value}: the mean of its mood_ samples, the latest of a rating; values
-    above 5 (a 9 cancels a tap at the same second) are ignored."""
-    v = [x for _, x in sorted(vals.items()) if x <= 5]
-    return None if not v else round(mean(v), 2) if metric.startswith("mood_") else v[-1]
+    """A day's value of a scale from {ts: value}: the mean of its mood_ samples, values above 5 (a 9 cancels a tap
+    at the same second) ignored; the latest of a rating, none when that latest is a 9 (the rating was cleared)."""
+    v = [x for _, x in sorted(vals.items())]
+    if not metric.startswith("mood_"):
+        return v[-1] if v and v[-1] <= 5 else None
+    v = [x for x in v if x <= 5]
+    return round(mean(v), 2) if v else None
 
 
 def derived(moments: list[tuple[int, str]]) -> set[str]:
