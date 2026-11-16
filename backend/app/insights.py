@@ -10,6 +10,7 @@ NIGHT_KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "stress", "tr
 NIGHT = ("sleep_score", "deep_min", "rem_min", "hrv", "rhr", "total_min", "awake_min", "bed_start", "wind_down", "felt")
 EXPERIMENT_KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "breathe", "phone_in_bed")
 MED = ("day_hr", "rhr", "hrv", "bed_start", "total_min", "sleep_score")
+LEVELS = MED + ("energy", "valence", "focus", "appetite", "crash", "sys", "dia")  # scales as /mind names them
 BEFORE = ("total_min", "awake_min", "deep_min", "hrv", "rhr", "bed_start", "sleep_score", "felt", "stress_load", "steps")
 UNITS = {"sleep_score": "pts", "readiness_score": "pts", "deep_min": "min", "rem_min": "min", "total_min": "min", "awake_min": "min",
          "bed_start": "min", "wind_down": "min", "hrv": "ms", "rhr": "bpm", "day_hr": "bpm", "strain": "pts", "felt": "pts",
@@ -247,6 +248,24 @@ def kinds(rows: list[dict], entries: list[dict], today: date, day_hr: dict[date,
     drop = [b["stress_after"] - b["stress_before"] for b in breaths
             if b["stress_before"] is not None and b["stress_after"] is not None]
     out["breathe"]["stress"] = {"delta": round(mean(drop), 1), "n": len(drop)} if len(drop) >= MIN_N else None
+    return out
+
+
+def mg(steps: list[dict], d: str) -> float | None:
+    """The dose of ISO day d: the last step (ascending medication_doses) that starts on or before it."""
+    return next((s["mg"] for s in reversed(steps) if s["from"] <= d), None)
+
+
+def levels(steps: list[dict], per_day: dict[date, dict]) -> list[dict]:
+    """steps: medication_doses (ascending); per_day: the LEVELS values of each day with a logged dose. Per step,
+    n days and the mean of each value over them; a value needs MIN_N days or it is None."""
+    out = []
+    for i, s in enumerate(steps):
+        lo, hi = s["from"], steps[i + 1]["from"] if i + 1 < len(steps) else None
+        ds = [o for d, o in per_day.items() if lo <= d.isoformat() and (hi is None or d.isoformat() < hi)]
+        out.append({"from": lo, "to": hi and (date.fromisoformat(hi) - timedelta(1)).isoformat(), "mg": s["mg"],
+                    "n": len(ds), "means": {m: round(mean(v), 1) if len(v := [o[m] for o in ds if o.get(m) is not None])
+                                            >= MIN_N else None for m in LEVELS}})
     return out
 
 

@@ -101,6 +101,50 @@ def test_routes(tmp_path, monkeypatch) -> None:
         assert len(c.get("/journal/bp?days=1", headers=H).json()["points"]) == 1
 
 
+def test_levels_step_boundaries_and_three_days() -> None:
+    steps = [{"from": "2026-10-01", "mg": 20}, {"from": "2026-10-10", "mg": 30}]
+    per_day = {date(2026, 9, 30): {"hrv": 90},  # before the first step: in no step
+               date(2026, 10, 1): {"hrv": 40, "energy": 2.0}, date(2026, 10, 5): {"hrv": 50, "energy": 4.0},
+               date(2026, 10, 9): {"hrv": 60, "energy": None},  # last day of the first step
+               date(2026, 10, 10): {"hrv": 70}, date(2026, 10, 12): {"hrv": 80}}
+    a, b = insights.levels(steps, per_day)
+    assert (a["from"], a["to"], a["mg"], a["n"]) == ("2026-10-01", "2026-10-09", 20, 3)
+    assert a["means"]["hrv"] == 50 and a["means"]["energy"] is None  # energy on 2 days only
+    assert set(a["means"]) == set(insights.LEVELS)
+    assert (b["from"], b["to"], b["mg"], b["n"], b["means"]["hrv"]) == ("2026-10-10", None, 30, 2, None)
+    assert insights.levels([], per_day) == []
+    assert [insights.mg(steps, d) for d in ("2026-09-30", "2026-10-01", "2026-10-09", "2026-10-10")] == [None, 20, 20, 30]
+
+
+def test_dose_settings_and_levels_route(monkeypatch) -> None:
+    monkeypatch.setattr(main, "_day_hr", lambda rows, start, end: {})
+    with TestClient(app) as c:
+        d = main._today()
+        for i in range(10):
+            r = row(d - timedelta(i))
+            db.save_day(r["date"], (80, 70, 60), {**r["c"], "inputs": r["inputs"]}, {})
+        for i, bp in ((0, "140/90"), (1, "120/80"), (2, "130/70"), (3, "125/75")):  # today is left out (as kinds)
+            db.add_journal((d - timedelta(i)).isoformat(), "medication", "08:00", None, i)
+            db.add_journal((d - timedelta(i)).isoformat(), "bp", bp, None, i)
+        load({"mood_energy": {samples.midnight(d - timedelta(1)).timestamp() + 3600: 4.0}})
+        first = (d - timedelta(5)).isoformat()
+        for bad in ({"medication_doses": {"from": first, "mg": 30}}, {"medication_doses": [{"from": first}]},
+                    {"medication_doses": [{"from": first, "mg": 0}]}, {"medication_doses": [{"from": first, "mg": 501}]},
+                    {"medication_doses": [{"from": first, "mg": True}]}, {"medication_doses": [{"from": "20261101", "mg": 30}]},
+                    {"medication_doses": [{"from": first, "mg": 30, "x": 1}]},
+                    {"medication_doses": [{"from": first, "mg": 30}, {"from": first, "mg": 40}]},  # not ascending
+                    {"medication_name": "x" * 41}, {"medication_name": " x"}, {"medication_name": 5}):
+            assert c.patch("/settings", json=bad, headers=H).status_code == 422, bad
+        steps = [{"from": first, "mg": 30}]
+        r = c.patch("/settings", json={"medication_doses": steps, "medication_name": "Dose name"}, headers=H).json()
+        assert r["medication_doses"] == steps and r["medication_name"] == "Dose name"
+        assert c.get("/settings", headers=H).json()["medication_doses"] == steps
+        (lv,) = c.get("/journal/insights", headers=H).json()["kinds"]["medication"]["levels"]
+        assert (lv["from"], lv["to"], lv["mg"], lv["n"]) == (first, None, 30, 3)
+        m = lv["means"]
+        assert (m["sys"], m["dia"], m["hrv"], m["rhr"], m["energy"], m["day_hr"]) == (125, 75, 50, 55, None, None)
+
+
 def test_breathe_stress_delta_needs_three() -> None:
     br = [{"stress_before": 60, "stress_after": a} for a in (40, 50, 45)] + [{"stress_before": 60, "stress_after": None}]
     assert insights.kinds([], [], TODAY, {}, "", br)["breathe"]["stress"] == {"delta": -15.0, "n": 3}

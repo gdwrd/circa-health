@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import logging
 import os
 import random
@@ -879,17 +880,25 @@ def list_journal(days: int = 30) -> dict:
     return {"entries": db.journal(since.isoformat()), "kinds": list(db.KINDS)}
 
 
+def _by_day(metrics: tuple[str, ...], start: date, end: date) -> dict[str, dict[date, dict[float, float]]]:
+    """{metric: {local date: {ts: value}}} for start..end."""
+    lo, hi = samples.midnight(start), samples.midnight(end + timedelta(1))
+    by: dict[str, dict[date, dict[float, float]]] = {}
+    for m in metrics:
+        for t, v in samples.raw(m, lo, hi).items():
+            by.setdefault(m, {}).setdefault(_dt(t).date(), {})[t] = v
+    return by
+
+
 @api.get("/mind")
 def mind(days: int = 90) -> dict:
     """Per day, oldest first: the scales (see scoring.scale), feeling taps by kind, load tags, the dose in mg
-    (null until MH2); plus every questionnaire total in the range."""
+    (the dose step's, null before the first); plus every questionnaire total in the range."""
     end = _today()
     start = end - timedelta(min(max(days, 1), 365) - 1)
     lo, hi = samples.midnight(start), samples.midnight(end + timedelta(1))
-    by: dict[str, dict[date, dict[float, float]]] = {}
-    for m in scoring.SCALES + tuple(f"moment_{k}" for k in scoring.FEELINGS + scoring.OLD_FEELINGS):
-        for t, v in samples.raw(m, lo, hi).items():
-            by.setdefault(m, {}).setdefault(_dt(t).date(), {})[t] = v
+    by = _by_day(scoring.SCALES + tuple(f"moment_{k}" for k in scoring.FEELINGS + scoring.OLD_FEELINGS), start, end)
+    steps = json.loads(db.settings()["medication_doses"])
     load: dict[str, list[str]] = {}
     for e in db.journal(start.isoformat()):
         if e["kind"].startswith("load_"):
@@ -901,7 +910,7 @@ def mind(days: int = 90) -> dict:
                    | {m.split("_")[1]: scoring.scale(m, by.get(m, {}).get(d, {})) for m in scoring.SCALES}
                    | {"feelings": {k[7:]: n for k, s in by.items() if k.startswith("moment_")
                                    and (n := sum(v == 1 for v in s.get(d, {}).values()))},
-                      "load": sorted(load.get(d.isoformat(), [])), "mg": None})
+                      "load": sorted(load.get(d.isoformat(), [])), "mg": insights.mg(steps, d.isoformat())})
     return {"days": out, "phq": [{"ts": t, "total": v} for t, v in samples.raw("phq9_total", lo, hi).items()]}
 
 
@@ -945,7 +954,16 @@ def journal_insights() -> dict:
     start = d - timedelta(insights.DAYS)
     rows, entries = db.days(start, d), db.journal(start.isoformat())
     hr = _day_hr(rows, start, d) if any(e["kind"] == "medication" for e in entries) else {}
-    kinds = insights.kinds(rows, entries, d, hr, db.settings()["medication_started"], db.breaths(start, d))
+    cfg = db.settings()
+    kinds = insights.kinds(rows, entries, d, hr, cfg["medication_started"], db.breaths(start, d))
+    # per dose day before today (as kinds): that day's HR and scales, that night, that day's BP
+    nt, sc = insights.nights(rows), _by_day(scoring.SCALES, start, d)
+    bp = {p["date"]: p for p in insights.bp(entries)}
+    per_day = {x: {**nt.get(x + timedelta(1), {}), "day_hr": hr.get(x),
+                   **{m.split("_")[1]: scoring.scale(m, sc.get(m, {}).get(x, {})) for m in scoring.SCALES},
+                   "sys": bp.get(x.isoformat(), {}).get("sys"), "dia": bp.get(x.isoformat(), {}).get("dia")}
+               for x in {date.fromisoformat(e["date"]) for e in entries if e["kind"] == "medication" and e["value"]} if x < d}
+    kinds["medication"]["levels"] = insights.levels(json.loads(cfg["medication_doses"]), per_day)
     for k, cost in insights.prices(notify.episodes(d)[0]).items():  # only kinds with a finished episode of their own
         kinds[k]["cost"] = cost
     return {"kinds": kinds}
@@ -1024,6 +1042,7 @@ def _settings_out() -> dict:
     return {"step_goal": float(s["step_goal"]), "sleep_need_min": float(s["sleep_need_min"]),
             "medication_started": s["medication_started"], "medication_time": s["medication_time"],
             "medication_window_h": float(s["medication_window_h"]), "birth_year": s["birth_year"],
+            "medication_doses": json.loads(s["medication_doses"]), "medication_name": s["medication_name"],
             "low_step_kind": s["low_step_kind"], "muted": s["muted"],
             "wake_weekday": s["wake_weekday"], "wake_weekend": s["wake_weekend"], "calm": s["calm"], "guess": s["guess"],
             **{k: s[k] for i in (1, 2, 3) for k in (f"mark_{i}", f"mark_{i}_since")}}
@@ -1048,9 +1067,22 @@ def _started_ok(v: object) -> bool:
         return False
 
 
+def _doses_ok(v: object) -> bool:
+    """medication_doses: [{"from": ISO date, "mg": 1..500}, ...], strictly ascending by date; [] clears it."""
+    def iso(x: object) -> bool:
+        try:
+            return isinstance(x, str) and bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", x)) and bool(date.fromisoformat(x))
+        except ValueError:
+            return False
+    return (isinstance(v, list) and all(isinstance(s, dict) and set(s) == {"from", "mg"} and iso(s["from"])
+                                        and _num(s["mg"], 1, 500) for s in v)
+            and all(a["from"] < b["from"] for a, b in zip(v, v[1:])))
+
+
 SETTINGS = {"step_goal": lambda v: _num(v, 1000, 100000), "sleep_need_min": lambda v: _num(v, 240, 720),
             "medication_started": _started_ok, "medication_time": lambda v: isinstance(v, str) and HHMM.fullmatch(v),
-            "medication_window_h": lambda v: _num(v, 1, 24), "birth_year": _year_ok,
+            "medication_window_h": lambda v: _num(v, 1, 24), "birth_year": _year_ok, "medication_doses": _doses_ok,
+            "medication_name": lambda v: isinstance(v, str) and len(v) <= 40 and v == v.strip(),
             "low_step_kind": lambda v: v in ("ride", "workout"), "calm": lambda v: v in ("", "1"), "guess": lambda v: v in ("", "1"),
             "wake_weekday": lambda v: v == "" or isinstance(v, str) and HHMM.fullmatch(v),
             "wake_weekend": lambda v: v == "" or isinstance(v, str) and HHMM.fullmatch(v),
@@ -1071,7 +1103,7 @@ def patch_settings(tasks: BackgroundTasks, body: dict = Body(...)) -> dict:
     old = _settings_out()
     # a slot named from empty starts clean (a rename keeps its since); its older samples stay and stop counting
     since = {f"{k}_since": _today().isoformat() for k, v in body.items() if k.startswith("mark_") and v and not old[k]}
-    db.set_settings({k: str(v) for k, v in body.items()} | since)
+    db.set_settings({k: json.dumps(v) if k == "medication_doses" else str(v) for k, v in body.items()} | since)
     new = _settings_out()
     if any(old[k] != new[k] for k in ("step_goal", "sleep_need_min", "birth_year", "low_step_kind")):
         tasks.add_task(rescore, {_today() - timedelta(i) for i in range(14)})  # the startup backfill's window

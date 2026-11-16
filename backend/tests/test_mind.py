@@ -28,6 +28,7 @@ def test_mind_and_today_mood(monkeypatch) -> None:
           "phq9_total": {y + 600: 7.0}})
     load({"mood_energy": {m + 9000: 9.0}, "moment_foggy": {m + 9000: 2.0}})  # the 5 and one foggy tap are cancelled
     db.add_journal(d.isoformat(), "load_social", None, None, 1)
+    db.set_settings({"medication_doses": f'[{{"from": "{d - timedelta(1)}", "mg": 30}}, {{"from": "{d}", "mg": 40}}]'})
     with TestClient(app) as c:
         assert c.post("/journal", json={"date": d.isoformat(), "kind": "load_masking"}, headers=H).status_code == 200
         j = c.get("/mind?days=3", headers=H).json()
@@ -35,6 +36,7 @@ def test_mind_and_today_mood(monkeypatch) -> None:
         assert j["days"][0] == {"date": (d - timedelta(2)).isoformat(), "energy": None, "valence": None, "focus": None,
                                 "appetite": None, "crash": None, "feelings": {}, "load": [], "mg": None}
         assert j["days"][1]["feelings"] == {"tired": 1}
+        assert [x["mg"] for x in j["days"]] == [None, 30, 40]  # before the first step, then each step's dose
         t = j["days"][2]
         assert (t["energy"], t["valence"], t["focus"], t["feelings"], t["load"]) == \
             (3.0, 3.0, 4.0, {"foggy": 2}, ["load_masking", "load_social"])
