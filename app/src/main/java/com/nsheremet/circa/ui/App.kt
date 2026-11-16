@@ -81,6 +81,8 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
                 restoreState = true
             }
         }
+        var phq by remember { mutableStateOf(false) } // the questionnaire, opened by the `phq` notification
+        if (phq) PhqSheet { phq = false }
         // Today consumes a journal link once its sheet opens (it may still be waiting for the backend check).
         LaunchedEffect(link) {
             when (link?.first) {
@@ -91,6 +93,7 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
                 "workout" -> go(TabItem.Activity) // Activity consumes it once it shows that day
                 "today" -> { go(TabItem.Today); onLinkHandled() }
                 "reports" -> { go(TabItem.Today); nav.navigate("reports") { launchSingleTop = true }; onLinkHandled() }
+                "phq" -> { phq = true; onLinkHandled() }
                 null -> {}
                 else -> onLinkHandled()
             }

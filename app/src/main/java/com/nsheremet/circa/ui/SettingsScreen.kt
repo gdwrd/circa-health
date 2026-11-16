@@ -348,6 +348,8 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     // MH0: null is the root list of groups; a group's name opens its page (pages, not nav routes, as Sync log is).
     var page by rememberSaveable { mutableStateOf<String?>(null) }
     BackHandler(enabled = page != null) { page = null }
+    var phqOpen by remember { mutableStateOf(false) }
+    if (phqOpen) PhqSheet { phqOpen = false }
 
     if (showLog) return SyncLogScreen { showLog = false }
     if (showLab) return RingLabScreen { showLab = false }
@@ -637,6 +639,18 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                             saveMark(i + 1, things[i])
                         }
                     }
+                }
+            }
+            item {
+                Section("Questionnaire", "The PHQ-9: nine questions about the last two weeks. Stored only when all nine are answered.") {
+                    key(patchFailed) {
+                        SwitchRow("Depression questionnaire every two weeks", (med?.get("phq") as? JsonPrimitive)?.contentOrNull == "1") { on ->
+                            haptic.tick()
+                            patchMed("phq", JsonPrimitive(if (on) "1" else ""))
+                        }
+                    }
+                    Hairline(Modifier.padding(start = AppSpace.l))
+                    ChevronRow("Answer now", "") { haptic.tick(); phqOpen = true }
                 }
             }
         }
