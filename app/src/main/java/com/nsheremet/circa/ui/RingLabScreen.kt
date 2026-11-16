@@ -38,6 +38,7 @@ import com.nsheremet.circa.FirmwareFile
 import com.nsheremet.circa.MOTION_LABELS
 import com.nsheremet.circa.motionFile
 import com.nsheremet.circa.Prefs.ringAddress
+import com.nsheremet.circa.RecordingService
 import com.nsheremet.circa.RingInfo
 import com.nsheremet.circa.flashFirmware
 import com.nsheremet.circa.lightFile
@@ -87,6 +88,7 @@ internal fun RingLabScreen(onBack: () -> Unit) {
     var ringInfo by remember { mutableStateOf<RingInfo?>(null) }
     var checking by remember { mutableStateOf(false) }
     var confirm by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableIntStateOf(0) } // recordings to delete; 0 = dialog closed
     var flashing by remember { mutableStateOf(false) }
     var flashNote by remember { mutableStateOf("") }
 
@@ -103,11 +105,17 @@ internal fun RingLabScreen(onBack: () -> Unit) {
         }
     }
 
+    // Without a foreground service Android freezes the app soon after the screen locks, and the recording with it.
+    val foreground = Intent(ctx, RecordingService::class.java)
+    // a refused start leaves the recording as it was before the service: running while the screen is on
+    fun holdForeground() { runCatching { ctx.startForegroundService(foreground) } }
+
     fun toggleRecording() {
         recording?.let { it.cancel(); return }
         samples = 0; stockPackets = 0; doubleTaps = 0; lostSamples = null; last = null; motionNote = "Connecting…"; startedAt = System.currentTimeMillis()
         // shortcut: recordings live in cacheDir, the OS may clear them; move to filesDir if a week of files is ever lost
         val out = motionFile(shareDir, label, LocalDateTime.now())
+        holdForeground()
         recording = scope.launch {
             var error: String? = null
             try {
@@ -123,6 +131,7 @@ internal fun RingLabScreen(onBack: () -> Unit) {
                     }
                 }
             } finally { // Stop cancels this coroutine, so nothing after withContext would run
+                ctx.stopService(foreground)
                 recording = null
                 hasRecording = recordings().isNotEmpty()
                 motionNote = error ?: "Stopped: $samples samples saved"
@@ -134,6 +143,7 @@ internal fun RingLabScreen(onBack: () -> Unit) {
         lightJob?.let { it.cancel(); return }
         lightSamples = 0; lightNote = "Connecting…"
         val out = lightFile(shareDir, LocalDateTime.now())
+        holdForeground()
         lightJob = scope.launch {
             var error: String? = null
             try {
@@ -141,6 +151,7 @@ internal fun RingLabScreen(onBack: () -> Unit) {
                     recordLight(ctx, address!!, out) { n -> lightSamples = n; lightNote = "Recording" }
                 }
             } finally {
+                ctx.stopService(foreground)
                 lightJob = null
                 hasRecording = recordings().isNotEmpty()
                 lightNote = error ?: "Stopped: $lightSamples samples saved"
@@ -212,6 +223,8 @@ internal fun RingLabScreen(onBack: () -> Unit) {
                         null,
                     ))
                 }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ButtonRow("Delete recordings", enabled = hasRecording && recording == null && lightJob == null) { confirmDelete = recordings().size }
             }
         }
         item {
@@ -285,5 +298,18 @@ internal fun RingLabScreen(onBack: () -> Unit) {
         },
         confirmButton = { TextButton({ confirm = false; flash(f) }) { Text("Install", color = c.activity) } },
         dismissButton = { TextButton({ confirm = false }) { Text("Cancel") } },
+    )
+
+    if (confirmDelete > 0) AlertDialog(
+        onDismissRequest = { confirmDelete = 0 },
+        text = { Text("Delete $confirmDelete recording${if (confirmDelete == 1) "" else "s"} from this phone? Share them first if you still need them.") },
+        confirmButton = {
+            TextButton({
+                confirmDelete = 0
+                recordings().forEach { it.delete() }
+                hasRecording = recordings().isNotEmpty()
+            }) { Text("Delete", color = c.badText) }
+        },
+        dismissButton = { TextButton({ confirmDelete = 0 }) { Text("Cancel") } },
     )
 }

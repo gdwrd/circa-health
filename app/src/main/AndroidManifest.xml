@@ -15,6 +15,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Ring lab: CPU stays awake while a recording runs with the screen off -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Lets the app ask to skip battery optimisation so 5-minute syncs keep their pace -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
@@ -113,6 +115,12 @@
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+
+        <!-- Ring lab: keeps a recording running with the screen locked -->
+        <service
+            android:name=".RecordingService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
         <!-- WorkManager foreground service -->
         <service

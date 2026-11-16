@@ -144,7 +144,7 @@ suspend fun flashFirmware(ctx: Context, address: String, fw: FirmwareFile, onPro
 }
 
 /** What the wearer was doing during a recording; written into the file name and its first line. */
-val MOTION_LABELS = listOf("walk", "run", "ride", "desk", "sleep", "other")
+val MOTION_LABELS = listOf("walk", "run", "ride", "desk", "other")
 
 /** `circa-motion-<label>-<yyyyMMdd-HHmm>.csv` in [dir], with `-2`, `-3`… when that name is taken, so no recording is overwritten. */
 fun motionFile(dir: File, label: String, time: LocalDateTime): File {
