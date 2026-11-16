@@ -154,6 +154,7 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -317,8 +318,6 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
                 status?.let { Text(it, style = AppType.subhead, color = c.secondaryLabel) }
             }
         }
-        // Not while the guess is pending: the verdict word would give the answer away.
-        report?.takeIf { d["guess"].obj()?.get("pending").str() != "true" }?.let { r -> item { ReportCardView(r, Modifier.hero(), onReports) } }
         val day = d["date"].str().orEmpty() // the server's day, never the phone's clock
         fun androidx.compose.foundation.lazy.LazyListScope.rightNow() {
             item { RightNow(day, d["now"].obj()?.get("mood").obj(), scope, { reply = it }) { Api.today(ctx).obj()?.let { data = it } } }
@@ -354,7 +353,21 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
                             Text("Readiness", style = AppType.subhead, color = c.secondaryLabel)
                         }
                     }
-                    if (score != null) Text(
+                    // One verdict: the day's report replaces the coach line; the two never show together.
+                    val rep = report
+                    if (rep != null) Column(
+                        Modifier.padding(top = AppSpace.l).hero().clip(AppShape.small).clickable(role = Role.Button) { haptic.tick(); onReports() },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        if (rep.kind == "today" && rep.verdict != null) Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(rep.verdict.replaceFirstChar { it.titlecase(Locale.getDefault()) }, style = AppType.largeTitle, color = accent(rep))
+                            Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Open report", tint = c.secondaryLabel)
+                        }
+                        Text(
+                            clockText(rep.note.split(Regex("(?<=[.!?])\\s+")).take(2).joinToString(" ")), style = AppType.note,
+                            textAlign = TextAlign.Center, modifier = Modifier.padding(top = AppSpace.xs).widthIn(max = 640.dp),
+                        )
+                    } else if (score != null) Text(
                         coachLine(score, r?.get("contributors").obj()), style = AppType.subhead, textAlign = TextAlign.Center,
                         modifier = Modifier.padding(top = AppSpace.l),
                     )
@@ -369,9 +382,17 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
         item {
             InsetCard { SmallRings(d, open?.takeIf { it == "sleep" || it == "activity" }, { open = it }, medStarted) }
         }
-        hold?.takeIf { holdGone != day }?.let { h -> item { HoldCard(h) { ctx.holdDismissed = day; holdGone = day } } }
+        // The "next" slot: the first two that have something to say, in this order; the rest do not draw.
+        val next = mutableListOf<@Composable () -> Unit>()
+        val signals = d["signals"].obj()?.takeIf { it["status"].str() != "learning" && listOf("elevated", "high").contains(it["level"].str()) }
+        // An event logged today with no night, no earlier episode and no note has nothing to show yet.
+        val lt = d["last_time"].obj()?.takeIf { (it["nights"].num() ?: 0.0) > 0 || it["before"].obj() != null || it["price"].obj()?.get("status").str() == "ok" || it["note"].str() != null }
+        if (signals != null) next += {
+            BodySignals(signals, lt) { text -> scope.launch { answered(Api.putNote(ctx, lt?.get("key").str().orEmpty(), text), false) } }
+        }
+        hold?.takeIf { holdGone != day }?.let { h -> next += { HoldCard(h) { ctx.holdDismissed = day; holdGone = day } } }
         // Evening verdict: which band the day turned out to be (0 / 1 / 2), asked once.
-        if (said != null && guess?.get("verdict").num() == null && LocalTime.now().hour >= 18) item {
+        if (said != null && guess?.get("verdict").num() == null && LocalTime.now().hour >= 18) next += {
             InsetCard {
                 Column(Modifier.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
                     Text("How did today actually go?", style = AppType.headline)
@@ -390,7 +411,7 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
         }
         val tonight = d["tonight"].obj()
         val plan = tonight?.get("plan").obj()
-        if (LocalTime.now().hour >= 18 && tonight != null && plan != null) item { TonightCard(plan, tonight["bedtime"].obj(), tonight["wind_down_usual"].num(), tonight["what_if"].obj(), becauseEntries(d, "today").mapNotNull(::tonightLine)) }
+        if (LocalTime.now().hour >= 18 && tonight != null && plan != null) next += { TonightCard(plan, tonight["bedtime"].obj(), tonight["wind_down_usual"].num(), tonight["what_if"].obj(), becauseEntries(d, "today").mapNotNull(::tonightLine)) }
         else if (LocalTime.now().hour >= 18 && tonight != null) {
             val b = tonight["bedtime"].obj()?.takeIf { it["status"].str() == "ok" }
             val start = b?.get("start_min").num()
@@ -401,15 +422,20 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
                 if (start != null && end != null) "bed ${clock(LocalTime.NOON.plusMinutes(start.toLong()))}–${clock(LocalTime.NOON.plusMinutes(end.toLong()))} suits you" else null,
                 debt?.let { if (it < 30) "sleep debt cleared" else "${duration(it)} sleep debt" },
             )
-            if (parts.isNotEmpty()) item {
+            if (parts.isNotEmpty()) next += {
                 Text("Tonight: " + parts.joinToString(" · "), style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.xs))
             }
         }
-        d["signals"].obj()?.let { item { BodySignals(it, medStarted) } }
-        // An event logged today with no night, no earlier episode and no note has nothing to show yet.
-        d["last_time"].obj()?.takeIf { (it["nights"].num() ?: 0.0) > 0 || it["before"].obj() != null || it["price"].obj()?.get("status").str() == "ok" || it["note"].str() != null }?.let { lt ->
-            item { LastTimeCard(lt) { text -> scope.launch { answered(Api.putNote(ctx, lt["key"].str().orEmpty(), text), false) } } }
+        // Today's experiment instruction; the tap to Trends › Insights lands with UR1 (App.kt).
+        exp?.takeIf { it["status"].str() != "done" && it["today"].str() != null }?.let { x ->
+            val on = x["kind"].str().orEmpty().let { TEST_ON[it] ?: it }.replaceFirstChar { it.lowercase() }
+            next += {
+                InsetCard {
+                    Text(clockText("Experiment today: " + (if (x["today"].str() == "on") "" else "no ") + on), style = AppType.body, modifier = Modifier.fillMaxWidth().padding(AppSpace.l))
+                }
+            }
         }
+        next.take(2).forEach { item { it() } }
         rightNow()
         item { DaySoFar(d, journal.filter { it.date == day }, scope, { Api.today(ctx).obj()?.let { data = it } }) { sheet = true } }
         marks.forEach { t -> item { MarkCard(t, scope, ::loadMarks) } }
@@ -1411,8 +1437,9 @@ private fun flagLine(k: String, delta: Double?, usual: Double?): String? = when 
     else -> null
 }
 
+/** Drawn only when raised (elevated or high); [lastTime] goes inside the same card, under a hairline. */
 @Composable
-private fun BodySignals(s: JsonObject, medStarted: String?) {
+private fun BodySignals(s: JsonObject, lastTime: JsonObject?, onNote: (String) -> Unit) {
     val c = AppTheme.colors
     var how by remember { mutableStateOf(false) }
     val nights = s["nights"].num()?.roundToInt() ?: 0
@@ -1421,31 +1448,25 @@ private fun BodySignals(s: JsonObject, medStarted: String?) {
         Text("Body signals", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
         InsetCard {
             Column(Modifier.fillMaxWidth().clickable { how = !how }.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                if (s["status"].str() == "learning" || level < 0) {
-                    val med = s["reason"].str() == "medication" && medStarted != null
-                    val on = if (med) runCatching { " since your medication started on " + LocalDate.parse(medStarted).format(DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())) }.getOrDefault("") else ""
-                    Text("Learning your usual values" + (if (nights < 7) " · $nights/7 nights" else "") + on, style = AppType.subhead, color = c.secondaryLabel)
-                } else {
-                    val steps = listOf(c.signalCalm, c.signalElevated, c.signalHigh)
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
-                        steps.forEachIndexed { i, col ->
-                            Box(Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(50)).background(if (i <= level) col else c.emptySegment))
-                        }
-                        Text(
-                            listOf("Calm", "Elevated", "High")[level], style = AppType.footnote, fontWeight = FontWeight.SemiBold,
-                            color = c.label, modifier = Modifier.padding(start = AppSpace.s),
-                        )
+                val steps = listOf(c.signalCalm, c.signalElevated, c.signalHigh)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
+                    steps.forEachIndexed { i, col ->
+                        Box(Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(50)).background(if (i <= level) col else c.emptySegment))
                     }
-                    Text(listOf("Your body looks like itself.", "Some signs of strain.", "Clear signs of strain.")[level], style = AppType.headline)
-                    val deltas = s["deltas"].obj()
-                    val usual = s["usual"].obj()
-                    s["flags"].obj()?.keys?.mapNotNull { flagLine(it, deltas?.get(it).num(), usual?.get(it).num()) }?.forEach {
-                        Text(it, style = AppType.subhead)
-                    }
-                    val logged = (s["explain"] as? JsonArray)?.mapNotNull { LOGGED[it.str()] }.orEmpty()
-                    if (level > 0 && logged.isNotEmpty()) Text("You logged ${join(logged)} yesterday, which can cause this.", style = AppType.subhead, color = c.secondaryLabel)
-                    Text("Based on $nights nights. Not medical advice.", style = AppType.footnote, color = c.secondaryLabel)
+                    Text(
+                        listOf("Calm", "Elevated", "High")[level], style = AppType.footnote, fontWeight = FontWeight.SemiBold,
+                        color = c.label, modifier = Modifier.padding(start = AppSpace.s),
+                    )
                 }
+                Text(listOf("Your body looks like itself.", "Some signs of strain.", "Clear signs of strain.")[level], style = AppType.headline)
+                val deltas = s["deltas"].obj()
+                val usual = s["usual"].obj()
+                s["flags"].obj()?.keys?.mapNotNull { flagLine(it, deltas?.get(it).num(), usual?.get(it).num()) }?.forEach {
+                    Text(it, style = AppType.subhead)
+                }
+                val logged = (s["explain"] as? JsonArray)?.mapNotNull { LOGGED[it.str()] }.orEmpty()
+                if (level > 0 && logged.isNotEmpty()) Text("You logged ${join(logged)} yesterday, which can cause this.", style = AppType.subhead, color = c.secondaryLabel)
+                Text("Based on $nights nights. Not medical advice.", style = AppType.footnote, color = c.secondaryLabel)
             }
             AnimatedVisibility(how) {
                 Column {
@@ -1460,6 +1481,10 @@ private fun BodySignals(s: JsonObject, medStarted: String?) {
                     }
                 }
             }
+            lastTime?.let {
+                Hairline(Modifier.padding(start = AppSpace.l))
+                LastTimeCard(it, onNote)
+            }
         }
     }
 }
@@ -1467,7 +1492,7 @@ private fun BodySignals(s: JsonObject, medStarted: String?) {
 /** "1 night", "2 nights", "1.5 nights" (a median). */
 private fun nightsText(v: Double) = if (v == 1.0) "1 night" else "${if (v % 1 == 0.0) v.roundToInt().toString() else v.toString()} nights"
 
-/** `/today.last_time`: how long the raised nights after an event (or a run with no event) lasted before, plus the user's note to themselves. */
+/** `/today.last_time`, drawn inside the Body signals card: how long the raised nights after an event (or a run with no event) lasted before, plus the user's note to themselves. */
 @Composable
 private fun LastTimeCard(lt: JsonObject, onNote: (String) -> Unit) {
     val c = AppTheme.colors
@@ -1483,57 +1508,52 @@ private fun LastTimeCard(lt: JsonObject, onNote: (String) -> Unit) {
     val after = "After " + join((lt["kinds"] as? JsonArray)?.mapNotNull { LOGGED[it.str()] }.orEmpty().ifEmpty { listOf("what you logged") })
     val dm = DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())
     val note = lt["note"].str()
-    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-        Text("Last time", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-        InsetCard {
-            Column(Modifier.fillMaxWidth().padding(start = AppSpace.l, top = AppSpace.l, end = AppSpace.l, bottom = AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                if (n > 0 || expect > 0) Row(verticalAlignment = Alignment.CenterVertically) {
-                    WalkDown(
-                        n, expect, ring = why != "signals", closed = why == "closed", modifier = Modifier.weight(1f),
-                        describe = when (why) {
-                            "closed" -> "Signals raised for ${nightsText(n.toDouble())} after the event, then back to calm."
-                            "event" -> "${nightsText(n.toDouble())} raised since the event." + if (expect > 0) " It usually takes ${nightsText(expect.toDouble())}." else ""
-                            else -> "${nightsText(n.toDouble())} raised in a row." + if (expect > 0) " Last time it lasted ${nightsText(expect.toDouble())}." else ""
-                        },
-                    )
-                    if (why == "closed") Text(nightsText(n.toDouble()), style = AppType.headline, modifier = Modifier.padding(start = AppSpace.m))
-                }
-                when (why) {
-                    "event" -> {
-                        Text(after, style = AppType.headline)
-                        if (n > 0) Text("Night $n: ${if (n > 1) "still " else ""}above your usual.", style = AppType.subhead)
-                        // The first night's flagged inputs.
-                        val usualBy = lt["usual"].obj()
-                        lt["deltas"].obj()?.mapNotNull { (k, v) -> flagLine(k, v.num(), usualBy?.get(k).num()) }?.forEach { Text(it, style = AppType.subhead) }
-                        if (first != null && was != null) Text(
-                            "Last time (${first.format(dm)}): " + if (was == 0) "no raised nights." else "back to usual after ${nightsText(was.toDouble())}.", style = AppType.subhead,
-                        )
-                        if (usual != null) Text(if (usual == 0.0) "Usually no extra nights for you." else "Usually ${nightsText(usual)} for you.", style = AppType.subhead, color = c.secondaryLabel)
-                    }
-                    "closed" -> {
-                        Text("Back in your usual range.", style = AppType.headline)
-                        val on = runCatching { " on " + LocalDate.parse(lt["last"].str()).format(DateTimeFormatter.ofPattern("EEEE", Locale.getDefault())) }.getOrDefault("")
-                        Text("$after$on: ${nightsText(n.toDouble())}.", style = AppType.subhead)
-                    }
-                    else -> {
-                        Text("This has happened before.", style = AppType.headline)
-                        if (first != null && was != null) {
-                            val end = first.plusDays(was - 1L)
-                            val range = first.format(if (first.month == end.month) DateTimeFormatter.ofPattern("d") else dm) + " to " + end.format(dm)
-                            Text("Last time your signals ran high ($range), it lasted ${nightsText(was.toDouble())}.", style = AppType.subhead)
-                        }
-                    }
-                }
-                if (note != null) {
-                    Text(note, style = AppType.subhead, modifier = Modifier.padding(top = AppSpace.xs))
-                    Text("You wrote this last time.", style = AppType.footnote, color = c.secondaryLabel)
-                }
-                Text(
-                    if (note == null) "Leave a note for next time" else "Edit note", style = AppType.body, color = c.tint,
-                    modifier = Modifier.clip(AppShape.small).clickable(role = Role.Button) { haptic.tick(); editing = true }.padding(vertical = AppSpace.s),
+    Column(Modifier.fillMaxWidth().padding(start = AppSpace.l, top = AppSpace.l, end = AppSpace.l, bottom = AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+        if (n > 0 || expect > 0) Row(verticalAlignment = Alignment.CenterVertically) {
+            WalkDown(
+                n, expect, ring = why != "signals", closed = why == "closed", modifier = Modifier.weight(1f),
+                describe = when (why) {
+                    "closed" -> "Signals raised for ${nightsText(n.toDouble())} after the event, then back to calm."
+                    "event" -> "${nightsText(n.toDouble())} raised since the event." + if (expect > 0) " It usually takes ${nightsText(expect.toDouble())}." else ""
+                    else -> "${nightsText(n.toDouble())} raised in a row." + if (expect > 0) " Last time it lasted ${nightsText(expect.toDouble())}." else ""
+                },
+            )
+            if (why == "closed") Text(nightsText(n.toDouble()), style = AppType.headline, modifier = Modifier.padding(start = AppSpace.m))
+        }
+        when (why) {
+            "event" -> {
+                Text(after, style = AppType.headline)
+                if (n > 0) Text("Night $n: ${if (n > 1) "still " else ""}above your usual.", style = AppType.subhead)
+                // The first night's flagged inputs.
+                val usualBy = lt["usual"].obj()
+                lt["deltas"].obj()?.mapNotNull { (k, v) -> flagLine(k, v.num(), usualBy?.get(k).num()) }?.forEach { Text(it, style = AppType.subhead) }
+                if (first != null && was != null) Text(
+                    "Last time (${first.format(dm)}): " + if (was == 0) "no raised nights." else "back to usual after ${nightsText(was.toDouble())}.", style = AppType.subhead,
                 )
+                if (usual != null) Text(if (usual == 0.0) "Usually no extra nights for you." else "Usually ${nightsText(usual)} for you.", style = AppType.subhead, color = c.secondaryLabel)
+            }
+            "closed" -> {
+                Text("Back in your usual range.", style = AppType.headline)
+                val on = runCatching { " on " + LocalDate.parse(lt["last"].str()).format(DateTimeFormatter.ofPattern("EEEE", Locale.getDefault())) }.getOrDefault("")
+                Text("$after$on: ${nightsText(n.toDouble())}.", style = AppType.subhead)
+            }
+            else -> {
+                Text("This has happened before.", style = AppType.headline)
+                if (first != null && was != null) {
+                    val end = first.plusDays(was - 1L)
+                    val range = first.format(if (first.month == end.month) DateTimeFormatter.ofPattern("d") else dm) + " to " + end.format(dm)
+                    Text("Last time your signals ran high ($range), it lasted ${nightsText(was.toDouble())}.", style = AppType.subhead)
+                }
             }
         }
+        if (note != null) {
+            Text(note, style = AppType.subhead, modifier = Modifier.padding(top = AppSpace.xs))
+            Text("You wrote this last time.", style = AppType.footnote, color = c.secondaryLabel)
+        }
+        Text(
+            if (note == null) "Leave a note for next time" else "Edit note", style = AppType.body, color = c.tint,
+            modifier = Modifier.clip(AppShape.small).clickable(role = Role.Button) { haptic.tick(); editing = true }.padding(vertical = AppSpace.s),
+        )
     }
     if (editing) NoteDialog(note, { editing = false }, onNote)
 }
