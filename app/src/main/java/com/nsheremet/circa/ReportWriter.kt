@@ -107,15 +107,23 @@ internal fun checkedNote(reply: String, facts: List<String>, advice: List<String
 internal fun keepDays(reports: Map<String, JsonElement>, date: LocalDate) =
     reports.filterKeys { it.substringBefore('/') >= date.minusDays(13).toString() }
 
-/** `reports.json` entries without [date]'s: Regenerate rewrites every card of that day. */
-internal fun dropDay(reports: Map<String, JsonElement>, date: String) = reports.filterKeys { !it.startsWith("$date/") }
-
 /**
- * DT1: the [cards] of [date]'s `/report` to write. A card with an entry is never rewritten (Regenerate drops the day first);
- * nothing is written until the `night` card is in, unless [force].
+ * DT1: the [cards] of [date]'s `/report` to write. A card with an entry is never rewritten; nothing is written until the
+ * `night` card is in, unless [force].
+ * RG1: [force] (Regenerate) also returns each of [date]'s card entries (never `update-*`) rebuilt from its stored inputs
+ * with its `at`; an entry without inputs takes them from its `/report` card once.
  */
-internal fun toWrite(reports: Map<String, JsonElement>, date: String, cards: List<JsonObject>, force: Boolean): List<JsonObject> =
-    if (!force && cards.none { it.str("kind") == "night" }) emptyList() else cards.filter { "$date/${it.str("kind")}" !in reports }
+internal fun toWrite(reports: Map<String, JsonElement>, date: String, cards: List<JsonObject>, force: Boolean): List<JsonObject> {
+    val fresh = if (!force && cards.none { it.str("kind") == "night" }) emptyList() else cards.filter { "$date/${it.str("kind")}" !in reports }
+    if (!force) return fresh
+    val byKind = cards.associateBy { it.str("kind") }
+    return reports.filterKeys { it.startsWith("$date/") && !it.startsWith("$date/update-") }.mapNotNull { (k, e) ->
+        val kind = k.substringAfter('/')
+        val entry = e as? JsonObject ?: return@mapNotNull null
+        val inputs = if ("facts" in entry) entry else byKind[kind] ?: return@mapNotNull null
+        JsonObject(inputs + listOfNotNull("kind" to JsonPrimitive(kind), entry["at"]?.let { "at" to it }))
+    } + fresh
+}
 
 /** FN2: a quiet card has nothing new; its fallback is the note and the model is not called. */
 internal fun isQuiet(card: JsonObject) = (card["quiet"] as? JsonPrimitive)?.content == "true"
@@ -128,8 +136,8 @@ private val writing = Mutex()
 
 /**
  * Writes the notes of today's `/report` cards that have none yet ([toWrite]) into `filesDir/reports.json`
- * (`{"date/kind": {"hash", "text"}}`; text is the card's fallback when a check failed).
- * [force] drops today's entries first, so every card is written again.
+ * (`{"date/kind": {"hash", "text", "at", "advice", "verdict", "facts", "fallback", "quiet"}}`; text is the card's fallback
+ * when a check failed). [force] blanks today's card texts first and rewrites them from the stored inputs, keeping `at`.
  * Returns the Sync log line, or null when the writer is off, the model is missing or nothing changed. Blocks for seconds a card.
  */
 internal suspend fun writeReports(ctx: Context, force: Boolean = false): String? = writing.withLock { writeLocked(ctx, force) }
@@ -144,20 +152,28 @@ private suspend fun writeLocked(ctx: Context, force: Boolean): String? {
     val now = LocalDate.now()
     val reply = Api.report(ctx, now, dayAdvice(stored, now.minusDays(1).toString())) as? JsonObject ?: return null
     val date = (reply["date"] as? JsonPrimitive)?.content ?: return null
-    val reports = keepDays(stored, LocalDate.parse(date)).let { if (force) dropDay(it, date) else it }.toMutableMap()
+    val reports = keepDays(stored, LocalDate.parse(date)).toMutableMap()
     // Through a rename: a killed worker keeps what it wrote and the page never reads half a file.
     val save = { File(ctx.filesDir, "reports.json.tmp").apply { writeText(JsonObject(reports).toString()) }.renameTo(file) }
-    if (force) save() // the page shows a placeholder for every card until its note lands
     val name = ctx.reportName
     val todo = toWrite(reports, date, (reply["cards"] as? JsonArray).orEmpty().map { it.jsonObject }, force)
     if (todo.isEmpty()) return null
+    if (force) { // blank text: the page shows a placeholder until the note lands; `at` and the rest stay
+        todo.forEach { c -> (reports["$date/${c.str("kind")}"] as? JsonObject)?.let { reports["$date/${c.str("kind")}"] = JsonObject(it + ("text" to JsonPrimitive(""))) } }
+        save()
+    }
     val t0 = SystemClock.elapsedRealtime()
     var fallbacks = 0
-    // at and advice (DT3): an update's `since` and `given` start from the morning card. [note] null: the fallback.
+    // at and advice (DT3): an update's `since` and `given` start from the morning card; a rewrite keeps the card's `at`.
+    // The inputs (RG1) let Regenerate rewrite the same card later. [note] null: the fallback.
     val store = { c: JsonObject, note: String? ->
+        val verdict = (c["verdict"] as? JsonPrimitive)?.contentOrNull
+        val facts = c.strings("facts")
         val advice = c.strings("advice")
-        reports["$date/${c.str("kind")}"] = JsonObject(mapOf("hash" to JsonPrimitive(reportHash(name, (c["verdict"] as? JsonPrimitive)?.contentOrNull, c.strings("facts"), advice)),
-            "text" to JsonPrimitive(note ?: c.str("fallback")), "at" to JsonPrimitive(System.currentTimeMillis() / 1000), "advice" to JsonArray(advice.map { JsonPrimitive(it) })))
+        reports["$date/${c.str("kind")}"] = JsonObject(mapOf("hash" to JsonPrimitive(reportHash(name, verdict, facts, advice)),
+            "text" to JsonPrimitive(note ?: c.str("fallback")), "at" to JsonPrimitive(c.long("at") ?: (System.currentTimeMillis() / 1000)),
+            "advice" to JsonArray(advice.map { JsonPrimitive(it) }), "verdict" to JsonPrimitive(verdict), "facts" to JsonArray(facts.map { JsonPrimitive(it) }),
+            "fallback" to JsonPrimitive(c.str("fallback")), "quiet" to JsonPrimitive(isQuiet(c))))
         save() // after every card
     }
     val (quiet, loud) = todo.partition(::isQuiet)

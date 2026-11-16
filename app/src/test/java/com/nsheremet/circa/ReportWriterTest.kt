@@ -127,8 +127,35 @@ class ReportDaysTest {
     @Test fun entryIsNotRewritten() =
         assertEquals(listOf("today"), kinds(toWrite(written, "2026-11-15", cards("night", "today", "week"), false)))
 
+    // RG1: Regenerate rewrites the text from the stored inputs and keeps the rest.
+    private val d = "2026-11-15"
+    private fun facts(o: JsonObject) = (o["facts"] as JsonArray).map { (it as JsonPrimitive).content }
+    private val stored = JsonObject(mapOf("text" to JsonPrimitive("Old note."), "at" to JsonPrimitive(1794700000), "advice" to JsonArray(emptyList()),
+        "verdict" to JsonPrimitive("rest"), "facts" to JsonArray(listOf(JsonPrimitive("HRV 43 ms"))), "fallback" to JsonPrimitive("Rest."), "quiet" to JsonPrimitive(false)))
+    private val newCard = JsonObject(mapOf("kind" to JsonPrimitive("today"), "facts" to JsonArray(listOf(JsonPrimitive("HRV 50 ms"))), "fallback" to JsonPrimitive("New.")))
+
     @Test fun forceRewritesAll() =
-        assertEquals(listOf("night", "today", "week"), kinds(toWrite(dropDay(written, "2026-11-15"), "2026-11-15", cards("night", "today", "week"), true)))
+        assertEquals(listOf("night", "week", "today"), kinds(toWrite(written.mapValues { JsonObject(emptyMap()) }, d, cards("night", "today", "week"), true)))
+
+    @Test fun regenerateKeepsAt() =
+        assertEquals(JsonPrimitive(1794700000), toWrite(mapOf("$d/today" to stored), d, listOf(newCard), true).single()["at"])
+
+    @Test fun regenerateUsesStoredFacts() =
+        assertEquals(listOf("HRV 43 ms"), facts(toWrite(mapOf("$d/today" to stored), d, listOf(newCard), true).single()))
+
+    @Test fun regenerateKeepsUpdates() {
+        val u = updateEntry(1794710000, "Update.", listOf("Walk"), false)
+        val todo = toWrite(mapOf("$d/today" to stored, "$d/update-1794710000" to u), d, listOf(newCard), true)
+        assertEquals(listOf("today"), kinds(todo))
+    }
+
+    @Test fun regenerateFillsOldEntry() {
+        val old = JsonObject(mapOf("hash" to JsonPrimitive("x"), "text" to JsonPrimitive("Old note."), "at" to JsonPrimitive(1794700000)))
+        val c = toWrite(mapOf("$d/today" to old), d, listOf(newCard), true).single()
+        assertEquals(listOf("HRV 50 ms"), facts(c))
+        assertEquals(JsonPrimitive(1794700000), c["at"])
+        assertEquals("New.", (c["fallback"] as JsonPrimitive).content)
+    }
 
     @Test fun waitsForNight() =
         assertEquals(emptyList<String>(), kinds(toWrite(emptyMap(), "2026-11-15", cards("yesterday", "week"), false)))
@@ -155,11 +182,5 @@ class ReportDaysTest {
         assertTrue(s, s.contains("Add nothing that is not in the facts"))
         assertFalse(s, s.contains("Connect them"))
         assertTrue(reportSystem("", "night").contains("Length: 2 to 4 sentences"))
-    }
-
-    @Test fun dropsOnlyThatDay() {
-        val x = JsonPrimitive(1)
-        val kept = dropDay(mapOf("2026-11-15/today" to x, "2026-11-15/week" to x, "2026-11-14/today" to x), "2026-11-15")
-        assertEquals(setOf("2026-11-14/today"), kept.keys)
     }
 }
