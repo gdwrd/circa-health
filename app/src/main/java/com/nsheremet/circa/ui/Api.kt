@@ -131,7 +131,41 @@ object Api {
         }
 
     /** Body is a subset of the backend settings keys; returns the full settings, or null on failure. */
-    suspend fun patchSettings(ctx: Context, body: Map<String, JsonPrimitive>) = call(ctx, "/settings", "PATCH", JsonObject(body).toString()) as? JsonObject
+    suspend fun patchSettings(ctx: Context, body: Map<String, JsonElement>) = call(ctx, "/settings", "PATCH", JsonObject(body).toString()) as? JsonObject
+
+    /** GET /mind: `{days: [{date, energy, valence, focus, appetite, crash, feelings, load, mg}], phq: [{ts, total}]}`. */
+    suspend fun mind(ctx: Context, days: Int) = get(ctx, "/mind?days=$days") as? JsonObject
+
+    class DoseStep(val from: LocalDate, val mg: Double)
+
+    /** "30 mg", "2.5 mg". */
+    fun mgLabel(mg: Double) = (if (mg % 1.0 == 0.0) mg.toLong().toString() else mg.toString()) + " mg"
+
+    /** Setting `medication_doses` of a GET/PATCH /settings reply, oldest first. */
+    fun doseSteps(settings: JsonObject?): List<DoseStep> = (settings?.get("medication_doses") as? JsonArray).orEmpty().mapNotNull { e ->
+        val o = e as? JsonObject ?: return@mapNotNull null
+        runCatching { DoseStep(LocalDate.parse((o["from"] as JsonPrimitive).content), (o["mg"] as JsonPrimitive).content.toDouble()) }.getOrNull()
+    }.sortedBy { it.from }
+
+    /** PATCH the whole list; sorted, one step per date (the server refuses two). Returns the full settings, or null on failure. */
+    suspend fun setDoseSteps(ctx: Context, steps: List<DoseStep>) = patchSettings(ctx, mapOf("medication_doses" to JsonArray(
+        steps.associateBy { it.from }.values.sortedBy { it.from }.map { JsonObject(mapOf("from" to JsonPrimitive(it.from.toString()), "mg" to JsonPrimitive(it.mg))) },
+    )))
+
+    /** One `insights.kinds.medication.levels` entry; [means] null where under 3 dose days. [to] null = the current step. */
+    class DoseLevel(val from: LocalDate, val to: LocalDate?, val mg: Double, val n: Int, val means: Map<String, Double?>)
+
+    fun doseLevels(medication: JsonObject?): List<DoseLevel> = (medication?.get("levels") as? JsonArray).orEmpty().mapNotNull { e ->
+        val o = e as? JsonObject ?: return@mapNotNull null
+        fun s(k: String) = (o[k] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        runCatching {
+            DoseLevel(
+                LocalDate.parse(s("from")), s("to")?.let(LocalDate::parse), (o["mg"] as JsonPrimitive).content.toDouble(),
+                (o["n"] as? JsonPrimitive)?.content?.toDoubleOrNull()?.toInt() ?: 0,
+                (o["means"] as? JsonObject).orEmpty().mapValues { (it.value as? JsonPrimitive)?.content?.toDoubleOrNull() },
+            )
+        }.getOrNull()
+    }
 
     /** PATCH /workouts relabels one detected workout ([start] = its unix start); returns `{workouts: [...]}` for the day. */
     suspend fun setWorkoutKind(ctx: Context, date: LocalDate, start: Long, kind: String) =

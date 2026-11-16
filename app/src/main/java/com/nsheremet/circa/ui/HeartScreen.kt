@@ -26,8 +26,11 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Alignment
@@ -54,6 +57,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
@@ -421,7 +425,85 @@ private fun MedicationCard(med: JsonObject?, started: String, rhr: List<JsonObje
                     style = AppType.subhead, color = c.secondaryLabel,
                 )
             }
+            val levels = Api.doseLevels(med)
+            if (levels.isNotEmpty()) {
+                Hairline(Modifier.padding(vertical = AppSpace.xs))
+                ByDose(levels)
+            }
             Text("Averages from your own data. Other things may play a part. Not medical advice.", style = AppType.footnote, color = c.secondaryLabel)
+        }
+    }
+}
+
+// Rows of the By dose table: label and the value as shown ("—" when null: under 3 dose days).
+private val BY_DOSE: List<Pair<String, (Map<String, Double?>) -> String?>> = listOf(
+    "Resting HR" to { m -> m["rhr"]?.let { "${it.roundToInt()} bpm" } },
+    "Time asleep" to { m -> m["total_min"]?.roundToInt()?.let { "${it / 60} h ${"%02d".format(it % 60)}" } },
+    "Bedtime" to { m -> m["bed_start"]?.let(::bedClock) },
+    "Energy" to { m -> m["energy"]?.let { "%.1f".format(it) } },
+    "Mood" to { m -> m["valence"]?.let { "%.1f".format(it) } },
+    "Focus" to { m -> m["focus"]?.let { "%.1f".format(it) } },
+    "Appetite" to { m -> m["appetite"]?.let { "%.1f".format(it) } },
+    "Crash" to { m -> m["crash"]?.let { "%.1f".format(it) } },
+    "Blood pressure" to { m -> m["sys"]?.let { s -> m["dia"]?.let { d -> "${s.roundToInt()}/${d.roundToInt()}" } } },
+)
+
+/**
+ * Steps as columns, measures as rows (as the with / without table above). The label column stays put; the step
+ * columns share one scroll state, so from three steps on they slide together and open at the latest.
+ */
+@Composable
+private fun ByDose(levels: List<Api.DoseLevel>) {
+    val c = AppTheme.colors
+    val scroll = rememberScrollState()
+    LaunchedEffect(scroll.maxValue) { scroll.scrollTo(scroll.maxValue) }
+    val fmt = DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())
+    val min = (12 + 84 * LocalDensity.current.fontScale).dp // "11:37 PM" plus a gap, at any text size
+    Text("By dose", style = AppType.headline)
+    BoxWithConstraints {
+        // Narrow screen or large text: a label beside the values would leave room for one step only, so it goes above them.
+        val stack = levels.size > 1 && (maxWidth - 112.dp) / min < 2f
+        val room = if (stack) maxWidth else maxWidth - 112.dp
+        // Whole columns only at rest: when the steps overflow, the visible ones widen to fill the space exactly.
+        val fit = maxOf(1, (room / min).toInt())
+        val col = Modifier.width(if (levels.size <= fit) min else room / fit)
+        Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+            @Composable
+            fun Line(label: String, cells: @Composable (Api.DoseLevel) -> Unit) {
+                @Composable
+                fun Values(m: Modifier) = Row(m.horizontalScroll(scroll), horizontalArrangement = Arrangement.End) {
+                    levels.forEach { Box(col, contentAlignment = Alignment.CenterEnd) { cells(it) } }
+                }
+                if (stack) Column {
+                    if (label.isNotEmpty()) Text(label, style = AppType.footnote, color = c.secondaryLabel)
+                    Values(Modifier.fillMaxWidth())
+                } else Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(label, style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.width(112.dp))
+                    Values(Modifier.weight(1f))
+                }
+            }
+            Line("") { l ->
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        Api.mgLabel(l.mg), style = AppType.footnote.copy(fontWeight = FontWeight.SemiBold), color = c.pill, maxLines = 1,
+                        modifier = Modifier.clip(CircleShape).background(c.pill.copy(alpha = 0.16f)).padding(horizontal = AppSpace.s, vertical = 2.dp),
+                    )
+                    Text(l.from.format(fmt), style = AppType.footnote, color = c.secondaryLabel, maxLines = 1, modifier = Modifier.padding(top = 2.dp))
+                }
+            }
+            Line("Dose days") { Text(it.n.toString(), style = AppType.subhead, fontWeight = FontWeight.SemiBold) }
+            BY_DOSE.forEach { (label, value) ->
+                Hairline()
+                Line(label) { l ->
+                    val v = value(l.means)
+                    Text(v ?: "—", style = AppType.subhead, color = if (v == null) c.secondaryLabel else c.label, maxLines = 1)
+                }
+            }
+            Text(
+                (if (levels.size > fit) "Swipe the table for earlier steps. " else "") +
+                    "Each step runs from the date under it. Scales are 1 to 5. “—”: under 3 dose days on that step.",
+                style = AppType.footnote, color = c.secondaryLabel,
+            )
         }
     }
 }

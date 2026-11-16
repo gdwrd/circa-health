@@ -73,6 +73,7 @@ import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.RadioButtonUnchecked
+import androidx.compose.material.icons.rounded.RemoveCircle
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -258,6 +259,9 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var pickWake by remember { mutableStateOf<String?>(null) } // "wake_weekday" | "wake_weekend"
     var birth by remember { mutableStateOf("") }
     var things by remember { mutableStateOf(List(3) { "" }) } // Things to mark: slots 1..3
+    var medName by remember { mutableStateOf("") }
+    var addStep by remember { mutableStateOf<Pair<String, LocalDate>?>(null) } // the Add dose step dialog: (mg typed, from)
+    var pickStepDate by remember { mutableStateOf(false) }
     LaunchedEffect(url, token) {
         // Goals typed on this phone and not yet on the server go up first; until that works the server's are not copied down.
         if (!ctx.goalsPushed && ctx.hasStoredGoals) ctx.goalsPushed = Api.patchSettings(ctx, mapOf(
@@ -268,6 +272,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         if (med != null && !ctx.hasStoredGoals) ctx.goalsPushed = true // fresh install: nothing to push, the server's goals win
         birth = (med?.get("birth_year") as? JsonPrimitive)?.contentOrNull.orEmpty()
         things = (1..3).map { (med?.get("mark_$it") as? JsonPrimitive)?.contentOrNull.orEmpty() }
+        medName = (med?.get("medication_name") as? JsonPrimitive)?.contentOrNull.orEmpty()
         if (ctx.goalsPushed) med?.let { s ->
             (s["step_goal"] as? JsonPrimitive)?.doubleOrNull?.let { ctx.stepGoal = it.roundToInt(); steps = ctx.stepGoal.toString() }
             (s["sleep_need_min"] as? JsonPrimitive)?.doubleOrNull?.let { ctx.sleepNeedHours = it.toFloat() / 60; sleepNeed = ctx.sleepNeedHours.toString().removeSuffix(".0") }
@@ -292,6 +297,10 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     fun saveMark(slot: Int, name: String) {
         goalJobs["mark_$slot"]?.cancel()
         goalJobs["mark_$slot"] = activity.lifecycleScope.launch { delay(800); patchMed("mark_$slot", JsonPrimitive(name.trim())) }
+    }
+    fun saveSteps(steps: List<Api.DoseStep>) {
+        haptic.tick()
+        activity.lifecycleScope.launch { Api.setDoseSteps(ctx, steps)?.let { med = it } ?: Toast.makeText(ctx, "Could not save the dose steps", Toast.LENGTH_SHORT).show() }
     }
     // The names as the server holds them, kept for the mark widget.
     LaunchedEffect(med) {
@@ -576,12 +585,39 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                     }
                     if (started.isNotEmpty()) {
                         Hairline(Modifier.padding(start = AppSpace.l))
+                        FieldRow("Name", medName, "Not set") {
+                            medName = it.take(40)
+                            goalJobs["medication_name"]?.cancel()
+                            goalJobs["medication_name"] = activity.lifecycleScope.launch { delay(800); patchMed("medication_name", JsonPrimitive(medName.trim())) }
+                        }
+                        Hairline(Modifier.padding(start = AppSpace.l))
                         ChevronRow("Started on", runCatching { LocalDate.parse(started).format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())) }.getOrDefault(started)) { pickStart = true }
                         Hairline(Modifier.padding(start = AppSpace.l))
                         ChevronRow("Usual time", clock((s["medication_time"] as? JsonPrimitive)?.contentOrNull.orEmpty())) { pickTime = true }
                         Hairline(Modifier.padding(start = AppSpace.l))
                         ChevronRow("Active window", "${(s["medication_window_h"] as? JsonPrimitive)?.doubleOrNull?.toInt() ?: "—"} h") { pickWindow = true }
                     }
+                }
+            }
+            if (started.isNotEmpty()) item {
+                val steps = Api.doseSteps(s)
+                Section("Dose steps", "A day counts under the latest step on or before it. Heart's Medication card shows each step side by side.") {
+                    val fmt = DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())
+                    steps.forEach { st ->
+                        Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(start = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                Api.mgLabel(st.mg), style = AppType.subhead.copy(fontWeight = FontWeight.SemiBold), color = c.pill, maxLines = 1,
+                                modifier = Modifier.clip(RoundedCornerShape(50)).background(c.pill.copy(alpha = 0.16f)).padding(horizontal = 10.dp, vertical = 3.dp),
+                            )
+                            Text("from ${st.from.format(fmt)}", style = AppType.body, color = c.secondaryLabel, maxLines = 1, modifier = Modifier.weight(1f).padding(start = AppSpace.m))
+                            Box(
+                                Modifier.size(48.dp).clickable(role = Role.Button, onClickLabel = "Delete ${Api.mgLabel(st.mg)} step") { saveSteps(steps - st) },
+                                contentAlignment = Alignment.Center,
+                            ) { Icon(Icons.Rounded.RemoveCircle, "Delete", tint = c.badText, modifier = Modifier.size(22.dp)) }
+                        }
+                        Hairline(Modifier.padding(start = AppSpace.l))
+                    }
+                    ButtonRow("Add dose step") { addStep = "" to LocalDate.now() }
                 }
             }
         }
@@ -830,6 +866,33 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             pickWake = null
             patchMed(k, JsonPrimitive(it))
         }
+    }
+
+    addStep?.let { (mgText, from) ->
+        val mg = mgText.replace(',', '.').toDoubleOrNull()?.takeIf { it >= 1 && it <= 500 }
+        if (pickStepDate) StartDateDialog(from.toString(), { pickStepDate = false }) { pickStepDate = false; addStep = mgText to LocalDate.parse(it) }
+        else AlertDialog(
+            onDismissRequest = { addStep = null },
+            containerColor = c.background,
+            title = { Text("Add dose step") },
+            text = {
+                InsetCard {
+                    FieldRow("Dose (mg)", mgText, "30", KeyboardType.Decimal, supporting = if (mgText.isNotEmpty() && mg == null) "1 to 500" else null) {
+                        addStep = it.filter { ch -> ch.isDigit() || ch == '.' || ch == ',' }.take(5) to from
+                    }
+                    Hairline(Modifier.padding(start = AppSpace.l))
+                    ChevronRow("From", from.format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault()))) { pickStepDate = true }
+                }
+            },
+            confirmButton = {
+                TextButton({
+                    addStep = null
+                    // A step on the same date replaces the old one (setDoseSteps keeps the last per date).
+                    saveSteps(Api.doseSteps(med) + Api.DoseStep(from, mg!!))
+                }, enabled = mg != null) { Text("Add", color = if (mg != null) c.tint else c.secondaryLabel) }
+            },
+            dismissButton = { TextButton({ addStep = null }) { Text("Cancel", color = c.tint) } },
+        )
     }
 
     if (pickStart) StartDateDialog((med?.get("medication_started") as? JsonPrimitive)?.contentOrNull.orEmpty(), { pickStart = false }) {
