@@ -359,7 +359,7 @@ private fun EventChip(kind: String) {
         "wired" -> Icons.Rounded.Bolt to c.stageAwake
         "good" -> Icons.Rounded.WbSunny to c.readiness
         "wake" -> Icons.Rounded.WbTwilight to c.sleep
-        "walk" -> Icons.Rounded.DirectionsWalk to c.activity
+        "walk", "steps" -> Icons.Rounded.DirectionsWalk to c.activity
         "ride" -> Icons.Rounded.DirectionsBike to c.activity
         "workout" -> Icons.Rounded.FitnessCenter to c.activity
         "coffee" -> Icons.Rounded.Coffee to null
