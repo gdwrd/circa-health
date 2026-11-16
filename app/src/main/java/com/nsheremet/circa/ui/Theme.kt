@@ -494,10 +494,13 @@ fun LargeTitleScaffold(
                         Text(title, style = AppType.largeTitle, modifier = Modifier.weight(1f).padding(start = AppSpace.xs))
                         action?.invoke()
                     }
-                    Api.stale.value?.let { ms ->
+                    val stale = Api.stale.value?.let { ms ->
                         val now = System.currentTimeMillis()
                         val ago = if (now - ms < 60_000) "just now" else DateUtils.getRelativeTimeSpanString(ms, now, DateUtils.MINUTE_IN_MILLIS)
-                        Text("Showing data from $ago · server unreachable", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.xs, top = AppSpace.xs))
+                        "Showing data from $ago · server unreachable"
+                    } ?: "Server unreachable".takeIf { Api.unreachable.value }
+                    stale?.let {
+                        Text(it, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.xs, top = AppSpace.xs))
                         Hairline(Modifier.padding(top = AppSpace.s))
                     }
                 }
@@ -559,7 +562,8 @@ fun EmptyState(icon: ImageVector, title: String, line: String) {
 /** Tab without a backend: large title and the "Scores need the backend" empty state (blank while the probe runs). */
 @Composable
 fun NoBackendTab(title: String, backend: Boolean?, action: (@Composable () -> Unit)? = null) = LargeTitleScaffold(title, action = action) {
-    if (backend == false) item { InsetCard { EmptyState(Icons.Rounded.CloudOff, "Scores need the backend", "Set the server URL and token in Settings.") } }
+    // A configured server that is down is not "set the URL": the scaffold's "Server unreachable" line says it.
+    if (backend == false && !Api.unreachable.value) item { InsetCard { EmptyState(Icons.Rounded.CloudOff, "Scores need the backend", "Set the server URL and token in Settings.") } }
 }
 
 fun dayLabel(date: LocalDate): String = LocalDate.now().let { today ->

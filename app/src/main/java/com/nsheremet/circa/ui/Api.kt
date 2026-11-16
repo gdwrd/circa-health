@@ -43,6 +43,9 @@ object Api {
     /** Epoch ms of the cached answer the last GET fell back to; null when it was live. */
     val stale = mutableStateOf<Long?>(null)
 
+    /** True when the last GET (or backend probe) failed and nothing was cached to show instead. */
+    val unreachable = mutableStateOf(false)
+
     private fun cacheFile(ctx: Context, path: String) =
         File(File(ctx.cacheDir, "api"), MessageDigest.getInstance("SHA-1").digest(path.toByteArray()).joinToString("") { "%02x".format(it) })
 
@@ -61,10 +64,12 @@ object Api {
         if (live != null) {
             runCatching { file.parentFile!!.mkdirs(); file.writeText(live) }
             stale.value = null
+            unreachable.value = false
             return@withContext Json.parseToJsonElement(live)
         }
         val old = runCatching { Json.parseToJsonElement(file.readText()) }.getOrNull()
         stale.value = if (old != null) file.lastModified() else null
+        unreachable.value = old == null
         old
     }
 
@@ -228,6 +233,7 @@ object Api {
         }
         // Probe threw but a cache exists: render from it (uncached, so the next call re-probes).
         if (ok == null && File(ctx.cacheDir, "api").list()?.isNotEmpty() == true) return true
+        unreachable.value = ok == null
         // An exception (network or VPN still waking) is not an answer: don't cache, so the next call re-probes.
         ok?.let { cache = k to it }
         return ok ?: false
