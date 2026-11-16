@@ -936,3 +936,48 @@ def test_ringoff_quiet_when_worn_short_off_late_or_muted(monkeypatch) -> None:
     db.set_settings({"muted": ""})
     notify.evaluate(set())
     assert off() == [("Ring is off", "Off since 22:20. Put it on before bed to track tonight.")]
+
+
+def phq() -> list[dict]:
+    return [{k: n[k] for k in ("title", "body", "extra")} for n in notify.pending() if n["kind"] == "phq"]
+
+
+PHQ = {"title": "Two-minute check", "body": "The depression questionnaire, every two weeks.", "extra": {"open": "phq"}}
+
+
+def test_phq_fires_when_on_without_sample_and_not_when_off(monkeypatch) -> None:
+    at(monkeypatch, 12)
+    notify.evaluate(set())
+    assert phq() == []  # default off
+    db.set_settings({"phq": "1"})
+    notify.evaluate(set())
+    notify.evaluate(set())
+    assert phq() == [PHQ]
+
+
+def test_phq_only_10_to_20_and_14_days_after_sample(monkeypatch) -> None:
+    db.set_settings({"phq": "1"})
+    for h in (9, 20):
+        at(monkeypatch, h)
+        notify.evaluate(set())
+    assert phq() == []
+    load({"phq9_total": {datetime(D.year, D.month, D.day, 8).timestamp(): 7.0}})
+    at(monkeypatch, 11, day=D + timedelta(13))
+    notify.evaluate(set())
+    assert phq() == []
+    at(monkeypatch, 11, day=D + timedelta(14))
+    notify.evaluate(set())
+    assert phq() == [PHQ]
+
+
+def test_phq_not_twice_inside_14_days_unanswered(monkeypatch) -> None:
+    db.set_settings({"phq": "1"})
+    at(monkeypatch, 12)
+    notify.evaluate(set())
+    notify.ack(notify.pending()[0]["id"])
+    at(monkeypatch, 12, day=D + timedelta(13))
+    notify.evaluate(set())
+    assert phq() == []
+    at(monkeypatch, 13, day=D + timedelta(14))  # 14 days after it fired at 12:00
+    notify.evaluate(set())
+    assert phq() == [PHQ]

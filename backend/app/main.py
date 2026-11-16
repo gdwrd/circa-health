@@ -1045,6 +1045,7 @@ def _settings_out() -> dict:
             "medication_doses": json.loads(s["medication_doses"]), "medication_name": s["medication_name"],
             "low_step_kind": s["low_step_kind"], "muted": s["muted"],
             "wake_weekday": s["wake_weekday"], "wake_weekend": s["wake_weekend"], "calm": s["calm"], "guess": s["guess"],
+            "phq": s["phq"],
             **{k: s[k] for i in (1, 2, 3) for k in (f"mark_{i}", f"mark_{i}_since")}}
 
 
@@ -1084,6 +1085,7 @@ SETTINGS = {"step_goal": lambda v: _num(v, 1000, 100000), "sleep_need_min": lamb
             "medication_window_h": lambda v: _num(v, 1, 24), "birth_year": _year_ok, "medication_doses": _doses_ok,
             "medication_name": lambda v: isinstance(v, str) and len(v) <= 40 and v == v.strip(),
             "low_step_kind": lambda v: v in ("ride", "workout"), "calm": lambda v: v in ("", "1"), "guess": lambda v: v in ("", "1"),
+            "phq": lambda v: v in ("", "1"),
             "wake_weekday": lambda v: v == "" or isinstance(v, str) and HHMM.fullmatch(v),
             "wake_weekend": lambda v: v == "" or isinstance(v, str) and HHMM.fullmatch(v),
             "muted": lambda v: isinstance(v, str) and (v == "" or all(k in notify.KINDS for k in v.split(","))),

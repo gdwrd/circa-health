@@ -216,6 +216,16 @@ def _ringoff(now: datetime, dates: set[date]) -> None:
              "Put it on before bed to track tonight.", now)
 
 
+def _phq(now: datetime, dates: set[date]) -> None:
+    """Setting `phq` on, 10:00 to 20:00, 14+ days since the last phq9_total (or none) and since this last fired."""
+    due = now - timedelta(14)
+    if db.settings()["phq"] != "1" or not 10 <= now.hour < 20 or _fired("phq", now, due):
+        return
+    last = db.query("SELECT MAX(ts) FROM samples WHERE metric='phq9_total'")[0][0]
+    if last is None or last / 1000 <= due.timestamp():
+        _add("phq", "Two-minute check", "The depression questionnaire, every two weeks.", now, {"open": "phq"})
+
+
 def _evening(now: datetime, dates: set[date]) -> None:
     """Once per evening, inside 2 h of the planned bedtime (report.WIND_DOWN_MIN; report imports notify); the phone
     writes the wind-down note at this sync and shows it, this body only when nothing is written."""
@@ -477,7 +487,7 @@ def _receipt(now: datetime, dates: set[date]) -> None:
 
 
 KINDS = ("readiness", "bedtime", "bedtime_soon", "inactivity", "strain", "checkin", "weekly", "morning", "monthly", "stillup",
-         "experiment", "workout", "receipt", "evening", "ringoff")
+         "experiment", "workout", "receipt", "evening", "ringoff", "phq")
 
 
 def evaluate(dates: set[date]) -> None:
@@ -487,7 +497,7 @@ def evaluate(dates: set[date]) -> None:
                        (_weekly, "weekly"), (_strain, "strain"), (_checkin, "checkin"), (_morning, "morning"),
                        (_monthly, "monthly"), (_stillup, "stillup"), (_experiment, "experiment"),
                        (_workout, "workout"), (_receipt, "receipt"), (_evening, "evening"),
-                       (_ringoff, "ringoff")):
+                       (_ringoff, "ringoff"), (_phq, "phq")):
         if kind in muted:
             continue
         try:
