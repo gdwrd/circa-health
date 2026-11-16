@@ -294,6 +294,8 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             // Before the notifications: the morning / weekly body is the start of the note written here.
             runCatching { writeReports(applicationContext) }.onSuccess { it?.let(log) }
                 .onFailure { if (it is CancellationException) throw it; log("Reports: ${it.javaClass.simpleName}: ${it.message}") }
+            runCatching { writeWeek(applicationContext) }.onSuccess { it?.let(log) }
+                .onFailure { if (it is CancellationException) throw it; log("Week: ${it.javaClass.simpleName}: ${it.message}") }
             if (sent > 0) runCatching { postPending() }.onSuccess { n -> if (n > 0) log("Server: showed $n notifications") }
 
             // Widget snapshot (a failed push returned above); plain VM answers /today 404 (null), so the widget keeps "Open to sync".

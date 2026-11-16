@@ -88,6 +88,9 @@ object Api {
     /** [given]: the advice lines shown on the day before [date] (FN2), so a card can follow up on them. */
     suspend fun report(ctx: Context, date: LocalDate, given: List<String> = emptyList()) =
         get(ctx, "/report?date=$date" + given.joinToString("") { "&given=" + URLEncoder.encode(it, "UTF-8") })
+    /** LW4: `{start, end, days, baseline, cards}` of the Mon to Sun week from [start]; no [start] = the last finished week. */
+    suspend fun reportWeek(ctx: Context, start: String? = null) =
+        get(ctx, "/report/week" + (start?.let { "?start=$it" } ?: "")) as? JsonObject
     /** `{date, events: [{t (epoch s), kind, label}]}` in time order. */
     suspend fun timeline(ctx: Context, date: LocalDate) = get(ctx, "/timeline?date=$date") as? JsonObject
 

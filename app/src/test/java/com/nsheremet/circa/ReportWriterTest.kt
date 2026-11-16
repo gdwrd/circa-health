@@ -184,3 +184,50 @@ class ReportDaysTest {
         assertTrue(reportSystem("", "night").contains("Length: 2 to 4 sentences"))
     }
 }
+
+class ReportWeekTest {
+    private val start = "2026-11-09"
+    private val kinds = listOf("week_overview", "week_sleep", "week_activity", "week_body", "week_mind", "week_effects")
+    private fun card(kind: String, fact: String = "Slept 7 h 2 min a night") = JsonObject(mapOf("kind" to JsonPrimitive(kind), "verdict" to JsonPrimitive(null as String?),
+        "facts" to JsonArray(listOf(JsonPrimitive(fact))), "advice" to JsonArray(emptyList()), "fallback" to JsonPrimitive("Fallback."), "quiet" to JsonPrimitive(false)))
+    private fun kinds(l: List<JsonObject>) = l.map { (it["kind"] as JsonPrimitive).content }
+    private fun facts(o: JsonObject) = (o["facts"] as JsonArray).map { (it as JsonPrimitive).content }
+    // A stored entry: the card's inputs plus text and at, under "<start>/<kind>".
+    private val stored = mapOf("$start/week_sleep" to JsonObject(card("week_sleep") - "kind" + ("text" to JsonPrimitive("Old.")) + ("at" to JsonPrimitive(1794500000))))
+
+    @Test fun lastFinishedWeek() {
+        assertEquals(LocalDate.parse(start), lastWeekStart(LocalDate.parse("2026-11-16"))) // Monday
+        assertEquals(LocalDate.parse(start), lastWeekStart(LocalDate.parse("2026-11-22"))) // Sunday
+        assertEquals(LocalDate.parse("2026-11-16"), lastWeekStart(LocalDate.parse("2026-11-23")))
+    }
+
+    @Test fun newWeekWritesAllCards() = assertEquals(kinds, kinds(weekToWrite(emptyMap(), start, kinds.map { card(it) }, false)))
+
+    @Test fun storedWeekNotRewritten() {
+        assertEquals(emptyList<String>(), kinds(weekToWrite(stored, start, kinds.map { card(it) }, false)))
+        assertEquals(kinds, kinds(weekToWrite(stored, "2026-11-16", kinds.map { card(it) }, false))) // another week's entries don't count
+    }
+
+    @Test fun forceRewritesTextOnlyFromStoredInputs() {
+        val c = weekToWrite(stored, start, listOf(card("week_sleep", "Slept 8 h a night")), true).single()
+        assertEquals("week_sleep", (c["kind"] as JsonPrimitive).content)
+        assertEquals(listOf("Slept 7 h 2 min a night"), facts(c))
+        assertEquals(JsonPrimitive(1794500000), c["at"])
+    }
+
+    // weeks.json never goes through keepDays: a week from months ago is still there and still counts as written.
+    @Test fun oldWeekKeptAndNotRewritten() {
+        val old = mapOf("2026-01-05/week_overview" to JsonPrimitive(1))
+        assertEquals(emptyList<String>(), kinds(weekToWrite(old, "2026-01-05", kinds.map { card(it) }, false)))
+        assertTrue(keepDays(old, LocalDate.parse("2026-11-16")).isEmpty()) // what the day pruning would have done
+    }
+
+    @Test fun weekPromptLength() = kinds.forEach { assertTrue(it, reportSystem("Ann", it).contains("Length: 3 to 5 sentences")) }
+
+    @Test fun kindFocusHasSixWeekKinds() {
+        kinds.forEach { assertTrue(it, it in kindFocus) }
+        assertFalse("week" in kindFocus)
+        assertFalse("next_week" in kindFocus)
+        kinds.forEach { assertTrue(it, reportSystem("", it).contains("Focus: ${kindFocus[it]}.\n")) }
+    }
+}

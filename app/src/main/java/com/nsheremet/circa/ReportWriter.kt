@@ -25,22 +25,28 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import java.io.File
 import java.security.MessageDigest
+import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.time.temporal.TemporalAdjusters
 import java.util.Locale
 
 // AI5: Gemma on the phone turns each /report card into a note; reports.json keeps them for the Reports page.
 
-private val kindFocus = mapOf(
+internal val kindFocus = mapOf(
     "today" to "what stands out this morning",
     "yesterday" to "what stood out about yesterday",
     "night" to "what was unusual about the night",
     "tonight" to "what to do this evening and why",
-    "week" to "what stood out this week",
-    "next_week" to "the one thing to focus on next week and why",
     "body" to "the signal that stands out, said calmly",
+    "week_overview" to "how last week went as a whole and the one thing to put first this week",
+    "week_sleep" to "how last week's sleep went and what shaped it",
+    "week_activity" to "how active last week was and how it was spread",
+    "week_body" to "what the body signals did over last week, said calmly",
+    "week_mind" to "how energy and mood went over last week",
+    "week_effects" to "what seemed to affect what last week",
 )
 
 /** System instruction: role, length and rules for one card. */
@@ -49,7 +55,7 @@ internal fun reportSystem(name: String, kind: String) = buildString {
     append("You write a short personal note to $who about how their body is doing, based on what their ring measured. ")
     append("Write to them as \"you\"")
     append(if (kind == "today" && name.isNotBlank()) " and open with their name.\n" else ".\n")
-    append("Length: 2 to 4 sentences in one paragraph. No lists, no headings, no markdown.\n")
+    append("Length: ${if (kind.startsWith("week_")) "3 to 5" else "2 to 4"} sentences in one paragraph. No lists, no headings, no markdown.\n")
     append("Say each fact once, in plain words, with its reason when the fact gives one. Add nothing that is not in the facts ")
     append("and do not describe readings that are not given. Then give the advice.\n")
     append("Focus: ${kindFocus[kind] ?: "how their body is doing"}.\n")
@@ -153,11 +159,49 @@ private suspend fun writeLocked(ctx: Context, force: Boolean): String? {
     val reply = Api.report(ctx, now, dayAdvice(stored, now.minusDays(1).toString())) as? JsonObject ?: return null
     val date = (reply["date"] as? JsonPrimitive)?.content ?: return null
     val reports = keepDays(stored, LocalDate.parse(date)).toMutableMap()
-    // Through a rename: a killed worker keeps what it wrote and the page never reads half a file.
-    val save = { File(ctx.filesDir, "reports.json.tmp").apply { writeText(JsonObject(reports).toString()) }.renameTo(file) }
-    val name = ctx.reportName
     val todo = toWrite(reports, date, (reply["cards"] as? JsonArray).orEmpty().map { it.jsonObject }, force)
+    return writeCards(ctx.reportName, model, file, reports, date, todo, force, "Reports")
+}
+
+/** LW4: the Monday that starts the last finished Mon to Sun week before [today]. */
+internal fun lastWeekStart(today: LocalDate): LocalDate = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY)).minusWeeks(1)
+
+/** LW4: the week [start]'s [cards] to write: all of them once, never again unless [force] (then RG1's rule, [toWrite]). */
+internal fun weekToWrite(weeks: Map<String, JsonElement>, start: String, cards: List<JsonObject>, force: Boolean): List<JsonObject> = when {
+    force -> toWrite(weeks, start, cards, true)
+    weeks.keys.any { it.startsWith("$start/") } -> emptyList()
+    else -> cards
+}
+
+/**
+ * LW4: writes the last finished week's `/report/week` cards into `filesDir/weeks.json` (`"<start>/<kind>"`, the shape of
+ * a `reports.json` card entry), never pruned. A sync writes a week once; [force] (Regenerate) rewrites its texts from
+ * the stored inputs, keeping `at`. Returns the Sync log line, or null when nothing changed.
+ */
+internal suspend fun writeWeek(ctx: Context, force: Boolean = false): String? = writing.withLock {
+    if (!ctx.reportWriter) return@withLock null
+    val model = reportModel(ctx)
+    if (!model.exists()) return@withLock null
+    val file = File(ctx.filesDir, "weeks.json")
+    val weeks = runCatching { Json.parseToJsonElement(file.readText()).jsonObject }.getOrDefault(JsonObject(emptyMap())).toMutableMap()
+    // Battery: the week is stored already, no need to ask the backend.
+    if (!force && weeks.keys.any { it.startsWith("${lastWeekStart(LocalDate.now())}/") }) return@withLock null
+    val reply = Api.reportWeek(ctx) ?: return@withLock null
+    val start = (reply["start"] as? JsonPrimitive)?.content ?: return@withLock null
+    val todo = weekToWrite(weeks, start, (reply["cards"] as? JsonArray).orEmpty().map { it.jsonObject }, force)
+    writeCards(ctx.reportName, model, file, weeks, start, todo, force, "Week")
+}
+
+/**
+ * Writes each card of [todo] into [reports] as `"<date>/<kind>"` ([date] is a week's start for `weeks.json`) and saves
+ * [file] after every card. [force] blanks those texts first. Returns the Sync log line headed [label], or null when
+ * [todo] is empty.
+ */
+private suspend fun writeCards(name: String, model: File, file: File, reports: MutableMap<String, JsonElement>, date: String,
+                               todo: List<JsonObject>, force: Boolean, label: String): String? {
     if (todo.isEmpty()) return null
+    // Through a rename: a killed worker keeps what it wrote and the page never reads half a file.
+    val save = { File(file.path + ".tmp").apply { writeText(JsonObject(reports).toString()) }.renameTo(file) }
     if (force) { // blank text: the page shows a placeholder until the note lands; `at` and the rest stay
         todo.forEach { c -> (reports["$date/${c.str("kind")}"] as? JsonObject)?.let { reports["$date/${c.str("kind")}"] = JsonObject(it + ("text" to JsonPrimitive(""))) } }
         save()
@@ -191,8 +235,8 @@ private suspend fun writeLocked(ctx: Context, force: Boolean): String? {
             store(c, note)
         }
     }
-    return String.format(Locale.ROOT, "Reports: wrote %d cards for %s in %.1f s, %d fallbacks, %d quiet",
-        todo.size, date, (SystemClock.elapsedRealtime() - t0) / 1000.0, fallbacks, quiet.size)
+    return String.format(Locale.ROOT, "%s: wrote %d cards for %s in %.1f s, %d fallbacks, %d quiet",
+        label, todo.size, date, (SystemClock.elapsedRealtime() - t0) / 1000.0, fallbacks, quiet.size)
 }
 
 /** DT3: [date]'s update entries (`date/update-<epoch s>`), oldest first. */
