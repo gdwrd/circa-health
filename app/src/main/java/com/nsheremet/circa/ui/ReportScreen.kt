@@ -1,6 +1,7 @@
 package com.nsheremet.circa.ui
 
 import android.content.Context
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.ExperimentalSharedTransitionApi
@@ -27,6 +28,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -55,6 +57,7 @@ import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.MonitorHeart
 import androidx.compose.material.icons.rounded.NightsStay
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.SelfImprovement
 import androidx.compose.material.icons.rounded.WbSunny
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -65,6 +68,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -76,7 +80,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -90,8 +97,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.work.WorkManager
 import com.nsheremet.circa.SyncWorker
 import com.nsheremet.circa.Prefs.reportWriter
-import com.nsheremet.circa.Prefs.sleepNeedHours
 import com.nsheremet.circa.writeReports
+import com.nsheremet.circa.writeWeek
 import com.nsheremet.circa.updateSince
 import com.nsheremet.circa.updates
 import com.nsheremet.circa.writeUpdate
@@ -124,7 +131,7 @@ internal data class ReportCard(val kind: String, val verdict: String?, val advic
     val note get() = written ?: fallback
 }
 
-private val pageOrder = listOf("today", "night", "yesterday", "tonight", "week", "next_week", "body")
+private val pageOrder = listOf("today", "night", "yesterday", "tonight", "body")
 
 /** Writer off or no model: every card shows its fallback (PLAN12 "Empty and off states"). */
 internal fun reportsOff(ctx: Context) = !ctx.reportWriter || !reportModel(ctx).exists()
@@ -133,16 +140,35 @@ internal fun reportsOff(ctx: Context) = !ctx.reportWriter || !reportModel(ctx).e
 internal fun reportCards(ctx: Context, reply: JsonElement?): List<ReportCard> {
     val o = reply as? JsonObject ?: return emptyList()
     val date = (o["date"] as? JsonPrimitive)?.content ?: return emptyList()
-    val saved = if (reportsOff(ctx)) null else savedReports(ctx)
-    return (o["cards"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.map { c ->
+    return cardsOf(o, date, if (reportsOff(ctx)) null else savedReports(ctx))
+        .sortedBy { if (it.kind == "body" && it.verdict == "watch") 0.5 else pageOrder.indexOf(it.kind).let { i -> if (i < 0) 99.0 else i.toDouble() } }
+}
+
+/** LW5: `/report/week` cards in the backend's order with their notes from `filesDir/weeks.json`; advice lines end with a full stop. Blocking I/O. */
+internal fun weekCards(ctx: Context, reply: JsonObject?): List<ReportCard> {
+    val start = (reply?.get("start") as? JsonPrimitive)?.content ?: return emptyList()
+    return cardsOf(reply, start, if (reportsOff(ctx)) null else savedReports(ctx, "weeks.json"))
+        .map { c -> c.copy(advice = c.advice.map { if (it.trimEnd().endsWith(".")) it else it.trimEnd() + "." }) }
+}
+
+/** "9 to 15 Nov"; across months "30 Nov to 6 Dec". */
+private fun weekRange(reply: JsonObject?): String {
+    val s = (reply?.get("start") as? JsonPrimitive)?.content?.let(LocalDate::parse) ?: return ""
+    val e = (reply["end"] as? JsonPrimitive)?.content?.let(LocalDate::parse) ?: s.plusDays(6)
+    val m = java.time.format.DateTimeFormatter.ofPattern("MMM", Locale.getDefault())
+    return "${s.dayOfMonth}${if (s.month != e.month) " " + s.format(m) else ""} to ${e.dayOfMonth} ${e.format(m)}"
+}
+
+/** The reply's cards with their stored notes, `saved` keyed `"<day>/<kind>"`. */
+private fun cardsOf(o: JsonObject, day: String, saved: JsonObject?): List<ReportCard> =
+    (o["cards"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.map { c ->
         val kind = (c["kind"] as? JsonPrimitive)?.content.orEmpty()
         val fallback = (c["fallback"] as? JsonPrimitive)?.content.orEmpty()
         // DT1: a stored note stays whatever the card's hash is now (written once a day).
-        val e = saved?.get("$date/$kind") as? JsonObject
+        val e = saved?.get("$day/$kind") as? JsonObject
         ReportCard(kind, (c["verdict"] as? JsonPrimitive)?.contentOrNull, (c["advice"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content }.orEmpty(),
-            fallback, (e?.get("text") as? JsonPrimitive)?.content?.takeIf { it != fallback }, e == null || (e["text"] as? JsonPrimitive)?.content.isNullOrEmpty(), LocalDate.parse(date))
-    }.sortedBy { if (it.kind == "body" && it.verdict == "watch") 0.5 else pageOrder.indexOf(it.kind).let { i -> if (i < 0) 99.0 else i.toDouble() } }
-}
+            fallback, (e?.get("text") as? JsonPrimitive)?.content?.takeIf { it.isNotEmpty() && it != fallback }, e == null || (e["text"] as? JsonPrimitive)?.content.isNullOrEmpty(), LocalDate.parse(day))
+    }
 
 /** [date]'s cards, or null when the backend gave nothing (not even a cached reply). */
 internal suspend fun loadReport(ctx: Context, date: LocalDate = LocalDate.now()): Pair<JsonElement, List<ReportCard>>? =
@@ -166,8 +192,12 @@ private fun title(kind: String): Pair<String, ImageVector> = when (kind) {
     "night" -> "Last night" to Icons.Rounded.Bedtime
     "yesterday" -> "Yesterday" to Icons.Rounded.DirectionsWalk
     "tonight" -> "Tonight" to Icons.Rounded.NightsStay
-    "week" -> "This week" to Icons.Rounded.DateRange
-    "next_week" -> "Next week" to Icons.Rounded.Flag
+    "week_overview" -> "Overview" to Icons.Rounded.DateRange
+    "week_sleep" -> "Sleep" to Icons.Rounded.Bedtime
+    "week_activity" -> "Activity" to Icons.Rounded.DirectionsWalk
+    "week_body" -> "Body" to Icons.Rounded.MonitorHeart
+    "week_mind" -> "Mind" to Icons.Rounded.SelfImprovement
+    "week_effects" -> "What went with what" to Icons.Rounded.Flag
     else -> "Body signals" to Icons.Rounded.MonitorHeart
 }
 
@@ -179,8 +209,11 @@ internal fun accent(card: ReportCard): Color = AppTheme.colors.run {
         "night" -> sleep
         "yesterday" -> activity
         "tonight" -> sleepLight
-        "week" -> tint
-        "next_week" -> breathe
+        "week_overview" -> tint
+        "week_sleep" -> sleep
+        "week_activity" -> activity
+        "week_mind" -> breathe
+        "week_effects" -> readiness
         else -> heart
     }
 }
@@ -435,8 +468,8 @@ private suspend fun syncAndWait(ctx: Context) {
     }
 }
 
-private fun savedReports(ctx: Context): JsonObject =
-    runCatching { Json.parseToJsonElement(File(ctx.filesDir, "reports.json").readText()) as JsonObject }.getOrDefault(JsonObject(emptyMap()))
+private fun savedReports(ctx: Context, name: String = "reports.json"): JsonObject =
+    runCatching { Json.parseToJsonElement(File(ctx.filesDir, name).readText()) as JsonObject }.getOrDefault(JsonObject(emptyMap()))
 
 private val GRAPH = 120.dp
 
@@ -459,6 +492,12 @@ private suspend fun nights(ctx: Context): Pair<JsonObject?, List<Pair<LocalDate,
 /** PLAN12 Cards table: the card's graph from the endpoint its own screen uses, drawn in the accent it is given; null when there is too little to draw. */
 private suspend fun graphFor(ctx: Context, card: ReportCard): (@Composable (Color) -> Unit)? {
     val today = card.date
+    // LW5: a week section's [ReportCard.date] is its week's start.
+    if (card.kind == "week_sleep" || card.kind == "week_activity") {
+        val days = (Api.reportWeek(ctx, today.toString())?.get("days") as? JsonArray).orEmpty().mapNotNull { it.obj() }
+        if (days.size != 7) return null
+        return { a -> WeekGraph(days, a, card.kind == "week_sleep") }
+    }
     // /week, /trends and the bedtime plan have no date: an earlier day shows only its night and yesterday graphs.
     if (today != LocalDate.now() && card.kind != "night" && card.kind != "yesterday") return null
     suspend fun weekDays() = Api.week(ctx).obj()?.get("days")
@@ -491,37 +530,139 @@ private suspend fun graphFor(ctx: Context, card: ReportCard): (@Composable (Colo
             if ((b["status"] as? JsonPrimitive)?.content != "ok" || b["start_min"].num() == null || b["end_min"].num() == null) return null
             return { a -> Bedtime(b, week, d?.get("plan").obj(), a, framed = false) }
         }
-        card.kind == "week" -> {
-            val days = weekDays()
-            val charts = listOf(
-                Triple("Sleep · hours", daily(days, "sleep_min", 60.0), " h"),
-                Triple("Steps · thousands", daily(days, "steps", 1000.0), "k"),
-            ).filter { enough(it.second) }.ifEmpty { return null }
-            return { a ->
-                Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.m)) {
-                    charts.forEach { (label, p, unit) ->
-                        Column(Modifier.weight(1f)) {
-                            Text(label, style = AppType.footnote, color = AppTheme.colors.secondaryLabel)
-                            MiniChart(null, p, a, true, GRAPH, unit)
-                        }
-                    }
-                }
-            }
-        }
-        card.kind == "next_week" && card.verdict == "regular" -> {
-            val (d, week) = nights(ctx)
-            if (week.none { it.second != null }) return null
-            return { a -> Regularity(d?.get("contributors").obj()?.get("regularity").num(), week, d?.get("sleep_extra").obj()?.get("regularity").obj(), a, framed = false) }
-        }
-        card.kind == "next_week" && card.verdict == "move" ->
-            daily(Api.trends(ctx, "cardio_load", 7).obj()?.get("points"), "value").takeIf(::enough)?.let { p -> { a -> MiniChart(null, p, a, true, GRAPH, "") } }
-        card.kind == "next_week" -> {
-            val need = ctx.sleepNeedHours.toDouble()
-            daily(weekDays(), "sleep_min", 60.0).takeIf(::enough)?.let { p -> { a -> MiniChart(null, p, a, true, GRAPH, goal = need) } }
-        }
         card.kind == "body" ->
             daily(Api.trends(ctx, "strain", 14).obj()?.get("points"), "value").takeIf(::enough)?.let { p -> { a -> MiniChart(null, p, a, false, GRAPH) } }
         else -> null
+    }
+}
+
+/**
+ * LW5: seven bars Mon to Sun from a `/report/week` reply's `days`, the value over each, weekday letters under; a null day
+ * is a dash, never a zero bar. [sleep]: hours asleep, a dashed line at the need and a lane of fell-asleep dots above
+ * (`bed_min` = minutes after noon); else steps, a dot under each workout day.
+ */
+@Composable
+private fun WeekGraph(days: List<JsonObject>, a: Color, sleep: Boolean) {
+    val c = AppTheme.colors
+    val tm = rememberTextMeasurer()
+    val small = AppType.footnote.copy(color = c.secondaryLabel, fontFeatureSettings = "tnum")
+    val lineH = with(LocalDensity.current) { small.lineHeight.toDp() }
+    val v = days.map { if (sleep) it["sleep_min"].num()?.div(60) else it["steps"].num() }
+    val need = if (sleep) days.firstNotNullOfOrNull { it["need_min"].num() }?.div(60) else null
+    val beds = days.map { if (sleep) it["bed_min"].num() else null }
+    val work = days.map { !sleep && (it["workout_min"].num() ?: 0.0) > 0 }
+    val letters = days.map { (it["date"] as? JsonPrimitive)?.content?.let(LocalDate::parse)?.dayOfWeek?.getDisplayName(java.time.format.TextStyle.NARROW, Locale.getDefault()).orEmpty() }
+    val noon = LocalDate.now().atTime(12, 0).atZone(ZoneId.systemDefault()).toEpochSecond().toDouble()
+    val lo = beds.filterNotNull().minOrNull()
+    val hi = beds.filterNotNull().maxOrNull()
+    val lane = if (lo != null) 52.dp else 0.dp
+    val gap = if (lo != null) AppSpace.m else 0.dp
+    val marks = if (work.any { it }) 14.dp else AppSpace.xs
+    Column {
+        Text(if (sleep) "Hours asleep · dashed line: your need · dots: fell asleep" else "Steps · dot: workout day", style = AppType.footnote, color = c.secondaryLabel)
+        Canvas(Modifier.fillMaxWidth().padding(top = AppSpace.s).height(lane + gap + lineH + GRAPH + marks + lineH)) {
+            fun label(s: String) = tm.measure(s, small)
+            val loL = lo?.let { label(clock(noon + it * 60)) }
+            val hiL = hi?.takeIf { it != lo }?.let { label(clock(noon + it * 60)) }
+            val needL = need?.let { label("%.1f h".format(it)) }
+            val gutter = listOfNotNull(loL, hiL, needL).maxOfOrNull { it.size.width }?.let { it + AppSpace.s.toPx() } ?: 0f
+            val slot = (size.width - gutter) / 7
+            fun cx(i: Int) = gutter + slot * (i + 0.5f)
+            // Fell-asleep lane: earlier on top, at least an hour tall so a steady week does not look jumpy.
+            if (lo != null && hi != null) {
+                val r = 4.dp.toPx()
+                val span = maxOf(hi - lo, 60.0)
+                val mid = (lo + hi) / 2
+                val laneH = lane.toPx()
+                loL?.let { drawText(it, topLeft = Offset(0f, 0f)) }
+                hiL?.let { drawText(it, topLeft = Offset(0f, laneH - it.size.height)) }
+                beds.forEachIndexed { i, b ->
+                    if (b != null) drawCircle(c.sleepLight, r, Offset(cx(i), r + ((b - mid) / span + 0.5).toFloat() * (laneH - 2 * r)))
+                }
+            }
+            val base = (lane + gap + lineH + GRAPH).toPx()
+            val h = GRAPH.toPx()
+            val top = maxOf(v.filterNotNull().maxOrNull() ?: 0.0, need ?: 0.0).takeIf { it > 0 } ?: 1.0
+            val w = minOf(slot * 0.55f, 22.dp.toPx())
+            // The need line goes under the bars and the value labels, so it never crosses a number.
+            if (need != null && needL != null) {
+                val y = base - (need / top).toFloat() * h
+                drawLine(c.secondaryLabel, Offset(gutter, y), Offset(size.width, y), 1.5.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx())))
+                drawText(needL, topLeft = Offset(0f, y - needL.size.height / 2))
+            }
+            v.forEachIndexed { i, x ->
+                if (x == null) {
+                    val t = label("–")
+                    drawText(t, topLeft = Offset(cx(i) - t.size.width / 2, base - t.size.height))
+                    return@forEachIndexed
+                }
+                val bh = maxOf((x / top).toFloat() * h, 2.dp.toPx())
+                drawRoundRect(a, Offset(cx(i) - w / 2, base - bh), Size(w, bh), CornerRadius(minOf(4.dp.toPx(), w / 2)))
+                val t = label(if (sleep) "%.1f".format(x) else "${(x / 1000).roundToInt()}k")
+                val tl = Offset(cx(i) - t.size.width / 2, base - bh - t.size.height)
+                val pad = 4.dp.toPx() // keeps the dashes clear of the digits, or "6.9" reads "-6.9"
+                drawRect(c.card, tl - Offset(pad, 0f), Size(t.size.width + 2 * pad, t.size.height.toFloat()))
+                drawText(t, topLeft = tl)
+                if (work[i]) drawCircle(a, 3.dp.toPx(), Offset(cx(i), base + 7.dp.toPx()))
+            }
+            letters.forEachIndexed { i, s ->
+                val t = label(s)
+                drawText(t, topLeft = Offset(cx(i) - t.size.width / 2, base + marks.toPx()))
+            }
+        }
+    }
+}
+
+/** LW5: the Reports page's Last week card: the date range, the overview note, the focus line as its close. */
+@Composable
+private fun LastWeekCard(overview: ReportCard, range: String, writing: Boolean, onOpen: () -> Unit) {
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    InsetCard {
+        Column(Modifier.fillMaxWidth().clickable(role = Role.Button) { haptic.tick(); onOpen() }.padding(AppSpace.l)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(26.dp).background(c.tint.copy(alpha = 0.16f), RoundedCornerShape(7.dp)), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Rounded.DateRange, null, tint = c.tint, modifier = Modifier.size(16.dp))
+                }
+                Text("Last week", style = AppType.subhead.copy(fontWeight = FontWeight.SemiBold), color = c.tint, modifier = Modifier.padding(start = AppSpace.s).weight(1f))
+                Text(range, style = AppType.footnote, color = c.secondaryLabel)
+                Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Open last week", tint = c.secondaryLabel)
+            }
+            Crossfade(
+                if (writing && overview.pending) null else overview.note,
+                Modifier.padding(top = AppSpace.m).widthIn(max = 640.dp).animateContentSize(spring(stiffness = Spring.StiffnessMediumLow)),
+                spring(stiffness = Spring.StiffnessMediumLow), label = "week",
+            ) { if (it == null) NoteSkeleton(4) else Text(it, style = AppType.note) }
+            overview.advice.firstOrNull()?.let {
+                Hairline(Modifier.padding(top = AppSpace.l, bottom = AppSpace.m))
+                AdviceRows(listOf(it), c.tint)
+            }
+        }
+    }
+}
+
+/** LW5: the week from [start] (a Monday): the overview, then one card per section with its note, advice and graph. */
+@Composable
+private fun WeekPage(start: String, writing: Boolean, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    val c = AppTheme.colors
+    val ctx = LocalContext.current
+    var reply by remember { mutableStateOf<JsonObject?>(null) }
+    var cards by remember { mutableStateOf<List<ReportCard>>(emptyList()) }
+    LaunchedEffect(start, writing) {
+        reply = Api.reportWeek(ctx, start)
+        // While a write runs, re-read weeks.json as the notes land; the effect restarts once it ends.
+        while (true) {
+            cards = withContext(Dispatchers.IO) { weekCards(ctx, reply) }
+            if (!writing) break
+            delay(1500)
+        }
+    }
+    LargeTitleScaffold("Last week", back = {
+        Text("‹ Reports", style = AppType.headline, color = c.tint, modifier = Modifier.clickable(onClick = onBack).padding(start = AppSpace.xs, bottom = AppSpace.xs))
+    }) {
+        item { Text(weekRange(reply), style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.xs)) }
+        cards.forEach { card -> item(key = card.kind) { ReportCardView(card, writing = writing) } }
     }
 }
 
@@ -548,6 +689,14 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
     var saved by remember { mutableStateOf(JsonObject(emptyMap())) }
     var updating by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
+    // LW5: the last finished week (its Last week card) and the week page's start while it is open.
+    var week by remember { mutableStateOf<JsonObject?>(null) }
+    var weekList by remember { mutableStateOf<List<ReportCard>>(emptyList()) }
+    var openWeek by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        week = Api.reportWeek(ctx)
+        weekList = withContext(Dispatchers.IO) { weekCards(ctx, week) }
+    }
     suspend fun loadDay(d: LocalDate) {
         val ev = (Api.timeline(ctx, d)?.get("events") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
         val s = withContext(Dispatchers.IO) { if (reportsOff(ctx)) JsonObject(emptyMap()) else savedReports(ctx) }
@@ -577,10 +726,14 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
             suspend fun reread() {
                 val l = withContext(Dispatchers.IO) { reportCards(ctx, r) }
                 val s = withContext(Dispatchers.IO) { savedReports(ctx) }
+                weekList = withContext(Dispatchers.IO) { weekCards(ctx, week) }
                 if (date == LocalDate.now()) { cards = l; saved = s }
             }
             coroutineScope {
-                val job = launch(Dispatchers.Default) { runCatching { writeReports(ctx, force) } }
+                val job = launch(Dispatchers.Default) {
+                    runCatching { writeReports(ctx, force) }
+                    runCatching { writeWeek(ctx, force) }
+                }
                 while (job.isActive) {
                     delay(1500)
                     reread()
@@ -613,6 +766,7 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
                 haptic.tick()
                 report?.let { r ->
                     cards = cards?.map { it.copy(written = null, pending = true) } // bars at once, before the writer drops the file's entries
+                    weekList = weekList.map { it.copy(written = null, pending = true) }
                     scope.launch { write(r, true) }
                 }
             }.padding(horizontal = AppSpace.s),
@@ -622,6 +776,13 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
                 .animateFloat(0f, 360f, infiniteRepeatable(tween(1000, easing = LinearEasing)), label = "turn").value else 0f
             Icon(Icons.Rounded.Refresh, null, tint = color, modifier = Modifier.size(20.dp).rotate(turn))
             Text(if (writing) "Writing…" else "Regenerate", style = AppType.body, color = color, modifier = Modifier.padding(start = AppSpace.xs))
+        }
+    }
+    openWeek?.let { return WeekPage(it, writing) { openWeek = null } }
+    val weekWriting = writing
+    val lastWeek: LazyListScope.() -> Unit = {
+        weekList.firstOrNull { it.kind == "week_overview" }?.let { o ->
+            item(key = "last_week") { LastWeekCard(o, weekRange(week), weekWriting) { openWeek = o.date.toString() } }
         }
     }
     LargeTitleScaffold("Reports", back = back, action = regenerate.takeIf { isToday && !off && !cards.isNullOrEmpty() }) {
@@ -634,6 +795,7 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
                         if (list == null) "It appears once the server can be reached." else if (isToday) "It fills in after the next sync." else "The ring has too little from this day.")
                 }
             }
+            lastWeek()
             return@LargeTitleScaffold
         }
         val writing = writing && isToday
@@ -691,6 +853,7 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
                 }
             }
         } else rest.forEach { card -> item(key = card.kind) { ReportCardView(card, writing = writing) } }
+        lastWeek()
         if (off) item {
             val open = LocalOpenSettings.current
             InsetCard {
