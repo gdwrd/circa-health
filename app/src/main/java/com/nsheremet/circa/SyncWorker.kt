@@ -563,16 +563,20 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             // request code = id: each notification keeps its own extras
             val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             val open = PendingIntent.getActivity(ctx, id, intent, flags)
-            // morning / weekly: the first two sentences of today's written note instead of the backend's line, when there is one
+            // morning: the first two sentences of today's written note instead of the backend's line, when there is one
+            // weekly: the same from the last week's overview in weeks.json (written by writeWeek just before postPending);
+            // blank (Regenerate rewriting it) keeps the backend's line
             // evening: the wind-down update is written now; no entry (null, nothing new) keeps the backend's line
+            val week = o["kind"]?.jsonPrimitive?.content == "weekly"
             val note = if (reportsOff(ctx)) null else when (o["kind"]?.jsonPrimitive?.content) {
-                "morning" -> "today"; "weekly" -> "week"
+                "morning" -> "today"; "weekly" -> "week_overview"
                 "evening" -> runCatching { writeUpdate(ctx, evening = true) }.getOrNull()
                     ?.takeIf { it["nothing_new"]?.jsonPrimitive?.content != "true" }?.get("at")?.jsonPrimitive?.content?.let { "update-$it" }
                 else -> null }
                 ?.let { k -> runCatching {
-                    ((Json.parseToJsonElement(File(ctx.filesDir, "reports.json").readText()) as JsonObject)["${LocalDate.now()}/$k"] as? JsonObject)
-                        ?.get("text")?.jsonPrimitive?.content
+                    val (file, day) = if (week) "weeks.json" to lastWeekStart(LocalDate.now()) else "reports.json" to LocalDate.now()
+                    ((Json.parseToJsonElement(File(ctx.filesDir, file).readText()) as JsonObject)["$day/$k"] as? JsonObject)
+                        ?.get("text")?.jsonPrimitive?.content?.takeUnless { week && it.isBlank() }
                 }.getOrNull() }
             val body = note?.let(::firstSentences) ?: o["body"]!!.jsonPrimitive.content
             val notif = NotificationCompat.Builder(ctx, "health")

@@ -171,11 +171,22 @@ def test_weekly_fires_monday_once(monkeypatch) -> None:
     notify.evaluate(set())
     notify.evaluate(set())
     (n,) = notify.pending()
-    assert n["title"] == "Your week" and n["body"] == "Sleep 84 · Readiness 70 · Activity 60 avg. Best night: Mon."
-    assert n["extra"] == {"open": "reports"}
+    assert n["title"] == "Last week" and n["body"] == "Your report for 2 to 8 Nov is ready."  # no averages
+    assert not re.search(r"\d+ avg|Sleep \d", n["body"]) and n["extra"] == {"open": "reports"}
     at(monkeypatch, 10, day=D + timedelta(1))  # Tuesday
     notify.evaluate(set())
     assert kinds() == ["weekly"]
+
+
+def test_weekly_range_across_months_and_calm(monkeypatch) -> None:
+    mon = date(2026, 12, 7)
+    for i in range(1, 8):
+        db.save_day(mon - timedelta(i), (80, 70, 60), {}, {})
+    db.set_settings({"calm": "1"})
+    at(monkeypatch, 9, day=mon)
+    notify.evaluate(set())
+    (n,) = notify.pending()
+    assert n["title"] == "Last week" and n["body"] == "Your report for 30 Nov to 6 Dec is ready."
 
 
 def test_weekly_not_tuesday_or_outside_window(monkeypatch) -> None:

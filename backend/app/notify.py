@@ -324,21 +324,18 @@ def _avg(rows: list[dict]) -> str:
 
 
 def _weekly(now: datetime, dates: set[date]) -> None:
-    """Monday 08-12 local: averages of the previous 7 days, once (no weekly row in the last 6 days)."""
+    """Monday 08-12 local: the last Mon-Sun week's report is ready, once (no weekly row in the last 6 days), 3+ scored days.
+    No scores: the phone shows the overview note's first sentences in place of this body."""
     if now.weekday() or not 8 <= now.hour < 12:
         return
     last = db.query("SELECT created_at FROM notifications WHERE kind='weekly' ORDER BY id DESC LIMIT 1")
     if last and now - datetime.fromisoformat(last[0]["created_at"]) < timedelta(days=6):
         return
-    d = now.date()
-    rows = _scored(d - timedelta(7), d - timedelta(1))
-    if len(rows) < 3:
+    a, b = now.date() - timedelta(7), now.date() - timedelta(1)
+    if len(_scored(a, b)) < 3:
         return
-    body = _avg(rows)
-    sleeps = [r for r in rows if r["sleep_score"] is not None]
-    if sleeps:
-        body += f" Best night: {max(sleeps, key=lambda r: r['sleep_score'])['date']:%a}."
-    _add("weekly", "Your week", body, now, {"open": "reports"})
+    start = f"{a.day}" if a.month == b.month else f"{a.day} {a:%b}"
+    _add("weekly", "Last week", f"Your report for {start} to {b.day} {b:%b} is ready.", now, {"open": "reports"})
 
 
 def _monthly(now: datetime, dates: set[date]) -> None:
