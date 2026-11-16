@@ -112,6 +112,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -466,7 +467,7 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
                 if (off >= 2) Text("Ring off for $off h today", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.xs))
             }
         }
-        item { DaySoFar(d, journal.filter { it.date == day }) { sheet = true } }
+        item { DaySoFar(d, journal.filter { it.date == day }, scope, { Api.today(ctx).obj()?.let { data = it } }) { sheet = true } }
         marks.forEach { t -> item { MarkCard(t, scope, ::loadMarks) } }
         exp?.let { x ->
             item {
@@ -489,21 +490,74 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
     if (sheet) CheckInSheet(journal, medTime, medStarted, scope, sheetDay, data, ::loadJournal) { sheet = false; sheetDay = null }
 }
 
-/** One Day so far line; [color] null = a quiet intake (rounded square), else a disc in that colour, as the Right now tiles. */
-private class DayLine(val t: LocalTime, val title: String, val detail: String?, val icon: ImageVector, val color: Color?)
+/** One Day so far line; [color] null = a quiet intake (rounded square), else a disc in that colour, as the Right now tiles. [onTap] null = not tappable. */
+private class DayLine(val t: LocalTime, val title: String, val detail: String?, val icon: ImageVector, val color: Color?, val onTap: (() -> Unit)? = null)
+
+/**
+ * Fix one tap: [label] and the time as the title, then "Change time" (the cancel value [cancel] at [tsMs], [value] at the picked time the same day,
+ * never in the future) and "Remove" (the cancel value). Both go through [pushSample], so the phone's store and the server agree; then [reload].
+ */
+@Composable
+private fun FixTapDialog(label: String, metric: String, tsMs: Long, value: Double, cancel: Double, scope: CoroutineScope, reload: suspend () -> Unit, onDismiss: () -> Unit) {
+    val c = AppTheme.colors
+    val ctx = LocalContext.current
+    val haptic = LocalHapticFeedback.current
+    var picking by remember { mutableStateOf(false) }
+    var future by remember { mutableStateOf(false) }
+    val at = Instant.ofEpochMilli(tsMs).atZone(ZoneId.systemDefault())
+    fun write(to: Long?) {
+        onDismiss()
+        scope.launch {
+            pushSample(ctx, metric, cancel, tsMs)
+            if (to != null) {
+                // A second already held for this metric (a cancel wins there) moves the tap on, as Right now does.
+                var ts = to
+                while (withContext(Dispatchers.IO) {
+                        SampleStore.get(ctx).readableDatabase.rawQuery("SELECT 1 FROM samples WHERE name = ? AND ts = ?", arrayOf(metric, ts.toString())).use { it.moveToFirst() }
+                    }) ts += 1000
+                pushSample(ctx, metric, value, ts)
+            }
+            reload()
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss, containerColor = c.card, titleContentColor = c.label,
+        title = { Text("$label · ${clock(tsMs / 1000.0)}", style = AppType.title) },
+        text = {
+            Column {
+                Text("Change time", style = AppType.body, color = c.tint, modifier = Modifier.fillMaxWidth().clickable(role = Role.Button) { haptic.tick(); picking = true }.padding(vertical = AppSpace.m))
+                Text("Remove", style = AppType.body, color = c.badText, modifier = Modifier.fillMaxWidth().clickable(role = Role.Button) { haptic.tick(); write(null) }.padding(vertical = AppSpace.m))
+                if (future) Text("That time has not happened yet.", style = AppType.footnote, color = c.secondaryLabel)
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onDismiss) { Text("Cancel", color = c.tint) } },
+    )
+    if (picking) TimePickDialog(at.toLocalTime().format(DateTimeFormatter.ofPattern("HH:mm")), { picking = false }) { hhmm ->
+        picking = false
+        val ts = at.toLocalDate().atTime(LocalTime.parse(hhmm)).atZone(ZoneId.systemDefault()).toEpochSecond() * 1000
+        future = ts > System.currentTimeMillis()
+        if (!future && ts != tsMs) write(ts)
+    }
+}
 
 /** Today's moments, doses and workouts as a timeline (icon, name, time), the day facts as chips, and the way into the check-in sheet. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun DaySoFar(d: JsonObject, today: List<Entry>, onFix: () -> Unit) {
+private fun DaySoFar(d: JsonObject, today: List<Entry>, scope: CoroutineScope, reload: suspend () -> Unit, onFix: () -> Unit) {
     val c = AppTheme.colors
     val zone = ZoneId.systemDefault()
     val now = d["now"].obj()
     val feel = feelingLooks()
     val had = INTAKES.associate { it.first to it.third }
+    var fix by remember { mutableStateOf<(@Composable () -> Unit)?>(null) }
+    var fixed by remember { mutableIntStateOf(0) } // re-reads the store after a fix, even when `/today` comes back the same
+    fun fixTap(label: String, metric: String, tsMs: Long, value: Double, cancel: Double): () -> Unit = {
+        fix = { FixTapDialog(label, metric, tsMs, value, cancel, scope, { fixed++; reload() }) { fix = null } }
+    }
     // Scale taps are not in `/today.moments`: read the day's from the phone's own store, where a cancel (9) overwrote its tap.
     val ctx = LocalContext.current
-    val taps by produceState(emptyList<Triple<Long, String, Int>>(), d) {
+    val taps by produceState(emptyList<Triple<Long, String, Int>>(), d, fixed) {
         val from = (runCatching { LocalDate.parse(d["date"].str()) }.getOrNull() ?: LocalDate.now()).atStartOfDay(zone).toInstant().toEpochMilli()
         value = withContext(Dispatchers.IO) {
             SampleStore.get(ctx).readableDatabase.rawQuery(
@@ -512,28 +566,26 @@ private fun DaySoFar(d: JsonObject, today: List<Entry>, onFix: () -> Unit) {
             ).use { q -> buildList { while (q.moveToNext()) add(Triple(q.getLong(0), q.getString(1), q.getInt(2))) } }
         }
     }
-    // An Energy and a Mood tap within five minutes make one line: "Energy 2 · Mood 4".
-    val scaleLines = taps.fold(mutableListOf<MutableList<Triple<Long, String, Int>>>()) { g, t ->
-        val last = g.lastOrNull()
-        if (last != null && t.first - last.first().first < 300_000 && last.none { it.second == t.second }) last += t else g += mutableListOf(t)
-        g
-    }.map { g ->
-        val e = g.first().second == "mood_energy" || g.size > 1
+    // One line per tap (not "Energy 2 · Mood 4"), so each can be fixed on its own.
+    val scaleLines = taps.map { (ts, name, v) ->
+        val label = (if (name == "mood_energy") "Energy " else "Mood ") + v
         DayLine(
-            Instant.ofEpochMilli(g.first().first).atZone(zone).toLocalTime(),
-            g.sortedBy { it.second != "mood_energy" }.joinToString(" · ") { (if (it.second == "mood_energy") "Energy " else "Mood ") + it.third },
-            null, Icons.Rounded.LinearScale, if (e) c.energy else c.mood,
+            Instant.ofEpochMilli(ts).atZone(zone).toLocalTime(), label, null, Icons.Rounded.LinearScale, if (name == "mood_energy") c.energy else c.mood,
+            fixTap(label, name, ts, v.toDouble(), 9.0),
         )
     }
     val lines = (scaleLines +
         today.filter { it.kind == "medication" }.mapNotNull { e ->
             val t = runCatching { LocalTime.parse(e.value.orEmpty()) }.getOrNull() ?: return@mapNotNull null
-            DayLine(t, "Dose", now?.get("dose_end").str()?.takeIf { e.value == now?.get("dose").str() }?.let { "Active until about ${clock(it)}" }, Icons.Rounded.Medication, null)
+            DayLine(t, "Dose", now?.get("dose_end").str()?.takeIf { e.value == now?.get("dose").str() }?.let { "Active until about ${clock(it)}" }, Icons.Rounded.Medication, null, onFix)
         } +
         (d["moments"] as? JsonArray).orEmpty().mapNotNull { it.obj() }.mapNotNull { m ->
             val s = m["ts"].num() ?: return@mapNotNull null
             val k = m["kind"].str().orEmpty()
-            DayLine(Instant.ofEpochSecond(s.toLong()).atZone(zone).toLocalTime(), intakeLabel(k), null, feel[k]?.first ?: had[k] ?: Icons.Rounded.HorizontalRule, feel[k]?.second)
+            DayLine(
+                Instant.ofEpochSecond(s.toLong()).atZone(zone).toLocalTime(), intakeLabel(k), null, feel[k]?.first ?: had[k] ?: Icons.Rounded.HorizontalRule, feel[k]?.second,
+                fixTap(intakeLabel(k), "moment_$k", s.toLong() * 1000, 1.0, 2.0),
+            )
         } +
         (d["workouts"] as? JsonArray).orEmpty().mapNotNull { it.obj() }.mapNotNull { w ->
             val s = w["start"].num() ?: return@mapNotNull null
@@ -563,7 +615,9 @@ private fun DaySoFar(d: JsonObject, today: List<Entry>, onFix: () -> Unit) {
                 if (lines.isNotEmpty()) Column {
                     lines.forEachIndexed { i, l ->
                         Row(
-                            Modifier.fillMaxWidth().height(IntrinsicSize.Min).semantics(mergeDescendants = true) {},
+                            Modifier.fillMaxWidth().height(IntrinsicSize.Min)
+                                .then(if (l.onTap != null) Modifier.clip(AppShape.small).clickable(role = Role.Button, onClick = l.onTap) else Modifier)
+                                .semantics(mergeDescendants = true) {},
                             horizontalArrangement = Arrangement.spacedBy(AppSpace.m),
                         ) {
                             Text(
@@ -587,6 +641,7 @@ private fun DaySoFar(d: JsonObject, today: List<Entry>, onFix: () -> Unit) {
                                 Text(l.title, style = AppType.headline)
                                 l.detail?.let { Text(it, style = AppType.footnote, color = c.secondaryLabel) }
                             }
+                            if (l.onTap != null) Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = c.secondaryLabel, modifier = Modifier.padding(top = 4.dp).size(20.dp))
                         }
                     }
                 }
@@ -601,6 +656,7 @@ private fun DaySoFar(d: JsonObject, today: List<Entry>, onFix: () -> Unit) {
             }
         }
     }
+    fix?.invoke()
 }
 
 /** Sleep + Activity rings; tapping one grows it into the card with its details (shared element), a plain switch under reduce-motion. */
