@@ -81,6 +81,10 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
@@ -127,7 +131,7 @@ import kotlin.math.roundToInt
 // AI6: the Reports page. Each `/report` card shows its written note (reports.json, when its hash still matches) or its fallback.
 
 /** [written] is the model's note, null when the card shows its [fallback]; [pending]: reports.json has no entry (not written yet); [date]: the report's day. */
-internal data class ReportCard(val kind: String, val verdict: String?, val advice: List<String>, val fallback: String, val written: String?, val pending: Boolean, val date: LocalDate) {
+internal data class ReportCard(val kind: String, val verdict: String?, val advice: List<String>, val fallback: String, val written: String?, val pending: Boolean, val date: LocalDate, val facts: List<String> = emptyList()) {
     val note get() = written ?: fallback
 }
 
@@ -167,7 +171,8 @@ private fun cardsOf(o: JsonObject, day: String, saved: JsonObject?): List<Report
         // DT1: a stored note stays whatever the card's hash is now (written once a day).
         val e = saved?.get("$day/$kind") as? JsonObject
         ReportCard(kind, (c["verdict"] as? JsonPrimitive)?.contentOrNull, (c["advice"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content }.orEmpty(),
-            fallback, (e?.get("text") as? JsonPrimitive)?.content?.takeIf { it.isNotEmpty() && it != fallback }, e == null || (e["text"] as? JsonPrimitive)?.content.isNullOrEmpty(), LocalDate.parse(day))
+            fallback, (e?.get("text") as? JsonPrimitive)?.content?.takeIf { it.isNotEmpty() && it != fallback }, e == null || (e["text"] as? JsonPrimitive)?.content.isNullOrEmpty(), LocalDate.parse(day),
+            (c["facts"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content }.orEmpty())
     }
 
 /** [date]'s cards, or null when the backend gave nothing (not even a cached reply). */
@@ -251,7 +256,7 @@ private fun NoteSkeleton(lines: Int) {
 @Composable
 internal fun ReportCardView(
     card: ReportCard, modifier: Modifier = Modifier, onOpen: (() -> Unit)? = null, writing: Boolean = false,
-    rail: Boolean = false, morningAt: Long? = null, after: (@Composable (Color) -> Unit)? = null,
+    rail: Boolean = false, morningAt: Long? = null, after: (@Composable (Color) -> Unit)? = null, week: JsonObject? = null,
 ) {
     val skeleton = writing && card.pending && onOpen == null
     val c = AppTheme.colors
@@ -283,19 +288,26 @@ internal fun ReportCardView(
                 }) {
                     Column {
                         NodeHeader(morningAt?.toDouble(), "Morning", a)
-                        CardBody(card, a, onOpen, skeleton, hero)
+                        CardBody(card, a, onOpen, skeleton, hero, week)
                     }
                 }
                 after?.invoke(a)
-            } else CardBody(card, a, onOpen, skeleton, hero)
+            } else CardBody(card, a, onOpen, skeleton, hero, week)
         }
     }
 }
 
 @Composable
-private fun CardBody(card: ReportCard, a: Color, onOpen: (() -> Unit)?, skeleton: Boolean, hero: Boolean) {
+private fun CardBody(card: ReportCard, a: Color, onOpen: (() -> Unit)?, skeleton: Boolean, hero: Boolean, week: JsonObject?) {
     val c = AppTheme.colors
     Column {
+            // LW6: the effects card shows its facts as rows in place of the note.
+            if (card.kind == "week_effects" && card.facts.isNotEmpty() && onOpen == null) Column(Modifier.padding(top = AppSpace.xs)) {
+                card.facts.forEachIndexed { i, f ->
+                    if (i > 0) Hairline()
+                    Text(if (f.trimEnd().endsWith(".")) f else f.trimEnd() + ".", style = AppType.note, modifier = Modifier.padding(vertical = AppSpace.m))
+                }
+            } else
             // While writing: loading bars (null) first, the written note cross-fades in.
             Crossfade(
                 if (skeleton) null else if (onOpen != null) card.note.split(Regex("(?<=[.!?])\\s+")).take(2).joinToString(" ") else card.note,
@@ -316,7 +328,7 @@ private fun CardBody(card: ReportCard, a: Color, onOpen: (() -> Unit)?, skeleton
             if (onOpen == null) {
                 val ctx = LocalContext.current
                 var graph by remember { mutableStateOf<(@Composable (Color) -> Unit)?>(null) }
-                LaunchedEffect(card.kind, card.verdict, card.date) { graph = runCatching { graphFor(ctx, card) }.getOrNull() }
+                LaunchedEffect(card.kind, card.verdict, card.date) { graph = runCatching { graphFor(ctx, card, week) }.getOrNull() }
                 graph?.let { g ->
                     Hairline(Modifier.padding(top = AppSpace.l, bottom = AppSpace.s))
                     g(a)
@@ -490,13 +502,23 @@ private suspend fun nights(ctx: Context): Pair<JsonObject?, List<Pair<LocalDate,
 }
 
 /** PLAN12 Cards table: the card's graph from the endpoint its own screen uses, drawn in the accent it is given; null when there is too little to draw. */
-private suspend fun graphFor(ctx: Context, card: ReportCard): (@Composable (Color) -> Unit)? {
+private suspend fun graphFor(ctx: Context, card: ReportCard, week: JsonObject?): (@Composable (Color) -> Unit)? {
     val today = card.date
-    // LW5: a week section's [ReportCard.date] is its week's start.
-    if (card.kind == "week_sleep" || card.kind == "week_activity") {
-        val days = (Api.reportWeek(ctx, today.toString())?.get("days") as? JsonArray).orEmpty().mapNotNull { it.obj() }
+    // LW5/LW6: week sections draw from the week page's own reply (one `/report/week` request per page open).
+    if (card.kind.startsWith("week_")) {
+        val days = (week?.get("days") as? JsonArray).orEmpty().mapNotNull { it.obj() }
         if (days.size != 7) return null
-        return { a -> WeekGraph(days, a, card.kind == "week_sleep") }
+        fun has(vararg k: String) = days.any { d -> k.any { d[it].num() != null } }
+        if (card.kind == "week_body" && !has("rhr", "hrv", "stressed_min") || card.kind == "week_mind" && !has("energy", "valence")) return null
+        return when (card.kind) {
+            "week_sleep" -> { a -> WeekGraph(days, a, "sleep_min") }
+            "week_activity" -> { a -> WeekGraph(days, a, "steps") }
+            "week_body" -> { _ -> WeekBody(days, week?.get("baseline").obj()) }
+            "week_mind" -> { _ ->
+                WeekLines(days, listOf(Triple("energy", "Energy", AppTheme.colors.energy), Triple("valence", "Mood", AppTheme.colors.mood)), "1 low to 5 high", null, 1.0 to 5.0)
+            }
+            else -> null
+        }
     }
     // /week, /trends and the bedtime plan have no date: an earlier day shows only its night and yesterday graphs.
     if (today != LocalDate.now() && card.kind != "night" && card.kind != "yesterday") return null
@@ -539,19 +561,21 @@ private suspend fun graphFor(ctx: Context, card: ReportCard): (@Composable (Colo
 /**
  * LW5: seven bars Mon to Sun from a `/report/week` reply's `days`, the value over each, weekday letters under; a null day
  * is a dash, never a zero bar. [sleep]: hours asleep, a dashed line at the need and a lane of fell-asleep dots above
- * (`bed_min` = minutes after noon); else steps, a dot under each workout day.
+ * (`bed_min` = minutes after noon); steps: a dot under each workout day; `stressed_min` (LW6): shorter bars, minutes.
  */
 @Composable
-private fun WeekGraph(days: List<JsonObject>, a: Color, sleep: Boolean) {
+private fun WeekGraph(days: List<JsonObject>, a: Color, key: String) {
+    val sleep = key == "sleep_min"
     val c = AppTheme.colors
     val tm = rememberTextMeasurer()
     val small = AppType.footnote.copy(color = c.secondaryLabel, fontFeatureSettings = "tnum")
     val lineH = with(LocalDensity.current) { small.lineHeight.toDp() }
-    val v = days.map { if (sleep) it["sleep_min"].num()?.div(60) else it["steps"].num() }
+    val v = days.map { it[key].num()?.let { x -> if (sleep) x / 60 else x } }
     val need = if (sleep) days.firstNotNullOfOrNull { it["need_min"].num() }?.div(60) else null
     val beds = days.map { if (sleep) it["bed_min"].num() else null }
-    val work = days.map { !sleep && (it["workout_min"].num() ?: 0.0) > 0 }
-    val letters = days.map { (it["date"] as? JsonPrimitive)?.content?.let(LocalDate::parse)?.dayOfWeek?.getDisplayName(java.time.format.TextStyle.NARROW, Locale.getDefault()).orEmpty() }
+    val work = days.map { key == "steps" && (it["workout_min"].num() ?: 0.0) > 0 }
+    val letters = letters(days)
+    val gh = if (key == "stressed_min") LINES else GRAPH
     val noon = LocalDate.now().atTime(12, 0).atZone(ZoneId.systemDefault()).toEpochSecond().toDouble()
     val lo = beds.filterNotNull().minOrNull()
     val hi = beds.filterNotNull().maxOrNull()
@@ -559,8 +583,9 @@ private fun WeekGraph(days: List<JsonObject>, a: Color, sleep: Boolean) {
     val gap = if (lo != null) AppSpace.m else 0.dp
     val marks = if (work.any { it }) 14.dp else AppSpace.xs
     Column {
-        Text(if (sleep) "Hours asleep · dashed line: your need · dots: fell asleep" else "Steps · dot: workout day", style = AppType.footnote, color = c.secondaryLabel)
-        Canvas(Modifier.fillMaxWidth().padding(top = AppSpace.s).height(lane + gap + lineH + GRAPH + marks + lineH)) {
+        Text(when (key) { "sleep_min" -> "Hours asleep · dashed line: your need · dots: fell asleep"; "steps" -> "Steps · dot: workout day"; else -> "Stressed minutes" },
+            style = AppType.footnote, color = c.secondaryLabel)
+        Canvas(Modifier.fillMaxWidth().padding(top = AppSpace.s).height(lane + gap + lineH + gh + marks + lineH)) {
             fun label(s: String) = tm.measure(s, small)
             val loL = lo?.let { label(clock(noon + it * 60)) }
             val hiL = hi?.takeIf { it != lo }?.let { label(clock(noon + it * 60)) }
@@ -580,8 +605,8 @@ private fun WeekGraph(days: List<JsonObject>, a: Color, sleep: Boolean) {
                     if (b != null) drawCircle(c.sleepLight, r, Offset(cx(i), r + ((b - mid) / span + 0.5).toFloat() * (laneH - 2 * r)))
                 }
             }
-            val base = (lane + gap + lineH + GRAPH).toPx()
-            val h = GRAPH.toPx()
+            val base = (lane + gap + lineH + gh).toPx()
+            val h = gh.toPx()
             val top = maxOf(v.filterNotNull().maxOrNull() ?: 0.0, need ?: 0.0).takeIf { it > 0 } ?: 1.0
             val w = minOf(slot * 0.55f, 22.dp.toPx())
             // The need line goes under the bars and the value labels, so it never crosses a number.
@@ -598,7 +623,7 @@ private fun WeekGraph(days: List<JsonObject>, a: Color, sleep: Boolean) {
                 }
                 val bh = maxOf((x / top).toFloat() * h, 2.dp.toPx())
                 drawRoundRect(a, Offset(cx(i) - w / 2, base - bh), Size(w, bh), CornerRadius(minOf(4.dp.toPx(), w / 2)))
-                val t = label(if (sleep) "%.1f".format(x) else "${(x / 1000).roundToInt()}k")
+                val t = label(if (sleep) "%.1f".format(x) else if (key == "steps") "${(x / 1000).roundToInt()}k" else "${x.roundToInt()}")
                 val tl = Offset(cx(i) - t.size.width / 2, base - bh - t.size.height)
                 val pad = 4.dp.toPx() // keeps the dashes clear of the digits, or "6.9" reads "-6.9"
                 drawRect(c.card, tl - Offset(pad, 0f), Size(t.size.width + 2 * pad, t.size.height.toFloat()))
@@ -608,6 +633,82 @@ private fun WeekGraph(days: List<JsonObject>, a: Color, sleep: Boolean) {
             letters.forEachIndexed { i, s ->
                 val t = label(s)
                 drawText(t, topLeft = Offset(cx(i) - t.size.width / 2, base + marks.toPx()))
+            }
+        }
+    }
+}
+
+private val LINES = 72.dp
+
+private fun letters(days: List<JsonObject>) =
+    days.map { (it["date"] as? JsonPrimitive)?.content?.let(LocalDate::parse)?.dayOfWeek?.getDisplayName(java.time.format.TextStyle.NARROW, Locale.getDefault()).orEmpty() }
+
+/** LW6: resting heart rate and HRV over their usual band (`baseline.rhr` / `.hrv` = [low, high]), then stressed minutes as bars. */
+@Composable
+private fun WeekBody(days: List<JsonObject>, base: JsonObject?) {
+    val c = AppTheme.colors
+    fun band(k: String) = (base?.get(k) as? JsonArray)?.mapNotNull { it.num() }?.takeIf { it.size == 2 }?.let { it[0] to it[1] }
+    fun has(k: String) = days.any { it[k].num() != null }
+    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.l)) {
+        band("rhr").let { b -> if (has("rhr")) WeekLines(days, listOf(Triple("rhr", "Resting heart rate", c.heart)), if (b != null) "bpm · band: your usual" else "bpm", b) }
+        band("hrv").let { b -> if (has("hrv")) WeekLines(days, listOf(Triple("hrv", "HRV", c.hrv)), if (b != null) "ms · band: your usual" else "ms", b) }
+        if (has("stressed_min")) WeekGraph(days, c.zoneStressed, "stressed_min")
+    }
+}
+
+/**
+ * LW6: one line per (day key, name, colour) over Mon to Sun, a dot per day, no line across a null day; a legend with coloured dots and [note].
+ * [band]: a soft strip of the first line's colour. [scale] set (the mind graph): that fixed range labelled in a gutter, dotted lines;
+ * else the range fits the values and the band, each dot labelled with its value.
+ */
+@Composable
+private fun WeekLines(days: List<JsonObject>, series: List<Triple<String, String, Color>>, note: String, band: Pair<Double, Double>?, scale: Pair<Double, Double>? = null) {
+    val c = AppTheme.colors
+    val tm = rememberTextMeasurer()
+    val small = AppType.footnote.copy(color = c.secondaryLabel, fontFeatureSettings = "tnum")
+    val lineH = with(LocalDensity.current) { small.lineHeight.toDp() }
+    val vals = series.map { (k, _, _) -> days.map { it[k].num() } }
+    val letters = letters(days)
+    Column {
+        Text(buildAnnotatedString {
+            series.forEachIndexed { i, (_, name, col) -> if (i > 0) append("   "); withStyle(SpanStyle(color = col)) { append("● ") }; append(name) }
+            append(" · $note")
+        }, style = AppType.footnote, color = c.secondaryLabel)
+        Canvas(Modifier.fillMaxWidth().padding(top = AppSpace.s).height(lineH + 4.dp + LINES + AppSpace.xs + lineH)) {
+            fun label(s: String) = tm.measure(s, small)
+            val all = vals.flatten().filterNotNull() + listOfNotNull(band?.first, band?.second)
+            var lo = scale?.first ?: all.min()
+            var hi = scale?.second ?: all.max()
+            if (scale == null) { val pad = maxOf((hi - lo) * 0.15, 2.0); lo -= pad; hi += pad }
+            val ends = if (scale != null) listOf(label("%.0f".format(hi)), label("%.0f".format(lo))) else emptyList()
+            val gutter = ends.maxOfOrNull { it.size.width + AppSpace.s.toPx() } ?: 0f
+            val slot = (size.width - gutter) / 7
+            val top = (lineH + 4.dp).toPx()
+            val gh = LINES.toPx()
+            fun y(v: Double) = top + ((hi - v) / (hi - lo)).toFloat() * gh
+            if (ends.isNotEmpty()) {
+                drawText(ends[0], topLeft = Offset(0f, y(hi) - ends[0].size.height / 2))
+                drawText(ends[1], topLeft = Offset(0f, y(lo) - ends[1].size.height / 2))
+            }
+            band?.let { (b0, b1) -> drawRect(series[0].third.copy(alpha = 0.18f), Offset(gutter, y(b1)), Size(size.width - gutter, y(b0) - y(b1))) }
+            val r = 3.5.dp.toPx()
+            vals.forEachIndexed { k, v ->
+                val col = series[k].third
+                val dx = (k - (vals.size - 1) / 2f) * 5.dp.toPx() // two lines on the same value stay apart
+                fun p(i: Int) = Offset(gutter + slot * (i + 0.5f) + dx, y(v[i]!!))
+                for (i in 0 until v.lastIndex) if (v[i] != null && v[i + 1] != null) drawLine(
+                    col, p(i), p(i + 1), 2.5.dp.toPx(), StrokeCap.Round,
+                    if (scale != null) PathEffect.dashPathEffect(floatArrayOf(0.1f, 6.dp.toPx())) else null,
+                )
+                v.forEachIndexed { i, x ->
+                    if (x == null) return@forEachIndexed
+                    drawCircle(col, r, p(i))
+                    if (scale == null) label("${x.roundToInt()}").let { t -> drawText(t, topLeft = Offset(p(i).x - t.size.width / 2, p(i).y - r - t.size.height)) }
+                }
+            }
+            letters.forEachIndexed { i, s ->
+                val t = label(s)
+                drawText(t, topLeft = Offset(gutter + slot * (i + 0.5f) - t.size.width / 2, top + gh + AppSpace.xs.toPx()))
             }
         }
     }
@@ -662,7 +763,7 @@ private fun WeekPage(start: String, writing: Boolean, onBack: () -> Unit) {
         Text("‹ Reports", style = AppType.headline, color = c.tint, modifier = Modifier.clickable(onClick = onBack).padding(start = AppSpace.xs, bottom = AppSpace.xs))
     }) {
         item { Text(weekRange(reply), style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.xs)) }
-        cards.forEach { card -> item(key = card.kind) { ReportCardView(card, writing = writing) } }
+        cards.forEach { card -> item(key = card.kind) { ReportCardView(card, writing = writing, week = reply) } }
     }
 }
 
