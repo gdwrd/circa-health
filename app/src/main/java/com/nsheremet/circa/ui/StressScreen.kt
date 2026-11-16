@@ -83,7 +83,7 @@ private val LEVELS = listOf(
 
 @Composable
 fun StressScreen(backend: Boolean?, header: @Composable () -> Unit) {
-    if (backend != true) return NoBackendTab("Stress", backend)
+    if (backend != true) return NoBackendTab("Body", backend)
     val ctx = LocalContext.current
     var detail by remember { mutableStateOf(false) }
     if (detail) return ResilienceDetail { detail = false }
@@ -113,7 +113,7 @@ fun StressScreen(backend: Boolean?, header: @Composable () -> Unit) {
     LaunchedEffect(Unit) { Api.today(ctx).obj()?.let { today = it } }
 
     val c = AppTheme.colors
-    LargeTitleScaffold("Stress", refreshing = refreshing, onRefresh = {
+    LargeTitleScaffold("Body", refreshing = refreshing, onRefresh = {
         scope.launch { refreshing = true; try { load(); Api.today(ctx).obj()?.let { today = it } } finally { refreshing = false } }
     }) {
         item { Box(Modifier.padding(bottom = AppSpace.m)) { header() } }

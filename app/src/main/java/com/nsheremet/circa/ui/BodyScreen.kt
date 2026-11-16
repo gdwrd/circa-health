@@ -6,7 +6,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 
-/** Heart and Stress under one tab; each screen keeps its own title, DayPicker and loading. */
+/** Heart and Stress under one tab titled "Body"; each screen keeps its own DayPicker and loading. */
 @Composable
 fun BodyScreen(backend: Boolean?) {
     var seg by rememberSaveable { mutableIntStateOf(0) }

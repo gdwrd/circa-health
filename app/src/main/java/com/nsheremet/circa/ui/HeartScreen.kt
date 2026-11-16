@@ -15,12 +15,20 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.MonitorHeart
+import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.DirectionsBike
 import androidx.compose.material.icons.rounded.DirectionsWalk
 import androidx.compose.material.icons.rounded.FitnessCenter
-import androidx.compose.material3.AlertDialog
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.Role
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.animation.core.tween
@@ -42,7 +50,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -100,9 +107,10 @@ private fun JsonElement?.str() = (this as? JsonPrimitive)?.contentOrNull
 
 private const val SLOT_S = 300.0
 
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
-    if (backend != true) return NoBackendTab("Heart", backend)
+    if (backend != true) return NoBackendTab("Body", backend)
     val ctx = LocalContext.current
     var hr by remember { mutableStateOf<List<Pair<Double, Double>>?>(null) }
     var rhr by remember { mutableStateOf<Trend?>(null) }
@@ -162,12 +170,17 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
     LaunchedEffect(date) { hr = null; breaths = emptyList(); day = null; nextInputs = null; workouts = emptyList(); loadDay() }
 
     val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    var measure by remember { mutableStateOf(false) }
     val inputs = day?.get("inputs").obj()
-    LargeTitleScaffold("Heart", refreshing = refreshing, onRefresh = {
+    LargeTitleScaffold("Body", action = {
+        Box(Modifier.size(44.dp).clip(CircleShape).clickable(role = Role.Button) { haptic.tick(); measure = true }, contentAlignment = Alignment.Center) {
+            Icon(Icons.Rounded.Favorite, "Measure now", tint = c.tint, modifier = Modifier.size(24.dp))
+        }
+    }, refreshing = refreshing, onRefresh = {
         scope.launch { refreshing = true; try { load(); loadDay() } finally { refreshing = false } }
     }) {
         item { Box(Modifier.padding(bottom = AppSpace.m)) { header() } }
-        item { Section("Now") { MeasureNow() } }
         if (!loaded) return@LargeTitleScaffold
         item { DayPicker(date) { date = it } }
         item {
@@ -210,6 +223,26 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
                         ),
                         marker = { x -> "${byX[x]?.roundToInt()} bpm · ${clock(t0 + x * SLOT_S)}" },
                     ) { x -> clock(t0 + x * SLOT_S).replace(":00 ", " ") }
+                    // Key to the bands, each swatch painted as DoseWindows paints its band: fill alpha, start line where it has one.
+                    val legend = listOfNotNull(
+                        windows.takeIf { it.isNotEmpty() }?.let { Triple("Dose", c.heart to 20, true) },
+                        spans.takeIf { it.isNotEmpty() }?.let { Triple("Workout", c.heart to 31, false) },
+                        breathSpans.takeIf { it.isNotEmpty() }?.let { Triple("Breathing", c.breathe to 31, true) },
+                        settling.takeIf { it.isNotEmpty() }?.let { Triple("Settling", c.sleepBand to (c.sleepBand.alpha * 255).roundToInt(), false) },
+                    )
+                    if (legend.isNotEmpty()) FlowRow(
+                        Modifier.padding(start = AppSpace.l, end = AppSpace.l, bottom = AppSpace.s),
+                        horizontalArrangement = Arrangement.spacedBy(AppSpace.m),
+                    ) {
+                        legend.forEach { (name, paint, line) ->
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
+                                Box(Modifier.size(12.dp).background(paint.first.copy(alpha = paint.second / 255f))) {
+                                    if (line) Box(Modifier.width(1.5.dp).fillMaxHeight().background(paint.first.copy(alpha = 200 / 255f)))
+                                }
+                                Text(name, style = AppType.footnote, color = c.secondaryLabel)
+                            }
+                        }
+                    }
                     settling.forEach { (a, b) ->
                         Text(
                             "Settling ${clock(t0 + a * SLOT_S)} · asleep ${clock(t0 + b * SLOT_S)}", style = AppType.footnote, color = c.secondaryLabel,
@@ -226,30 +259,23 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
             }
         }
         if (breaths.isNotEmpty()) item { BreathingCard(breaths) }
-        item {
-            Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                listOf("Resting HR · last night" to ("rhr" to "bpm"), "HRV · last night" to ("hrv" to "ms")).forEach { (label, m) ->
-                    val v = inputs?.get(m.first).num()
-                    InsetCard(Modifier.weight(1f).fillMaxHeight()) {
-                        Column(Modifier.padding(AppSpace.l)) {
-                            Text(label, style = AppType.footnote, color = c.secondaryLabel)
-                            Row(verticalAlignment = Alignment.Bottom) {
-                                Text(v?.roundToInt()?.toString() ?: "—", style = AppType.title)
-                                if (v != null) Text(" ${m.second}", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(bottom = 3.dp))
-                            }
-                        }
-                    }
-                }
-            }
-        }
         item { TrendCard("Resting heart rate · 30 days", rhr, "bpm", c.heart) }
         item { TrendCard("Heart rate variability · 30 days", hrv, "ms", c.hrv) }
         medStarted?.let { st -> item { MedicationCard(med, st, rhr90) } }
         if (bp.isNotEmpty()) item { BloodPressureCard(bp) }
     }
+    if (measure) ModalBottomSheet(
+        onDismissRequest = { measure = false }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = c.background, shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp),
+    ) {
+        Column(Modifier.padding(horizontal = AppSpace.l).padding(bottom = AppSpace.xl), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
+            Text("Heart rate now", style = AppType.title)
+            InsetCard { MeasureNow() }
+        }
+    }
 }
 
-/** On-demand live reading: connects to the ring, streams ~12-30 s, shows the bpm. Leaving the tab cancels it. */
+/** On-demand live reading: connects to the ring, streams ~12-30 s, shows the bpm. Closing the sheet cancels it. */
 @Composable
 private fun MeasureNow() {
     val ctx = LocalContext.current
