@@ -111,6 +111,7 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
                 "trends" -> { go(TabItem.Trends); onLinkHandled() }
                 "sleep" -> { go(TabItem.Sleep); onLinkHandled() }
                 "month" -> go(TabItem.Trends) // Trends consumes it once the month card is open
+                "insights" -> go(TabItem.Trends) // Trends consumes it once Insights is selected
                 "journal" -> { go(TabItem.Today); if (link.second == null) onLinkHandled() }
                 "workout" -> go(TabItem.Activity) // Activity consumes it once it shows that day
                 "today" -> { go(TabItem.Today); onLinkHandled() }
@@ -147,7 +148,7 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
                 composable(TabItem.Sleep.route) { SleepScreen(backend) }
                 composable(TabItem.Activity.route) { ActivityScreen(backend, link?.takeIf { it.first == "workout" }?.second, onLinkHandled) }
                 composable(TabItem.Body.route) { BodyScreen(backend) }
-                composable(TabItem.Trends.route) { TrendsScreen(backend, link?.first == "month", onLinkHandled) }
+                composable(TabItem.Trends.route) { TrendsScreen(backend, link?.first == "month", link?.first == "insights", onLinkHandled) }
                 composable("breathe") { BreatheScreen { nav.popBackStack() } }
                 composable("settings") {
                     val prev = nav.previousBackStackEntry?.destination?.route

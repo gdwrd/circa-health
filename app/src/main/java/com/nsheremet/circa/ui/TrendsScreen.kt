@@ -129,11 +129,15 @@ private fun Metric.format(v: Double) = when (key) {
 private val MARKER_AXIS = 49.dp // approx. width of the chart's y-axis labels, so markers align with the plot
 
 @Composable
-fun TrendsScreen(backend: Boolean?, openMonth: Boolean, onLinkHandled: () -> Unit) {
+fun TrendsScreen(backend: Boolean?, openMonth: Boolean, openInsights: Boolean = false, onLinkHandled: () -> Unit) {
+    var seg by rememberSaveable { mutableIntStateOf(0) } // Charts · Insights, as Body's Heart · Stress
     var monthOpen by rememberSaveable { mutableStateOf(openMonth) }
     var ym by rememberSaveable { mutableStateOf(YearMonth.now().toString()) }
-    LaunchedEffect(openMonth) { if (openMonth) { monthOpen = true; ym = YearMonth.now().toString(); onLinkHandled() } }
+    LaunchedEffect(openMonth) { if (openMonth) { seg = 0; monthOpen = true; ym = YearMonth.now().toString(); onLinkHandled() } }
+    LaunchedEffect(openInsights) { if (openInsights) { seg = 1; onLinkHandled() } }
     if (backend != true) return NoBackendTab("Trends", backend)
+    val header = @Composable { Segmented(listOf("Charts", "Insights"), seg) { seg = it } }
+    if (seg == 1) return InsightsScreen(header)
     val ctx = LocalContext.current
     var month by remember { mutableStateOf<JsonObject?>(null) }
     LaunchedEffect(ym) { month = runCatching { Api.month(ctx, ym).obj() }.getOrNull() }
@@ -174,6 +178,7 @@ fun TrendsScreen(backend: Boolean?, openMonth: Boolean, onLinkHandled: () -> Uni
             try { load(); Api.month(ctx, ym).obj()?.let { month = it } } finally { refreshing = false }
         }
     }) {
+        item { Box(Modifier.padding(bottom = AppSpace.m)) { header() } }
         week?.let { item { WeekCard(it) } }
         month?.let { item { MonthCard(it, YearMonth.parse(ym), monthOpen, { monthOpen = !monthOpen }) { ym = it.toString() } } }
         item {

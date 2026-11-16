@@ -560,6 +560,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             val intent = Intent(ctx, MainActivity::class.java)
             val extra = o["extra"] as? JsonObject
             extra?.forEach { (k, v) -> intent.putExtra(k, v.jsonPrimitive.content) }
+            if (o["kind"]?.jsonPrimitive?.content == "experiment") intent.putExtra("open", "insights") // the backend still sends "today"
             // request code = id: each notification keeps its own extras
             val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             val open = PendingIntent.getActivity(ctx, id, intent, flags)
