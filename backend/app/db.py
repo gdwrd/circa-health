@@ -251,6 +251,15 @@ def add_manual_workout(d: date, start: int, end: int, kind: str) -> None:
         con.execute("INSERT OR REPLACE INTO workout_manual VALUES(?,?,?,?)", (d.isoformat(), start, end, kind))
 
 
+def move_manual_workout(old: date, old_start: int, d: date, start: int, end: int, kind: str) -> bool:
+    """Replaces the manual workout at (old, old_start) in one transaction; False (nothing changed) when there is none."""
+    with closing(connect()) as con, con:
+        if con.execute("DELETE FROM workout_manual WHERE date=? AND start=?", (old.isoformat(), old_start)).rowcount == 0:
+            return False
+        con.execute("INSERT OR REPLACE INTO workout_manual VALUES(?,?,?,?)", (d.isoformat(), start, end, kind))
+        return True
+
+
 def set_manual_workout_kind(d: date, start: int, kind: str) -> bool:
     """Relabels the manual workout at (d, start), or removes it for kind "none"; False when there is none."""
     sql, args = ("DELETE FROM workout_manual WHERE date=? AND start=?", (d.isoformat(), start)) if kind == "none" else \

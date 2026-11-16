@@ -53,6 +53,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
+import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
@@ -86,6 +87,7 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
     var journalWorkout by remember { mutableStateOf<Set<String>>(emptySet()) } // dates with a journal "workout"
     var editing by remember { mutableStateOf<JsonObject?>(null) }
     var adding by remember { mutableStateOf(false) }
+    var moving by remember { mutableStateOf<JsonObject?>(null) } // manual workout in the edit sheet
     var open by remember { mutableStateOf<Double?>(null) } // start of the expanded workout row
     var refreshing by remember { mutableStateOf(false) }
     suspend fun loadDay() {
@@ -177,7 +179,7 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
                     val start = w["start"].num()
                     val isOpen = start != null && start == open
                     WorkoutRow(w, isOpen) { open = if (isOpen) null else start }
-                    if (isOpen) WorkoutHr(w, hr) { editing = w }
+                    if (isOpen) WorkoutHr(w, hr, if (w["manual"].str() == "true") ({ moving = w }) else null) { editing = w }
                 }
                 if (workouts.isNotEmpty()) Hairline(Modifier.padding(start = AppSpace.l))
                 Column(Modifier.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
@@ -228,25 +230,45 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
         if (a != null) { if (on == date) workouts = a.mapNotNull { it.obj() }; load(); adding = false }
         a != null
     }
+    moving?.let { w ->
+        val old = w["start"].num()?.toLong() ?: return@let
+        // the sheet's day is the end's: a manual workout is listed on its start day, which the sheet derives
+        val endDay = Instant.ofEpochSecond(w["end"].num()?.toLong() ?: old).atZone(ZoneId.systemDefault()).toLocalDate()
+        AddWorkout(endDay, { moving = null }, w) { on, start, end, kind ->
+            val a = Api.moveWorkout(ctx, date, old, on, start, end, kind)?.get("workouts") as? JsonArray
+            if (a != null) {
+                if (on == date) { workouts = a.mapNotNull { it.obj() }; open = start.toDouble() } else loadDay() // it left the shown day
+                load(); moving = null
+            }
+            a != null
+        }
+    }
 }
 
 /**
  * Kind, start and end on [date] for a workout the ring missed; an end before the start means it began the evening
- * before, and [save] gets that day. [save] returns false to keep the dialog open.
+ * before, and [save] gets that day. [save] returns false to keep the dialog open. With [edit] (a manual workout,
+ * [date] its end's day) the sheet starts from its kind and times.
  */
 @Composable
-private fun AddWorkout(date: LocalDate, onDismiss: () -> Unit, save: suspend (LocalDate, Long, Long, String) -> Boolean) {
+private fun AddWorkout(date: LocalDate, onDismiss: () -> Unit, edit: JsonObject? = null, save: suspend (LocalDate, Long, Long, String) -> Boolean) {
     val c = AppTheme.colors
+    val zone = ZoneId.systemDefault()
     val now = remember { LocalTime.now().withSecond(0).withNano(0) }
-    var kind by remember { mutableStateOf("ride") }
-    var start by remember { mutableStateOf(now.minusMinutes(30)) }
-    var end by remember { mutableStateOf(now) }
+    fun at(k: String) = edit?.get(k).num()?.let { Instant.ofEpochSecond(it.toLong()).atZone(zone).toLocalTime() }
+    var kind by remember { mutableStateOf(edit?.get("kind").str() ?: "ride") }
+    var start by remember { mutableStateOf(at("start") ?: now.minusMinutes(30)) }
+    var end by remember { mutableStateOf(at("end") ?: now) }
     var picking by remember { mutableStateOf<String?>(null) }
     var failed by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val on = if (end < start) date.minusDays(1) else date
+    val s = on.atTime(start).atZone(zone).toEpochSecond()
+    val e = date.atTime(end).atZone(zone).toEpochSecond()
+    val future = e > Instant.now().epochSecond
     AlertDialog(
         onDismissRequest = onDismiss, containerColor = c.card,
-        title = { Text("Add a workout") },
+        title = { Text(if (edit != null) "Edit workout" else "Add a workout") },
         text = {
             Column {
                 KINDS.forEach { (k, name) ->
@@ -263,19 +285,23 @@ private fun AddWorkout(date: LocalDate, onDismiss: () -> Unit, save: suspend (Lo
                     }
                 }
                 Text(
-                    if (failed) "Couldn't save. It must last 5 minutes to 12 hours, and the server must be reachable."
+                    if (future) "That time has not happened yet."
+                    else if (failed) "Couldn't save. It must last 5 minutes to 12 hours, and the server must be reachable."
                     else if (end < start) "It starts the evening before and is listed on that day."
                     else "Heart rate and load show only what the ring measured in that time.",
                     style = AppType.footnote, color = c.secondaryLabel,
                 )
+                // spelled out with the day and both AM/PM markers: the 12-hour picker makes AM vs PM easy to miss
+                Text(
+                    "${dayLabel(on)} · ${clock(start)} – ${clock(end)}", style = AppType.subhead, color = c.label,
+                    modifier = Modifier.padding(top = AppSpace.m),
+                )
             }
         },
         confirmButton = {
-            TextButton({
-                val zone = ZoneId.systemDefault()
-                val on = if (end < start) date.minusDays(1) else date
-                scope.launch { failed = !save(on, on.atTime(start).atZone(zone).toEpochSecond(), date.atTime(end).atZone(zone).toEpochSecond(), kind) }
-            }) { Text("Save", color = c.tint) }
+            TextButton({ scope.launch { failed = !save(on, s, e, kind) } }, enabled = !future) {
+                Text("Save", color = if (future) c.secondaryLabel else c.tint)
+            }
         },
         dismissButton = { TextButton(onDismiss) { Text("Cancel", color = c.tint) } },
     )
@@ -382,7 +408,7 @@ private fun WorkoutRow(w: JsonObject, open: Boolean, onClick: () -> Unit) {
 
 /** Open workout row: the day's heart rate inside [start, end] and the relabel button. */
 @Composable
-private fun WorkoutHr(w: JsonObject, hr: List<Pair<Double, Double>>, onRelabel: () -> Unit) {
+private fun WorkoutHr(w: JsonObject, hr: List<Pair<Double, Double>>, onEdit: (() -> Unit)?, onRelabel: () -> Unit) {
     val c = AppTheme.colors
     val s = w["start"].num() ?: return
     val e = w["end"].num() ?: return
@@ -402,6 +428,9 @@ private fun WorkoutHr(w: JsonObject, hr: List<Pair<Double, Double>>, onRelabel: 
                 marker = { x -> "${byX[x]?.roundToInt()} bpm · ${clock(s + x * SLOT_S)}" },
             ) { x -> clock(s + x * SLOT_S) }
         }
-        TintButton("What was this?", Modifier.padding(horizontal = AppSpace.l)) { onRelabel() }
+        Row(Modifier.padding(horizontal = AppSpace.l), horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+            TintButton("What was this?", Modifier.weight(1f)) { onRelabel() }
+            if (onEdit != null) TintButton("Edit", Modifier.weight(1f)) { onEdit() }
+        }
     }
 }

@@ -1154,15 +1154,37 @@ def patch_workouts(body: dict = Body(...)) -> dict:
     return {"workouts": db.days(d, d)[0]["c"]["workouts"]}
 
 
-@api.post("/workouts")
-def post_workouts(body: dict = Body(...)) -> dict:
-    """A workout entered by hand (5 min to 12 h, starting on `date`): the ring does not see every session."""
+def _manual_body(body: dict) -> tuple[date, int, int, str]:
+    """A workout entered by hand: 5 min to 12 h, starting on `date`, ended by now (5 min for clock drift)."""
     d, start, end, kind = _day(str(body.get("date"))), body.get("start"), body.get("end"), body.get("kind")
     if not all(_int(v, 0, 2**32) for v in (start, end)) or not 300 <= end - start <= 12 * 3600 \
             or kind not in ("walk", "ride", "workout") or _dt(start).date() != d:
         raise HTTPException(422, "bad start, end or kind")
+    if end > time.time() + 300:
+        raise HTTPException(422, "end is in the future")
+    return d, start, end, kind
+
+
+@api.post("/workouts")
+def post_workouts(body: dict = Body(...)) -> dict:
+    """A workout entered by hand: the ring does not see every session."""
+    d, start, end, kind = _manual_body(body)
     db.add_manual_workout(d, start, end, kind)
     _score_day(d)
+    return {"workouts": db.days(d, d)[0]["c"]["workouts"]}
+
+
+@api.put("/workouts")
+def put_workouts(body: dict = Body(...)) -> dict:
+    """Moves the manual workout at (date, start) to `new` (checked as POST checks it); detected ones cannot move."""
+    old, start = _day(str(body.get("date"))), body.get("start")
+    if not _int(start, 0, 2**32) or not isinstance(body.get("new"), dict):
+        raise HTTPException(422, "bad start or new")
+    d, s, e, kind = _manual_body(body["new"])
+    if not db.move_manual_workout(old, start, d, s, e, kind):
+        raise HTTPException(404, "no manual workout there")
+    for x in {old, d}:
+        _score_day(x)
     return {"workouts": db.days(d, d)[0]["c"]["workouts"]}
 
 

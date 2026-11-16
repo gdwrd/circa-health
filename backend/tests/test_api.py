@@ -363,6 +363,32 @@ def test_cardio_settings_today_and_workout_relabel(tmp_path, monkeypatch) -> Non
         for s in (int(w0) - 600, m0):
             r = c.patch("/workouts", json={"date": d.isoformat(), "start": s, "kind": "none"}, headers=H)
         assert [(x["start"], x.get("manual")) for x in r.json()["workouts"]] == [(int(w0), None)]  # the detected one is back
+
+        # PUT moves a manual one: within the day (14:00 ride -> 15:00 walk), then to the day before (09:00)
+        c.post("/workouts", json=body, headers=H)
+        new = {"date": d.isoformat(), "start": m0 + 3600, "end": m0 + 5400, "kind": "walk"}
+        r = c.put("/workouts", json={"date": d.isoformat(), "start": m0, "new": new}, headers=H)
+        assert [(x["start"], x["kind"], x.get("manual")) for x in r.json()["workouts"]] == \
+            [(int(w0), "ride", None), (m0 + 3600, "walk", True)]
+        p, pm = d - timedelta(1), int(samples.midnight(d - timedelta(1)).timestamp()) + 9 * 3600
+        new2 = {"date": p.isoformat(), "start": pm, "end": pm + 1800, "kind": "ride"}
+        r = c.put("/workouts", json={"date": d.isoformat(), "start": m0 + 3600, "new": new2}, headers=H)
+        assert [(x["start"], x["kind"], x.get("manual")) for x in r.json()["workouts"]] == [(pm, "ride", True)]
+        assert [x.get("manual") for x in db.days(d, d)[0]["c"]["workouts"]] == [None]  # gone from the old day
+        assert db.manual_workouts(d) == [] and [w["start"] for w in db.manual_workouts(p)] == [pm]
+        for missing in (m0 + 3600, int(w0)):  # already moved; a detected workout cannot be moved
+            assert c.put("/workouts", json={"date": d.isoformat(), "start": missing, "new": new}, headers=H).status_code == 404
+        move = {"date": p.isoformat(), "start": pm}
+        for bad in (move, move | {"new": new | {"end": m0 + 3660}}, move | {"new": new | {"kind": "none"}},
+                    move | {"new": new | {"date": p.isoformat()}}, move | {"start": "x", "new": new}):
+            assert c.put("/workouts", json=bad, headers=H).status_code == 422, bad
+        # an end after now (beyond 5 min of drift) is refused by both
+        now = int(time.time())
+        fut = {"date": main._dt(now).date().isoformat(), "start": now, "end": now + 3600, "kind": "walk"}
+        assert c.post("/workouts", json=fut, headers=H).status_code == 422
+        assert c.put("/workouts", json=move | {"new": fut}, headers=H).status_code == 422
+        assert c.put("/workouts", json=move | {"new": new}).status_code == 401
+        assert [w["start"] for w in db.manual_workouts(p)] == [pm]  # none of the refused calls touched it
         assert c.patch("/settings", json={"birth_year": ""}, headers=H).json()["birth_year"] == ""
 
 
