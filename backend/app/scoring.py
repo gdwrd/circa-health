@@ -266,7 +266,8 @@ EXPLAIN = ("alcohol", "workout", "sick", "travel", "stress", "late_meal")
 SCALES = ("mood_energy", "mood_valence", "rate_focus", "rate_appetite", "rate_crash")
 FEELINGS = ("overstimulated", "numb", "anxious", "irritable", "focused", "foggy")
 OLD_FEELINGS = ("tired", "flat", "wired", "good")  # no longer offered; still read for earlier days
-MOMENTS = FEELINGS + OLD_FEELINGS + ("coffee", "alcohol", "meal")
+MOMENTS = FEELINGS + OLD_FEELINGS + ("coffee", "alcohol", "meal", "snack", "energy", "nicotine", "nap")
+CAFFEINE = ("coffee", "energy")  # an energy drink counts as coffee wherever coffee is advised on
 NOW_NOTES = FEELINGS + ("tired", "wired", "low")  # tired / wired / low: the reply card for Energy 1-2 / 5, Mood 1-2
 
 
@@ -278,11 +279,11 @@ def scale(metric: str, vals: dict[float, float]) -> float | None:
 
 
 def derived(moments: list[tuple[int, str]]) -> set[str]:
-    """moments: (minute of the local day, kind). caffeine_late = a coffee at or after 14:00, alcohol = any
-    alcohol, late_meal = a meal at or after 21:00."""
+    """moments: (minute of the local day, kind). caffeine_late = a coffee or energy drink at or after 14:00,
+    alcohol = any alcohol, late_meal = a meal at or after 21:00."""
     out: set[str] = set()
     for m, k in moments:
-        if k == "coffee" and m >= 840:
+        if k in CAFFEINE and m >= 840:
             out.add("caffeine_late")
         elif k == "alcohol":
             out.add("alcohol")

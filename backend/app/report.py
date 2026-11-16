@@ -27,7 +27,8 @@ LEAD = {"push": "A good day to push.", "steady": "A steady day, keep to your usu
         "watch": "Your body may be under strain, so rest and hydrate.",
         "back": "Your body signals are back in your usual range."}
 NOTED = {"tired": "feeling tired", "flat": "feeling flat", "wired": "feeling wired", "good": "feeling good",
-         "coffee": "coffee", "alcohol": "alcohol", "meal": "a meal"}
+         "coffee": "coffee", "alcohol": "alcohol", "meal": "a meal", "snack": "a snack", "energy": "an energy drink",
+         "nicotine": "nicotine", "nap": "a nap"}
 
 # input: (noun, unit, "about the same" floor in that unit, meaning when higher, meaning when lower). A meaning follows
 # the direction scoring.py gives the input (readiness, sleep score, strain DIRS, resilience); None where it gives none.
@@ -71,7 +72,8 @@ TIMES = {"bed_start": "You fell asleep", "bed_end": "You woke"}
 NIGHT_KEYS = ("rhr", "hrv", "sleep_min", "deep_min", "rem_min", "awake", "spo2", "bed_start", "bed_end")
 DAY_KEYS = ("steps", "stress", "cardio_load")
 # advice line prefix (as _bed, AVOID, update() and _train write them) -> what to follow up on the next day
-FOLLOW = {"Be in bed by ": "bed", "Skip coffee": "coffee", "No more coffee today": "coffee", "Skip alcohol": "alcohol",
+FOLLOW = {"Be in bed by ": "bed", "Skip coffee": "coffee", "No more coffee today": "coffee",  # older lines
+          "No more caffeine today": "coffee", "Skip alcohol": "alcohol",
           "Finish eating before": "meal", "Eat earlier in the evening": "meal", "Keep exercise light": "load",
           "Keep the rest of the day easy": "load"}
 # moment kind: (from this hour, none taken, calm none taken, taken)
@@ -188,8 +190,9 @@ def _follow(d: date, rows: list[dict], ctx: dict) -> list[str]:
             s = "Yesterday was a heavier day than planned" if g[0] > g[1] else "You kept yesterday light, as planned"
         else:
             h, none, calm_none, broke = LATE[kind]
-            late = [m["ts"] for m in ctx["moments"] if m["kind"] == kind and datetime.fromtimestamp(m["ts"], tz).hour >= h]
-            s = (f"{NOTED[kind].capitalize()} {_at(late[-1], tz, calm)} yesterday, {broke}" if late
+            late = [m for m in ctx["moments"] if m["kind"] in (scoring.CAFFEINE if kind == "coffee" else (kind,))
+                    and datetime.fromtimestamp(m["ts"], tz).hour >= h]
+            s = (f"{NOTED[late[-1]['kind']].capitalize()} {_at(late[-1]['ts'], tz, calm)} yesterday, {broke}" if late
                  else f"No {calm_none if calm else none} yesterday, as planned") + _after(rows, d, calm)
         seen.add(kind)
         out.append(s)
@@ -402,7 +405,8 @@ def _body(row: dict, ctx: dict) -> dict | None:
 
 
 LABEL = {"wake": "Woke", "tired": "Tired", "flat": "Flat", "wired": "Wired", "good": "Good", "coffee": "Coffee",
-         "alcohol": "Alcohol", "meal": "Meal", "dose": "Dose"}
+         "alcohol": "Alcohol", "meal": "Meal", "dose": "Dose", "snack": "Snack", "energy": "Energy drink",
+         "nicotine": "Nicotine", "nap": "Nap"}
 WIND_DOWN_MIN = 120  # inside 2 h of the planned bedtime: wind-down lines only
 MOVE_ROOM_MIN = 180  # "move" needs at least 3 h before the planned bedtime
 EFFORT_MIN = 30  # a walk, ride or workout this long today is effort: go easy after it
@@ -437,7 +441,7 @@ def update(now: float, since: float, day: dict, given: list[str], ctx: dict) -> 
     at = "since the last note" if calm else f"since {datetime.fromtimestamp(since, tz):%H:%M}"
     ws = [w for w in day["workouts"] if w["start"] >= since]
     ms = [m for m in day["moments"] if m["ts"] >= since and m["kind"] in NOTED]
-    coffee = [m["ts"] for m in day["moments"] if m["kind"] == "coffee"]
+    coffee = [m["ts"] for m in day["moments"] if m["kind"] in scoring.CAFFEINE]
     hour, bed = datetime.fromtimestamp(now, tz).hour, ctx["bed"]
     to_bed = None if bed is None else (bed - now) / 60
     evening = to_bed is not None and to_bed <= WIND_DOWN_MIN
@@ -462,7 +466,7 @@ def update(now: float, since: float, day: dict, given: list[str], ctx: dict) -> 
             rules.append((f"Keep the rest of the day easy after {GUESS.get(effort[-1]['kind'], 'a workout')}",
                           effort[-1]["start"] >= since))
         if len(coffee) >= COFFEE_MAX or coffee and hour >= COFFEE_CUTOFF_H:
-            rules.append(("No more coffee today: it can push your sleep later", coffee[-1] >= since))
+            rules.append(("No more caffeine today: it can push your sleep later", coffee[-1] >= since))
         if stressed >= STRESS_LONG_MIN:
             rules.append(("Take a short walk or do the breathing exercise", True))
         if not effort and hour >= AFTERNOON_H and day["steps_today"] < MOVE_SHARE * goal \
@@ -470,8 +474,8 @@ def update(now: float, since: float, day: dict, given: list[str], ctx: dict) -> 
             rules.append(("Fit in a brisk walk while there is time before bed", False))
     advice = [a for a, fresh in rules if fresh or a not in given]
     # the coffee count is the reason for the coffee advice, not news on its own
-    c = _card("update", None, news + [len(coffee) >= 2 and ("Coffee more than once today" if calm
-                                                           else f"Coffee {len(coffee)} times today")], advice)
+    c = _card("update", None, news + [len(coffee) >= 2 and ("Caffeine more than once today" if calm
+                                                           else f"Caffeine {len(coffee)} times today")], advice)
     return {"at": int(now), "nothing_new": not (any(news) or advice), "evening": evening,
             **{k: c[k] for k in ("facts", "advice", "fallback")}}
 

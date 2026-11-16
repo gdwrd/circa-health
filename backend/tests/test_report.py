@@ -332,7 +332,7 @@ def test_update_nothing_new() -> None:
     assert not still["nothing_new"] and still["facts"] == ["Little movement since 12:00: a still stretch"]
     assert _upd(13, since_h=13)["nothing_new"]  # no time passed: not a still stretch
     two = _upd(11, moments=COFFEE, steps_since=900.0)  # the count alone, no advice: nothing new
-    assert two["nothing_new"] and two["facts"] == ["Coffee 2 times today"]
+    assert two["nothing_new"] and two["facts"] == ["Caffeine 2 times today"]
 
 
 def test_update_drops_what_pages_show() -> None:
@@ -350,11 +350,29 @@ def test_update_effort_goes_easy() -> None:
 
 def test_update_coffee() -> None:
     assert _upd(11, moments=COFFEE)["advice"] == []  # two before the cut-off: fine
-    assert "Coffee 2 times today" in _upd(11, moments=COFFEE)["facts"]
+    assert "Caffeine 2 times today" in _upd(11, moments=COFFEE)["facts"]
     late = _upd(15, moments=COFFEE)
-    assert late["advice"] == ["No more coffee today: it can push your sleep later"]  # past 14:00
+    assert late["advice"] == ["No more caffeine today: it can push your sleep later"]  # past 14:00
     third = COFFEE + [{"kind": "coffee", "ts": _ts(MON, 12, 30)}]
-    assert _upd(13, moments=third)["advice"] == ["No more coffee today: it can push your sleep later"]
+    assert _upd(13, moments=third)["advice"] == ["No more caffeine today: it can push your sleep later"]
+
+
+def test_update_energy_is_caffeine_others_advise_nothing() -> None:
+    energy = [{"kind": "coffee", "ts": _ts(MON, 8, 0)}, {"kind": "energy", "ts": _ts(MON, 10, 0)}]
+    assert "Caffeine 2 times today" in _upd(11, moments=energy)["facts"]
+    assert _upd(15, moments=energy[1:])["advice"] == ["No more caffeine today: it can push your sleep later"]
+    third = energy + [{"kind": "energy", "ts": _ts(MON, 12, 30)}]
+    assert _upd(13, moments=third)["advice"] == ["No more caffeine today: it can push your sleep later"]
+    others = [{"kind": k, "ts": _ts(MON, 12, 30 + i)} for i, k in enumerate(("snack", "nicotine", "nap"))]
+    u = _upd(15, moments=others, steps_since=900.0)
+    assert u["advice"] == [] and u["facts"] == [
+        "You noted a snack at 12:30", "You noted nicotine at 12:31", "You noted a nap at 12:32"]
+
+
+def test_follow_up_energy_counts_as_coffee() -> None:
+    late = [{"kind": "energy", "ts": _ts(MON - timedelta(1), 16, 10)}]
+    assert _cards(given=["No more caffeine today: it can push your sleep later"], moments=late)["today"]["facts"] == [
+        "An energy drink at 16:10 yesterday, after the cut-off"]
 
 
 def test_update_stress_and_move() -> None:
@@ -376,7 +394,7 @@ def test_update_evening_wind_down_only() -> None:
 
 
 def test_update_no_repeat() -> None:
-    line = "No more coffee today: it can push your sleep later"
+    line = "No more caffeine today: it can push your sleep later"
     assert _upd(16, since_h=15, moments=COFFEE, given=(line,))["advice"] == []  # same state: not again
     again = COFFEE + [{"kind": "coffee", "ts": _ts(MON, 15, 30)}]
     assert _upd(16, since_h=15, moments=again, given=(line,))["advice"] == [line]  # a new coffee: state changed
@@ -401,6 +419,9 @@ def test_timeline() -> None:
                          [{"kind": "coffee", "ts": _ts(MON, 8, 0)}], [_ts(MON, 9, 0)], {}, False)
     assert [(e["kind"], e["label"]) for e in ev] == [("wake", "Woke"), ("coffee", "Coffee"), ("dose", "Dose"),
                                                      ("walk", "Walk · 40 min")]
+    new = [{"kind": k, "ts": _ts(MON, 14, i)} for i, k in enumerate(("snack", "energy", "nicotine", "nap"))]
+    assert [e["label"] for e in report.timeline(None, [], new, [], {}, False)] == [
+        "Snack", "Energy drink", "Nicotine", "Nap"]
 
 
 def test_timeline_active_hours() -> None:

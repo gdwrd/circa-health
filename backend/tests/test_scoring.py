@@ -221,6 +221,10 @@ def test_derived_caffeine_and_meal_boundaries() -> None:
     assert derived([(10, "alcohol")]) == {"alcohol"}
     assert derived([(600, "coffee"), (1259, "meal"), (840, "wired"), (840, "good")]) == set()  # wired/good derive nothing
     assert derived([]) == set()
+    assert derived([(839, "energy")]) == set() and derived([(840, "energy")]) == {"caffeine_late"}  # counts as coffee
+    assert derived([(1400, k) for k in ("snack", "nicotine", "nap")]) == set()  # recorded and shown only
+    from app.scoring import MOMENTS
+    assert {"snack", "energy", "nicotine", "nap"} <= set(MOMENTS)
     assert FEELINGS == ("overstimulated", "numb", "anxious", "irritable", "focused", "foggy")
     assert MOMENTS[:10] == FEELINGS + ("tired", "flat", "wired", "good")  # the old four still read on earlier days
 
