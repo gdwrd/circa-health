@@ -136,7 +136,7 @@ internal fun reportCards(ctx: Context, reply: JsonElement?): List<ReportCard> {
         // DT1: a stored note stays whatever the card's hash is now (written once a day).
         val e = saved?.get("$date/$kind") as? JsonObject
         ReportCard(kind, (c["verdict"] as? JsonPrimitive)?.contentOrNull, (c["advice"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content }.orEmpty(),
-            fallback, (e?.get("text") as? JsonPrimitive)?.content?.takeIf { it != fallback }, e == null, LocalDate.parse(date))
+            fallback, (e?.get("text") as? JsonPrimitive)?.content?.takeIf { it != fallback }, e == null || (e["text"] as? JsonPrimitive)?.content.isNullOrEmpty(), LocalDate.parse(date))
     }.sortedBy { if (it.kind == "body" && it.verdict == "watch") 0.5 else pageOrder.indexOf(it.kind).let { i -> if (i < 0) 99.0 else i.toDouble() } }
 }
 
@@ -635,8 +635,9 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
             val day = date.toString()
             val morningAt = (saved["$day/today"] as? JsonObject)?.get("at").num()?.toLong()
             // Event rows and update entries by time, newest last; while updating, an entry with no text holds the loading bars.
-            // Events before the morning note are left out: it is written once the night is in, so it already covers them.
-            val entries: List<Pair<Double, Any>> = (halfHours(events.filter { it.t() >= (morningAt ?: 0L) }).map { it.first().t() to it } + updates(saved, day).map { (it["at"].num() ?: 0.0) to it })
+            // TL1: the morning node stays on top; the rail runs from the day's first wake (every event when there is none), never hiding an action.
+            val wake = events.filter { (it["kind"] as? JsonPrimitive)?.content == "wake" }.minOfOrNull { it.t() } ?: 0.0
+            val entries: List<Pair<Double, Any>> = (halfHours(events.filter { it.t() >= wake }).map { it.first().t() to it } + updates(saved, day).map { (it["at"].num() ?: 0.0) to it })
                 .sortedBy { it.first } + if (updating && isToday) listOf(0.0 to JsonObject(emptyMap())) else emptyList()
             val pill = isToday && !off
             ReportCardView(hero, Modifier.hero(), writing = writing, rail = true, morningAt = morningAt, after = (@Composable { a: Color ->
