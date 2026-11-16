@@ -12,6 +12,21 @@ import androidx.compose.material.icons.rounded.Medication
 import androidx.compose.material.icons.rounded.Restaurant
 import androidx.compose.material.icons.rounded.WbSunny
 import androidx.compose.material.icons.rounded.WineBar
+import androidx.compose.material.icons.rounded.AcUnit
+import androidx.compose.material.icons.rounded.Air
+import androidx.compose.material.icons.rounded.Cloud
+import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.LinearScale
+import androidx.compose.material.icons.rounded.LocalFireDepartment
+import androidx.compose.material.icons.rounded.TrackChanges
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.offset
+import androidx.compose.runtime.produceState
+import com.nsheremet.circa.SampleStore
+import com.nsheremet.circa.pushSample
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -307,7 +322,7 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
         // Not while the guess is pending: the verdict word would give the answer away.
         report?.takeIf { d["guess"].obj()?.get("pending").str() != "true" }?.let { r -> item { ReportCardView(r, Modifier.hero(), onReports) } }
         val day = d["date"].str().orEmpty() // the server's day, never the phone's clock
-        item { RightNow(day, scope, { reply = it }) { Api.today(ctx).obj()?.let { data = it } } }
+        item { RightNow(day, d["now"].obj()?.get("mood").obj(), scope, { reply = it }) { Api.today(ctx).obj()?.let { data = it } } }
         reply?.let { f -> item { NowCard(f, d, { text -> scope.launch { answered(Api.putNote(ctx, "now_$f", text), false) } }, onBreathe) { reply = null } } }
         // Ring until the 14-day baseline is full (backend "learning" ends at 5 days, when baselines start).
         val n = d["baseline_days"].str()?.substringBefore('/')?.toIntOrNull() ?: 0
@@ -477,12 +492,33 @@ private fun DaySoFar(d: JsonObject, today: List<Entry>, onFix: () -> Unit) {
     val c = AppTheme.colors
     val zone = ZoneId.systemDefault()
     val now = d["now"].obj()
-    val feel = mapOf(
-        "tired" to (Icons.Rounded.Bedtime to c.sleep), "flat" to (Icons.Rounded.HorizontalRule to c.stageCore),
-        "wired" to (Icons.Rounded.Bolt to c.stageAwake), "good" to (Icons.Rounded.WbSunny to c.readiness),
-    )
+    val feel = feelingLooks()
     val had = mapOf("coffee" to Icons.Rounded.Coffee, "alcohol" to Icons.Rounded.WineBar, "meal" to Icons.Rounded.Restaurant)
-    val lines = (
+    // Scale taps are not in `/today.moments`: read the day's from the phone's own store, where a cancel (9) overwrote its tap.
+    val ctx = LocalContext.current
+    val taps by produceState(emptyList<Triple<Long, String, Int>>(), d) {
+        val from = (runCatching { LocalDate.parse(d["date"].str()) }.getOrNull() ?: LocalDate.now()).atStartOfDay(zone).toInstant().toEpochMilli()
+        value = withContext(Dispatchers.IO) {
+            SampleStore.get(ctx).readableDatabase.rawQuery(
+                "SELECT ts, name, value FROM samples WHERE name IN ('mood_energy', 'mood_valence') AND ts >= ? AND ts < ? AND value <= 5 ORDER BY ts",
+                arrayOf(from.toString(), (from + 86_400_000).toString()),
+            ).use { q -> buildList { while (q.moveToNext()) add(Triple(q.getLong(0), q.getString(1), q.getInt(2))) } }
+        }
+    }
+    // An Energy and a Mood tap within five minutes make one line: "Energy 2 · Mood 4".
+    val scaleLines = taps.fold(mutableListOf<MutableList<Triple<Long, String, Int>>>()) { g, t ->
+        val last = g.lastOrNull()
+        if (last != null && t.first - last.first().first < 300_000 && last.none { it.second == t.second }) last += t else g += mutableListOf(t)
+        g
+    }.map { g ->
+        val e = g.first().second == "mood_energy" || g.size > 1
+        DayLine(
+            Instant.ofEpochMilli(g.first().first).atZone(zone).toLocalTime(),
+            g.sortedBy { it.second != "mood_energy" }.joinToString(" · ") { (if (it.second == "mood_energy") "Energy " else "Mood ") + it.third },
+            null, Icons.Rounded.LinearScale, if (e) c.energy else c.mood,
+        )
+    }
+    val lines = (scaleLines +
         today.filter { it.kind == "medication" }.mapNotNull { e ->
             val t = runCatching { LocalTime.parse(e.value.orEmpty()) }.getOrNull() ?: return@mapNotNull null
             DayLine(t, "Dose", now?.get("dose_end").str()?.takeIf { e.value == now?.get("dose").str() }?.let { "Active until about ${clock(it)}" }, Icons.Rounded.Medication, null)
@@ -514,7 +550,7 @@ private fun DaySoFar(d: JsonObject, today: List<Entry>, onFix: () -> Unit) {
                 if (yesterday.isNotEmpty() && lines.isNotEmpty()) Hairline()
                 if (lines.isEmpty() && facts.isEmpty()) {
                     Text("Nothing yet today.", style = AppType.body)
-                    Text("Tap a tile in Right now and it shows up here.", style = AppType.footnote, color = c.secondaryLabel)
+                    Text("Tap a dot or a tile in Right now and it shows up here.", style = AppType.footnote, color = c.secondaryLabel)
                 }
                 // Timeline: time | node on a rail | what. No spacing between rows, so the rail runs unbroken.
                 if (lines.isNotEmpty()) Column {
@@ -525,7 +561,8 @@ private fun DaySoFar(d: JsonObject, today: List<Entry>, onFix: () -> Unit) {
                         ) {
                             Text(
                                 clock(l.t), style = AppType.footnote.copy(fontFeatureSettings = "tnum"), color = c.secondaryLabel,
-                                textAlign = TextAlign.End, modifier = Modifier.width(48.dp).padding(top = 5.dp), // 18 sp line centred on the 28 dp node
+                                textAlign = TextAlign.End, // "12:10 AM" needs more than "12:10"; 18 sp line centred on the 28 dp node
+                                modifier = Modifier.width(if (clock(0.0).length > 5) 68.dp else 48.dp).padding(top = 5.dp),
                             )
                             Box(
                                 Modifier.width(28.dp).fillMaxHeight().drawBehind {
@@ -1567,7 +1604,86 @@ private fun NoteDialog(note: String?, onDismiss: () -> Unit, onNote: (String) ->
     )
 }
 
-private val FEELINGS = listOf("tired", "flat", "wired", "good")
+private val FEELINGS = listOf("overstimulated", "numb", "anxious", "irritable", "focused", "foggy")
+
+/** Each feeling's icon and colour: the six offered, then the old four, no longer offered but held by earlier days. */
+@Composable
+private fun feelingLooks(): Map<String, Pair<ImageVector, Color>> {
+    val c = AppTheme.colors
+    return mapOf(
+        "overstimulated" to (Icons.Rounded.GraphicEq to c.overstimulated), "numb" to (Icons.Rounded.AcUnit to c.numb),
+        "anxious" to (Icons.Rounded.Air to c.anxious), "irritable" to (Icons.Rounded.LocalFireDepartment to c.irritable),
+        "focused" to (Icons.Rounded.TrackChanges to c.focused), "foggy" to (Icons.Rounded.Cloud to c.foggy),
+        "tired" to (Icons.Rounded.Bedtime to c.sleep), "flat" to (Icons.Rounded.HorizontalRule to c.stageCore),
+        "wired" to (Icons.Rounded.Bolt to c.stageAwake), "good" to (Icons.Rounded.WbSunny to c.readiness),
+    )
+}
+
+/** The reply card (`now_<key>` note) a scale tap opens: Energy 1-2 tired, Energy 5 wired, Mood 1-2 low; else none. */
+private fun replyFor(scale: String, v: Int) = when {
+    scale == "energy" && v <= 2 -> "tired"
+    scale == "energy" && v == 5 -> "wired"
+    scale == "mood" && v <= 2 -> "low"
+    else -> null
+}
+
+/**
+ * One five-dot scale: beads on a hairline track; the track and dots fill in [color] up to [value] (today's latest, null = none),
+ * the chosen dot carries its number and pops on a tap. Each dot is a 48 dp button. Tap: [onTap] (1..5). Long press: [onLong].
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun DotScale(name: String, low: String, high: String, color: Color, value: Int?, onLong: (Int) -> Unit, onTap: (Int) -> Unit) {
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    val reduce = LocalReduceMotion.current
+    val fill by animateFloatAsState((value ?: 0).toFloat(), if (reduce) snap() else spring(Spring.DampingRatioLowBouncy, Spring.StiffnessLow), label = "fill")
+    val pop = remember { Animatable(1f) }
+    var popped by remember { mutableIntStateOf(0) }
+    LaunchedEffect(popped) { if (popped > 0 && !reduce) { pop.snapTo(1.3f); pop.animateTo(1f, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMediumLow)) } }
+    Column(Modifier.fillMaxWidth().padding(horizontal = AppSpace.s)) {
+        Text(name, style = AppType.subhead.copy(fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(horizontal = AppSpace.s))
+        Row(
+            Modifier.fillMaxWidth().drawBehind {
+                val step = size.width / 5
+                val y = size.height / 2
+                val track = 4.dp.toPx()
+                drawLine(c.emptySegment, Offset(step / 2, y), Offset(size.width - step / 2, y), track, StrokeCap.Round)
+                if (fill >= 1f) drawLine(
+                    Brush.horizontalGradient(listOf(color.copy(alpha = 0.35f), color), step / 2, step / 2 + step * (fill - 1)),
+                    Offset(step / 2, y), Offset(step / 2 + step * (fill - 1), y), track, StrokeCap.Round,
+                )
+            },
+        ) {
+            (1..5).forEach { i ->
+                val chosen = i == value
+                Box(
+                    Modifier.weight(1f).height(48.dp)
+                        .combinedClickable(
+                            remember { MutableInteractionSource() }, null, role = Role.Button, onLongClickLabel = "Pick an earlier time",
+                            onLongClick = { haptic.tick(); onLong(i) },
+                        ) { haptic.tick(); popped++; onTap(i) }
+                        .semantics { contentDescription = "$name $i of 5"; if (chosen) stateDescription = "Latest today" },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    val on = fill >= i - 0.01f
+                    val s = if (chosen) pop.value else 1f
+                    Box(
+                        Modifier.size(if (chosen) 28.dp else 14.dp).graphicsLayer { scaleX = s; scaleY = s }
+                            .background(if (on) color.copy(alpha = if (chosen) 1f else 0.45f + 0.1f * i) else c.emptySegment, CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) { if (chosen) Text("$i", style = AppType.footnote.copy(fontWeight = FontWeight.Bold), color = c.card) }
+                }
+            }
+        }
+        // The end words sit under the end dots, pulled up into the 48 dp target's slack.
+        Row(Modifier.fillMaxWidth().offset(y = (-6).dp)) {
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { Text(low, style = AppType.footnote, color = c.secondaryLabel, maxLines = 1, softWrap = false) }
+            Spacer(Modifier.weight(3f))
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { Text(high, style = AppType.footnote, color = c.secondaryLabel, maxLines = 1, softWrap = false) }
+        }
+    }
+}
 
 /** One Right now tile: an icon disc over its label; [color] null = a quiet intake tile. Tap: now. Long press: an earlier time today. [on] = just logged. */
 @OptIn(ExperimentalFoundationApi::class)
@@ -1589,62 +1705,75 @@ private fun NowTile(label: String, icon: ImageVector, color: Color?, on: Boolean
                 .background(if (on) ink else (color ?: c.secondaryLabel).copy(alpha = 0.14f), if (color != null) CircleShape else AppShape.card),
             contentAlignment = Alignment.Center,
         ) { Icon(icon, null, tint = if (on) c.card else ink, modifier = Modifier.size(26.dp)) }
-        Text(label, style = AppType.footnote.copy(fontWeight = FontWeight.Medium), maxLines = 1)
+        // A long label ("Overstimulated" at a large font) shrinks to fit rather than clip.
+        var fit by remember(label) { mutableStateOf(1f) }
+        Text(
+            label, style = AppType.footnote.copy(fontWeight = FontWeight.Medium, fontSize = AppType.footnote.fontSize * fit), maxLines = 1, softWrap = false,
+            modifier = Modifier.padding(horizontal = 2.dp), onTextLayout = { if (it.didOverflowWidth && fit > 0.6f) fit -= 0.05f },
+        )
     }
 }
 
 /**
- * Right now: four feelings and four intakes. A feeling or intake is the sample `moment_<kind>` (stored first, pushed once,
- * Undo = value 2 at the same second); Dose is a medication journal row. [onFeeling] gets the feeling just tapped, null when undone.
+ * Right now: the Energy and Mood scales, six feelings and four intakes. A scale tap is `mood_energy` / `mood_valence` = 1..5
+ * (Undo = 9 at the same second); a feeling or intake is the sample `moment_<kind>` (stored first, pushed once, Undo = value 2 at the
+ * same second); Dose is a medication journal row. [mood] = `/today.now.mood`. [onFeeling] gets the reply card's note key, null when undone.
  */
 @Composable
-private fun RightNow(day: String, scope: CoroutineScope, onFeeling: (String?) -> Unit, reload: suspend () -> Unit) {
+private fun RightNow(day: String, mood: JsonObject?, scope: CoroutineScope, onFeeling: (String?) -> Unit, reload: suspend () -> Unit) {
     val c = AppTheme.colors
     val haptic = LocalHapticFeedback.current
     val ctx = LocalContext.current
-    var just by remember { mutableStateOf<Triple<String, Long, Int?>?>(null) } // kind, epoch ms, journal id (dose) that Undo takes back
-    var gone by remember { mutableStateOf(emptySet<String>()) }
-    var pick by remember { mutableStateOf<String?>(null) }
-    fun put(kind: String, at: Long) {
+    var just by remember { mutableStateOf<Just?>(null) }
+    var used by remember { mutableStateOf(emptySet<String>()) } // "metric@ts" taken back, or a scale second already filled
+    var pick by remember { mutableStateOf<Pair<String, Int?>?>(null) }
+    fun metric(kind: String, v: Int?) = if (v == null) "moment_$kind" else if (kind == "mood") "mood_valence" else "mood_energy"
+    fun put(kind: String, at: Long, v: Int? = null) {
         if (kind == "dose") {
             scope.launch {
                 val hhmm = Instant.ofEpochMilli(at).atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("HH:mm"))
                 val id = Api.addJournal(ctx, day, "medication", hhmm)
-                if (id == null) Toast.makeText(ctx, "Not saved. Try again.", Toast.LENGTH_SHORT).show() else { just = Triple(kind, at, id); reload() }
+                if (id == null) Toast.makeText(ctx, "Not saved. Try again.", Toast.LENGTH_SHORT).show() else { just = Just(kind, at, id = id); reload() }
             }
             return
         }
+        val m = metric(kind, v)
         var ts = at
-        while ("$kind@$ts" in gone) ts += 1000 // an undone second stays undone (the larger value wins): the new moment moves one on
-        just = Triple(kind, ts, null)
-        if (kind in FEELINGS) onFeeling(kind)
-        scope.launch { mark(ctx, "moment_$kind", ts, false); reload() }
+        // An undone second stays undone (the larger value wins), and a second scale tap adds a sample: either moves one on.
+        while ("$m@$ts" in used) ts += 1000
+        if (v != null) used = used + "$m@$ts"
+        just = Just(kind, ts, v = v)
+        (if (v != null) replyFor(kind, v) else kind.takeIf { it in FEELINGS })?.let(onFeeling)
+        scope.launch { if (v != null) pushSample(ctx, m, v.toDouble(), ts) else mark(ctx, m, ts, false); reload() }
     }
-    fun undo(j: Triple<String, Long, Int?>) {
+    fun undo(j: Just) {
         just = null
-        val id = j.third
-        if (id != null) { scope.launch { Api.deleteJournal(ctx, id); reload() }; return }
-        gone = gone + "${j.first}@${j.second}"
-        if (j.first in FEELINGS) onFeeling(null)
-        scope.launch { mark(ctx, "moment_${j.first}", j.second, true); reload() }
+        if (j.id != null) { scope.launch { Api.deleteJournal(ctx, j.id); reload() }; return }
+        val m = metric(j.kind, j.v)
+        used = used + "$m@${j.ts}"
+        if (if (j.v != null) replyFor(j.kind, j.v) != null else j.kind in FEELINGS) onFeeling(null)
+        scope.launch { if (j.v != null) pushSample(ctx, m, 9.0, j.ts) else mark(ctx, m, j.ts, true); reload() }
     }
     LaunchedEffect(just) { if (just != null) { delay(10_000); just = null } }
+    val nowMs = { System.currentTimeMillis() / 1000 * 1000 }
     val tiles = @Composable { kinds: List<Triple<String, ImageVector, Color?>> ->
         Row(Modifier.fillMaxWidth()) {
             kinds.forEach { (k, icon, color) ->
-                NowTile(k.replaceFirstChar { it.uppercase() }, icon, color, just?.first == k, Modifier.weight(1f), { pick = k }) { put(k, System.currentTimeMillis() / 1000 * 1000) }
+                NowTile(k.replaceFirstChar { it.uppercase() }, icon, color, just?.kind == k, Modifier.weight(1f), { pick = k to null }) { put(k, nowMs()) }
             }
         }
     }
+    val looks = feelingLooks()
+    // Today's latest, or the dot just tapped until the reload answers.
+    fun shown(scale: String, key: String) = just?.takeIf { it.kind == scale }?.v ?: mood?.get(key).num()?.roundToInt()
     Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
         Text("Right now", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
         InsetCard {
             Column(Modifier.fillMaxWidth().padding(vertical = AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
                 Text("I feel", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l))
-                tiles(listOf(
-                    Triple("tired", Icons.Rounded.Bedtime, c.sleep), Triple("flat", Icons.Rounded.HorizontalRule, c.stageCore),
-                    Triple("wired", Icons.Rounded.Bolt, c.stageAwake), Triple("good", Icons.Rounded.WbSunny, c.readiness),
-                ))
+                DotScale("Energy", "Flat", "Wired", c.energy, shown("energy", "energy"), { pick = "energy" to it }) { put("energy", nowMs(), it) }
+                DotScale("Mood", "Low", "Good", c.mood, shown("mood", "valence"), { pick = "mood" to it }) { put("mood", nowMs(), it) }
+                FEELINGS.chunked(3).forEach { row -> tiles(row.map { k -> looks.getValue(k).let { (i, col) -> Triple(k, i, col) } }) }
                 Hairline(Modifier.padding(start = AppSpace.l))
                 Text("I just had", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l))
                 tiles(listOf(
@@ -1653,7 +1782,7 @@ private fun RightNow(day: String, scope: CoroutineScope, onFeeling: (String?) ->
                 ))
                 just?.let { j ->
                     Row(Modifier.padding(start = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
-                        Text("${j.first.replaceFirstChar { it.uppercase() }} · ${clock(j.second / 1000.0)}", style = AppType.subhead, color = c.secondaryLabel)
+                        Text("${j.kind.replaceFirstChar { it.uppercase() }}${j.v?.let { " $it" }.orEmpty()} · ${clock(j.ts / 1000.0)}", style = AppType.subhead, color = c.secondaryLabel)
                         Text(
                             "Undo", style = AppType.footnote.copy(fontWeight = FontWeight.Medium), color = c.tint,
                             modifier = Modifier.padding(start = AppSpace.xs).clip(RoundedCornerShape(50)).clickable(role = Role.Button) { haptic.tick(); undo(j) }.padding(horizontal = AppSpace.m, vertical = 9.dp),
@@ -1663,15 +1792,18 @@ private fun RightNow(day: String, scope: CoroutineScope, onFeeling: (String?) ->
             }
         }
     }
-    pick?.let { k ->
+    pick?.let { (k, v) ->
         TimePickDialog(LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm")), { pick = null }) { hhmm ->
             pick = null
             val ts = LocalDate.now().atTime(LocalTime.parse(hhmm)).atZone(ZoneId.systemDefault()).toEpochSecond() * 1000
             if (ts > System.currentTimeMillis()) return@TimePickDialog Toast.makeText(ctx, "Pick a time earlier today.", Toast.LENGTH_SHORT).show()
-            put(k, ts)
+            put(k, ts, v)
         }
     }
 }
+
+/** The tap Undo takes back: [kind] (a feeling, an intake, "dose", or the scale "energy" / "mood" with its value [v]), at [ts] epoch ms; [id] = the dose's journal row. */
+private class Just(val kind: String, val ts: Long, val id: Int? = null, val v: Int? = null)
 
 /** After a feeling tap: what the ring and the log say right now (`/today.drive`, `/today.now`), your own note for this feeling, Breathe. */
 @Composable

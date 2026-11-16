@@ -191,6 +191,15 @@ data class AppColors(
     /** Settings group tiles without a fitting colour: Medication (iOS teal), Mind (iOS purple). */
     val pill: Color = Color(0xFF30B0C7),
     val mind: Color = Color(0xFFAF52DE),
+    /** Right now: the Energy and Mood dot rows, and the six feeling tiles (iOS system hues). */
+    val energy: Color = Color(0xFFFF9500),
+    val mood: Color = Color(0xFF34C759),
+    val overstimulated: Color = Color(0xFF5856D6),
+    val numb: Color = Color(0xFFA2845E),
+    val anxious: Color = Color(0xFFAF52DE),
+    val irritable: Color = Color(0xFFFF3B30),
+    val focused: Color = Color(0xFF32ADE6),
+    val foggy: Color = Color(0xFF8A94A6),
 ) {
     /** Lighter gradient partner of a score colour (the arc head); other colours pair with themselves. */
     fun light(c: Color): Color = when (c) {
@@ -251,6 +260,8 @@ private val DarkColors = AppColors(
     pushWash = ActivityPink.copy(alpha = 0.18f), steadyWash = ReadinessGreen.copy(alpha = 0.18f),
     easyWash = Color(0x2E63E6E2), restWash = SleepIndigo.copy(alpha = 0.22f),
     pill = Color(0xFF40C8E0), mind = Color(0xFFBF5AF2),
+    energy = Color(0xFFFF9F0A), mood = Color(0xFF30D158), overstimulated = Color(0xFF5E5CE6), numb = Color(0xFFAC8E68),
+    anxious = Color(0xFFBF5AF2), irritable = Color(0xFFFF453A), focused = Color(0xFF64D2FF), foggy = Color(0xFF98A2B3),
 )
 
 /** Bundled OFL Nunito: rounded numerals and titles; body text stays on the platform sans. */
