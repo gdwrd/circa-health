@@ -129,7 +129,7 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
                 val goal = ctx.stepGoal
                 Box(Modifier.padding(top = AppSpace.l)) { Value(total, "steps", c.activity) }
                 Text(
-                    "${dayLabel(date)} · ${(total / goal * 100).roundToInt()}% of your $goal goal", style = AppType.subhead, color = c.secondaryLabel,
+                    "${dayLabel(date)} · ${(total / goal * 100).roundToInt()}% of your ${"%,d".format(goal)} goal", style = AppType.subhead, color = c.secondaryLabel,
                     modifier = Modifier.padding(start = AppSpace.l),
                 )
                 val rows = hs.mapNotNull { o -> o["h"].num()?.let { Hour(it.toInt(), o["steps"].num() ?: 0.0, o["worn"].str() == "true") } }

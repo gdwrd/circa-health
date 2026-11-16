@@ -153,7 +153,7 @@ fun StressScreen(backend: Boolean?, header: @Composable () -> Unit) {
         if (st != null || restorative != null || breathe != null) item {
             val tiles = listOfNotNull(
                 Triple("Daytime stress load", st?.get("stressed_hours").num()?.let { it * 60 }, "in the stressed zone while awake"),
-                Triple("Restorative time", restorative, "calm heart rate, little movement"),
+                Triple("Calm and still", restorative, "calm heart rate, little movement"),
                 breathe?.let { Triple("Mindful minutes", it["today_min"].num(), "${it["week_min"].num()?.roundToInt() ?: 0} min this week") },
             )
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {

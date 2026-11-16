@@ -318,7 +318,7 @@ private fun CardBody(card: ReportCard, a: Color, onOpen: (() -> Unit)?, skeleton
             if (card.kind == "week_effects" && card.facts.isNotEmpty() && onOpen == null) Column(Modifier.padding(top = AppSpace.xs)) {
                 card.facts.forEachIndexed { i, f ->
                     if (i > 0) Hairline()
-                    Text(if (f.trimEnd().endsWith(".")) f else f.trimEnd() + ".", style = AppType.note, modifier = Modifier.padding(vertical = AppSpace.m))
+                    Text(clockText(if (f.trimEnd().endsWith(".")) f else f.trimEnd() + "."), style = AppType.note, modifier = Modifier.padding(vertical = AppSpace.m))
                 }
             } else
             // While writing: loading bars (null) first, the written note cross-fades in.
@@ -327,7 +327,7 @@ private fun CardBody(card: ReportCard, a: Color, onOpen: (() -> Unit)?, skeleton
                 // Capped measure: the full-width hero on an unfolded screen would run ~100 characters a line.
                 Modifier.padding(top = if (hero) AppSpace.xs else AppSpace.m).widthIn(max = 640.dp).animateContentSize(spring(stiffness = Spring.StiffnessMediumLow)),
                 spring(stiffness = Spring.StiffnessMediumLow), label = "note",
-            ) { if (it == null) NoteSkeleton(if (hero) 5 else 4) else Text(it, style = AppType.note) }
+            ) { if (it == null) NoteSkeleton(if (hero) 5 else 4) else Text(clockText(it), style = AppType.note) }
             // The fallback already ends with the advice lines: show a row only for a line it does not contain.
             val advice = card.advice.filter { card.written != null || skeleton || !card.fallback.contains(it.trim().removeSuffix("."), ignoreCase = true) }
             if (onOpen == null && advice.isNotEmpty()) {
@@ -356,7 +356,7 @@ private fun AdviceRows(advice: List<String>, a: Color, modifier: Modifier = Modi
         advice.forEach { line ->
             Row {
                 Icon(Icons.Rounded.CheckCircle, null, tint = a, modifier = Modifier.size(20.dp))
-                Text(line, style = AppType.subhead.copy(fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(start = AppSpace.s))
+                Text(clockText(line), style = AppType.subhead.copy(fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(start = AppSpace.s))
             }
         }
     }
@@ -462,7 +462,7 @@ private fun UpdateEntry(u: JsonObject, a: Color, what: String) {
             (u["text"] as? JsonPrimitive)?.content,
             Modifier.padding(top = AppSpace.xs).widthIn(max = 640.dp).animateContentSize(spring(stiffness = Spring.StiffnessMediumLow)),
             spring(stiffness = Spring.StiffnessMediumLow), label = "update",
-        ) { if (it == null) NoteSkeleton(3) else Text(it, style = AppType.note) }
+        ) { if (it == null) NoteSkeleton(3) else Text(clockText(it), style = AppType.note) }
         val advice = (u["advice"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.content }
         if (advice.isNotEmpty()) AdviceRows(advice, a, Modifier.padding(top = AppSpace.m))
     }
@@ -746,7 +746,7 @@ private fun LastWeekCard(overview: ReportCard, range: String, writing: Boolean, 
                 if (writing && overview.pending) null else overview.note,
                 Modifier.padding(top = AppSpace.m).widthIn(max = 640.dp).animateContentSize(spring(stiffness = Spring.StiffnessMediumLow)),
                 spring(stiffness = Spring.StiffnessMediumLow), label = "week",
-            ) { if (it == null) NoteSkeleton(4) else Text(it, style = AppType.note) }
+            ) { if (it == null) NoteSkeleton(4) else Text(clockText(it), style = AppType.note) }
             overview.advice.firstOrNull()?.let {
                 Hairline(Modifier.padding(top = AppSpace.l, bottom = AppSpace.m))
                 AdviceRows(listOf(it), c.tint)

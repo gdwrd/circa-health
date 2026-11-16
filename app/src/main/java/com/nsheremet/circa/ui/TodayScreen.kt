@@ -1080,6 +1080,7 @@ internal val KIND_LABEL = mapOf(
     "alcohol" to "Alcohol", "caffeine_late" to "Late caffeine", "late_meal" to "Late meal", "workout" to "Workout",
     "sick" to "Sick", "travel" to "Travel", "stress" to "Stress", "medication" to "Medication", "bp" to "BP", "note" to "Note",
     "breathe" to "Breathe", "load_social" to "Social load", "load_sensory" to "Sensory load", "load_masking" to "Masking",
+    "phone_in_bed" to "Phone in bed",
 )
 
 private val LOAD = listOf("load_social" to "Social", "load_sensory" to "Sensory", "load_masking" to "Masking")

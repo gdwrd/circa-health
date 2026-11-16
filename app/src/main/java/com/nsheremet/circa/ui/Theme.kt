@@ -293,6 +293,9 @@ fun clock(epochS: Double): String = Instant.ofEpochSecond(epochS.toLong()).atZon
 fun clock(t: LocalTime): String = t.format(clockFormat())
 fun clock(hhmm: String): String = runCatching { clock(LocalTime.parse(hhmm)) }.getOrDefault(hhmm)
 
+/** Each "HH:MM" in a written text (report notes, advice) in the device format; one already followed by am/pm is left alone. */
+fun clockText(text: String): String = Regex("""\b\d{2}:\d{2}\b(?!\s?[AaPp]\.?[Mm])""").replace(text) { clock(it.value) }
+
 /** "7 h 15 min", "1 h" when the minutes are 0, "45 min" under an hour. */
 fun duration(min: Int): String = when {
     min < 60 -> "$min min"
@@ -599,7 +602,7 @@ internal fun Section(title: String, content: @Composable ColumnScope.() -> Unit)
 internal fun Value(v: Double, unit: String, color: Color) {
     Text(
         buildAnnotatedString {
-            append(v.roundToInt().toString())
+            append("%,d".format(v.roundToInt()))
             withStyle(SpanStyle(fontSize = 17.sp, color = AppTheme.colors.secondaryLabel)) { append(" $unit") }
         },
         style = AppType.largeTitle, modifier = Modifier.padding(start = AppSpace.l),

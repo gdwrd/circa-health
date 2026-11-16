@@ -228,7 +228,7 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
         if (breaths.isNotEmpty()) item { BreathingCard(breaths) }
         item {
             Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                listOf("Resting HR" to ("rhr" to "bpm"), "HRV" to ("hrv" to "ms")).forEach { (label, m) ->
+                listOf("Resting HR · last night" to ("rhr" to "bpm"), "HRV · last night" to ("hrv" to "ms")).forEach { (label, m) ->
                     val v = inputs?.get(m.first).num()
                     InsetCard(Modifier.weight(1f).fillMaxHeight()) {
                         Column(Modifier.padding(AppSpace.l)) {
