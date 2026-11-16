@@ -41,6 +41,7 @@ import com.nsheremet.circa.Prefs.lastBatteryPct
 import com.nsheremet.circa.Prefs.lastCharging
 import com.nsheremet.circa.Prefs.lastDeepSyncDay
 import com.nsheremet.circa.Prefs.lastScreenMs
+import com.nsheremet.circa.Prefs.movesRegistered
 import com.nsheremet.circa.Prefs.phoneMoves
 import com.nsheremet.circa.Prefs.phoneSensor
 import com.nsheremet.circa.Prefs.usageAccess
@@ -78,7 +79,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
     override suspend fun doWork(): Result {
         val log = { msg: String -> SyncLog.add(applicationContext, msg) }
         log("Sync started")
-        if (applicationContext.phoneMoves) registerMoves(applicationContext)
+        if (applicationContext.phoneMoves && applicationContext.movesRegistered != movesKey(applicationContext)) registerMoves(applicationContext)
 
         val address = applicationContext.ringAddress
         if (address.isNullOrBlank()) {

@@ -38,6 +38,7 @@ object Prefs {
     private const val KEY_MARK_NAMES      = "mark_names"
     private const val KEY_PHONE_MOVES     = "phone_moves"
     private const val KEY_OPEN_MOVE       = "open_move"
+    private const val KEY_MOVES_REG       = "moves_registered"
     private const val KEY_REPORT_WRITER   = "report_writer"
     private const val KEY_REPORT_NAME     = "report_name"
 
@@ -112,6 +113,11 @@ object Prefs {
     var Context.openMove: String
         get() = prefs(this).getString(KEY_OPEN_MOVE, "") ?: ""
         set(v) = prefs(this).edit().putString(KEY_OPEN_MOVE, v).apply()
+
+    /** "bootCount|versionCode" of the last successful transitions registration; "" = none. A sync re-registers only when it differs. */
+    var Context.movesRegistered: String
+        get() = prefs(this).getString(KEY_MOVES_REG, "") ?: ""
+        set(v) = prefs(this).edit().putString(KEY_MOVES_REG, v).apply()
 
     /** Settings › Reports switch; off (default) = the on-phone model writes nothing, the cards show their template text. */
     var Context.reportWriter: Boolean
