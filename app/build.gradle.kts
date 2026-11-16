@@ -15,8 +15,8 @@ android {
         applicationId = "com.nsheremet.circa"
         minSdk = 31          // BLUETOOTH_CONNECT requires API 31
         targetSdk = 35
-        versionCode = 64
-        versionName = "4.9.0"
+        versionCode = 65
+        versionName = "4.9.1"
     }
 
     // Release signing: reads keystore.properties (gitignored) if present, else unsigned.
