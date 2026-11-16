@@ -108,7 +108,6 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -211,15 +210,6 @@ private val SCORE_INFO = mapOf(
         "the awake hours you barely moved, your calories against your 7-day average and how many of the last " +
         "7 days reached your goal.",
 )
-private val VITALS_INFO = mapOf(
-    "hr" to "Your latest reading from the ring, in beats per minute. The ring samples every 5 minutes while worn; the " +
-        "line is the last 24 hours. Resting adults are usually around 50 to 80.",
-    "hrv" to "Heart rate variability, the beat-to-beat variation in milliseconds, measured every 30 minutes. Higher " +
-        "usually means better recovery. Compare it with your own baseline, not with other people.",
-    "spo2" to "Blood oxygen saturation, measured hourly during sleep. 95 to 100 percent is normal. A single low reading " +
-        "usually means a loose ring, not a problem.",
-    "battery" to "Charge left in the ring. You get a reminder below 15 percent.",
-)
 private const val SCORE_SCALE = "80 or more is good, 60–79 fair, below 60 low. A contributor shows “—” until " +
     "there is enough data; the score uses the ones available. Scores are estimates from your ring, compared " +
     "with your own history, not medical advice. Tap a row for details."
@@ -267,8 +257,6 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
     var insights by remember { mutableStateOf<JsonObject?>(null) }
     var exp by remember { mutableStateOf<JsonObject?>(null) } // `/experiments.active`
     var testing by remember { mutableStateOf(false) }
-    var hr by remember { mutableStateOf<List<Double>>(emptyList()) }
-    var hrv by remember { mutableStateOf<List<Double>>(emptyList()) }
     var hold by remember { mutableStateOf<Hold?>(null) }
     var holdGone by remember { mutableStateOf(ctx.holdDismissed) }
     var reply by remember { mutableStateOf<String?>(null) } // the feeling the NowCard answers
@@ -302,8 +290,6 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
         }
         Api.insights(ctx).obj()?.let { insights = it["kinds"].obj() }
         Api.experiments(ctx).obj()?.let { exp = it["active"].obj() }
-        (Api.hr(ctx, 24).obj()?.get("points") as? JsonArray)?.let { a -> hr = a.mapNotNull { it.obj()?.get("bpm").num() } }
-        (Api.trends(ctx, "hrv", 14).obj()?.get("points") as? JsonArray)?.let { a -> hrv = a.mapNotNull { it.obj()?.get("value").num() } }
     }
     LaunchedEffect(Unit) { load() }
     // Guess first: both routes answer with the new /today. [widget]: its stored snapshot follows, so it stops saying "Guess first" at once.
@@ -319,37 +305,31 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
         scope.launch { refreshing = true; try { load() } finally { refreshing = false } }
     }) {
         val d = data ?: return@LargeTitleScaffold
+        // Until the 14-day baseline is full (backend "learning" ends at 5 days, when baselines start).
+        val n = d["baseline_days"].str()?.substringBefore('/')?.toIntOrNull() ?: 0
         item {
             val h = LocalTime.now().hour
             Column(Modifier.padding(start = AppSpace.xs)) {
                 Text(if (h in 5..11) "Good morning" else if (h in 12..17) "Good afternoon" else "Good evening", style = AppType.subhead, color = c.secondaryLabel)
                 Text(LocalDate.now().format(DateTimeFormatter.ofPattern("EEEE d MMMM", Locale.getDefault())), style = AppType.headline)
-                d["wear"].obj()?.get("off_since").num()?.let { Text("Ring off since ${clock(it)}", style = AppType.subhead, color = c.secondaryLabel) }
+                val off = d["wear"].obj()?.get("off_since").num()
+                val status = if (off != null) "Ring off since ${clock(off)}" else if (n < 14) "Day $n of 14 · learning your normal" else null
+                status?.let { Text(it, style = AppType.subhead, color = c.secondaryLabel) }
             }
         }
         // Not while the guess is pending: the verdict word would give the answer away.
         report?.takeIf { d["guess"].obj()?.get("pending").str() != "true" }?.let { r -> item { ReportCardView(r, Modifier.hero(), onReports) } }
         val day = d["date"].str().orEmpty() // the server's day, never the phone's clock
-        item { RightNow(day, d["now"].obj()?.get("mood").obj(), scope, { reply = it }) { Api.today(ctx).obj()?.let { data = it } } }
-        reply?.let { f -> item { NowCard(f, d, { text -> scope.launch { answered(Api.putNote(ctx, "now_$f", text), false) } }, onBreathe) { reply = null } } }
-        // Ring until the 14-day baseline is full (backend "learning" ends at 5 days, when baselines start).
-        val n = d["baseline_days"].str()?.substringBefore('/')?.toIntOrNull() ?: 0
-        if (n < 14) item {
-            InsetCard {
-                Row(Modifier.padding(AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
-                    ScoreRing(n / 14f, c.tint, Modifier.size(56.dp), stroke = 7.dp) { Text("$n", style = AppType.headline) }
-                    Column(Modifier.padding(start = AppSpace.l)) {
-                        Text("Day $n of 14", style = AppType.headline)
-                        Text("Learning your normal. Scores settle once there are 14 days.", style = AppType.subhead, color = c.secondaryLabel)
-                    }
-                }
-            }
+        fun androidx.compose.foundation.lazy.LazyListScope.rightNow() {
+            item { RightNow(day, d["now"].obj()?.get("mood").obj(), scope, { reply = it }) { Api.today(ctx).obj()?.let { data = it } } }
+            reply?.let { f -> item { NowCard(f, d, { text -> scope.launch { answered(Api.putNote(ctx, "now_$f", text), false) } }, onBreathe) { reply = null } } }
         }
         val guess = d["guess"].obj()
         val calm = d["calm"].str() == "true"
-        // Gate: nothing below is composed until the guess is in, so no ring, tint or coach line gives the answer away.
+        // Gate: nothing but Right now is composed until the guess is in, so no ring, tint or coach line gives the answer away.
         if (guess?.get("pending").str() == "true") {
             item { GuessCard(calm) { v -> scope.launch { answered(Api.guess(ctx, day, v), true) } } }
+            rightNow()
             return@LargeTitleScaffold
         }
         val said = guess?.get("value").num()?.roundToInt()
@@ -386,6 +366,9 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
                 ScoreDetails("readiness", "Readiness", c.readiness, d, open == "readiness", medStarted)
             }
         }
+        item {
+            InsetCard { SmallRings(d, open?.takeIf { it == "sleep" || it == "activity" }, { open = it }, medStarted) }
+        }
         hold?.takeIf { holdGone != day }?.let { h -> item { HoldCard(h) { ctx.holdDismissed = day; holdGone = day } } }
         // Evening verdict: which band the day turned out to be (0 / 1 / 2), asked once.
         if (said != null && guess?.get("verdict").num() == null && LocalTime.now().hour >= 18) item {
@@ -405,10 +388,6 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
                 }
             }
         }
-        item {
-            InsetCard { SmallRings(d, open?.takeIf { it == "sleep" || it == "activity" }, { open = it }, medStarted) }
-        }
-        d["cardio"].obj()?.let { item { CardioLoad(it) } }
         val tonight = d["tonight"].obj()
         val plan = tonight?.get("plan").obj()
         if (LocalTime.now().hour >= 18 && tonight != null && plan != null) item { TonightCard(plan, tonight["bedtime"].obj(), tonight["wind_down_usual"].num(), tonight["what_if"].obj(), becauseEntries(d, "today").mapNotNull(::tonightLine)) }
@@ -431,42 +410,7 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
         d["last_time"].obj()?.takeIf { (it["nights"].num() ?: 0.0) > 0 || it["before"].obj() != null || it["price"].obj()?.get("status").str() == "ok" || it["note"].str() != null }?.let { lt ->
             item { LastTimeCard(lt) { text -> scope.launch { answered(Api.putNote(ctx, lt["key"].str().orEmpty(), text), false) } } }
         }
-        item {
-            val v = d["vitals"].obj()
-            val tiles = listOf("Heart rate" to ("hr" to "bpm"), "HRV" to ("hrv" to "ms"), "SpO₂ · latest" to ("spo2" to "%"), "Ring battery" to ("battery" to "%"))
-            var expanded by remember { mutableStateOf<String?>(null) }
-            // Ring off: hr / hrv / spo2 only come in (> 0) while worn, so their latest is from before off_since; battery stays fresh.
-            val ringOff = d["wear"].obj()?.get("off_since").num() != null
-            Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                Text("Vitals", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-                tiles.chunked(2).forEach { pair ->
-                    Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                        pair.forEach { (label, m) ->
-                            val off = ringOff && m.first != "battery"
-                            val x = v?.get(m.first).num()?.takeUnless { off }
-                            InsetCard(Modifier.weight(1f).fillMaxHeight()) {
-                                Column(Modifier.fillMaxSize().clickable { expanded = if (expanded == m.first) null else m.first }.padding(AppSpace.l)) {
-                                    Text(label, style = AppType.footnote, color = c.secondaryLabel)
-                                    Row(verticalAlignment = Alignment.Bottom) {
-                                        if (off) Text("Ring off", style = AppType.title, color = c.secondaryLabel)
-                                        else Text(x?.roundToInt()?.toString() ?: "—", style = AppType.title)
-                                        if (x != null) Text(" ${m.second}", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(bottom = 3.dp))
-                                    }
-                                    val line = if (m.first == "hr") hr else if (m.first == "hrv") hrv else emptyList()
-                                    if (line.size > 1) Sparkline(line, if (m.first == "hr") c.heart else c.hrv, Modifier.padding(top = AppSpace.s).fillMaxWidth().height(40.dp))
-                                    AnimatedVisibility(expanded == m.first) {
-                                        Text(VITALS_INFO[m.first].orEmpty(), style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s))
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                val w = d["wear"].obj()
-                val off = ((w?.get("awake_hours").num() ?: 0.0) - (w?.get("worn_hours").num() ?: 0.0)).roundToInt()
-                if (off >= 2) Text("Ring off for $off h today", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.xs))
-            }
-        }
+        rightNow()
         item { DaySoFar(d, journal.filter { it.date == day }, scope, { Api.today(ctx).obj()?.let { data = it } }) { sheet = true } }
         marks.forEach { t -> item { MarkCard(t, scope, ::loadMarks) } }
         exp?.let { x ->
@@ -652,7 +596,7 @@ private fun DaySoFar(d: JsonObject, today: List<Entry>, scope: CoroutineScope, r
                         facts.forEach { JournalChip(it.label()) }
                     }
                 }
-                TintButton("Add or fix the day", Modifier.padding(top = AppSpace.xs)) { onFix() }
+                TintButton("Edit day", Modifier.padding(top = AppSpace.xs)) { onFix() }
             }
         }
     }
@@ -960,75 +904,6 @@ private fun CalmArc(word: String, alpha: Float) {
     }
 }
 
-private val ZONES = listOf("Easy", "Light", "Moderate", "Hard", "Max")
-private val COACH = mapOf(
-    "recovered" to "Recovered — room for a bigger day.",
-    "steady" to "Steady — a normal day keeps you balanced.",
-    "easy" to "Take it easy — recovery first.",
-)
-
-/** `/today.cardio`: load against today's target, zone minutes; tap → five zone rows. */
-@Composable
-private fun CardioLoad(cd: JsonObject) {
-    val c = AppTheme.colors
-    var open by remember { mutableStateOf(false) }
-    val status = cd["status"].str()
-    val load = cd["load"].num()
-    val t = cd["target"].obj()
-    val lo = t?.get("lo").num()
-    val hi = t?.get("hi").num()
-    val minutes = (cd["minutes"] as? JsonArray)?.map { it.num()?.roundToInt() ?: 0 }
-    InsetCard {
-        Column(
-            Modifier.fillMaxWidth().clickable(enabled = status != "needs_age" && minutes != null) { open = !open }.padding(AppSpace.l),
-            verticalArrangement = Arrangement.spacedBy(AppSpace.s),
-        ) {
-            Text("Cardio load", style = AppType.footnote, color = c.secondaryLabel)
-            if (status == "needs_age") {
-                Text("Set your birth year in Settings to get heart-rate zones.", style = AppType.footnote, color = c.secondaryLabel)
-                return@Column
-            }
-            Row(verticalAlignment = Alignment.Bottom) {
-                if (load != null) CountUp(load.roundToInt(), AppType.title) else Text("—", style = AppType.title)
-                if (lo != null && hi != null) Text(" of ${lo.roundToInt()}–${hi.roundToInt()}", style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(bottom = 3.dp))
-            }
-            if (status == "learning") Text("Learning your usual load · ${cd["days"].num()?.roundToInt() ?: 0}/5 days", style = AppType.subhead, color = c.secondaryLabel)
-            if (lo != null && hi != null) {
-                val now = load ?: 0.0
-                val scale = maxOf(hi * 1.4, now * 1.1, 10.0)
-                Canvas(Modifier.fillMaxWidth().height(8.dp)) {
-                    val r = CornerRadius(size.height / 2)
-                    fun x(v: Double) = (size.width * v / scale).toFloat()
-                    drawRoundRect(c.secondaryLabel.copy(alpha = 0.12f), cornerRadius = r)
-                    drawRoundRect(c.activity.copy(alpha = 0.35f), Offset(x(lo), 0f), Size(x(hi) - x(lo), size.height), r)
-                    if (now > 0) drawRoundRect(Brush.horizontalGradient(listOf(c.activity, c.light(c.activity)), endX = x(now)), size = Size(x(now), size.height), cornerRadius = r)
-                    // Ticks keep the target visible where the fill covers the band.
-                    listOf(lo, hi).filter { it < now }.forEach { drawLine(c.label, Offset(x(it), 0f), Offset(x(it), size.height), 2.dp.toPx()) }
-                }
-                COACH[t?.get("band").str()]?.let { Text(it + if (now > hi) " You're past today's target." else "", style = AppType.subhead) }
-            }
-            if (minutes != null) Text("${minutes.sum()} min in heart-rate zones", style = AppType.footnote, color = c.secondaryLabel)
-        }
-        AnimatedVisibility(open && minutes != null) {
-            Column {
-                minutes.orEmpty().forEachIndexed { i, m ->
-                    Hairline(Modifier.padding(start = AppSpace.l))
-                    Row(Modifier.fillMaxWidth().padding(horizontal = AppSpace.l, vertical = AppSpace.m), verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(10.dp).clip(CircleShape).background(c.activity.copy(alpha = 0.35f + 0.1625f * i)))
-                        Text("Zone ${i + 1} · ${ZONES[i]}", style = AppType.body, modifier = Modifier.padding(start = AppSpace.s).weight(1f))
-                        Text(duration(m), style = AppType.body, color = c.secondaryLabel)
-                    }
-                }
-                Hairline(Modifier.padding(start = AppSpace.l))
-                Text(
-                    "Zones are estimated from your age and resting heart rate. Each 5 minutes adds half its zone number to the load.",
-                    style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l, vertical = AppSpace.m),
-                )
-            }
-        }
-    }
-}
-
 // Readiness contributors in words (app twin of backend notify.WORDS), said when that contributor is the lowest.
 private val LOW_WORDS = mapOf(
     "resting_hr" to "Your resting heart rate is higher than usual.",
@@ -1045,23 +920,6 @@ private fun coachLine(score: Int, contributors: JsonObject?): String {
     val band = if (score >= 80) "Well recovered. A good day to push." else if (score >= 60) "Recovered enough. Keep it steady." else "Take it easy today."
     val low = contributors?.mapNotNull { (k, v) -> v.num()?.let { k to it } }?.minByOrNull { it.second }?.takeIf { it.second < 80 }
     return listOfNotNull(band, low?.let { LOW_WORDS[it.first] }).joinToString(" ")
-}
-
-/** Trend line (24 h HR, 14-day HRV) scaled to its own min..max. */
-@Composable
-private fun Sparkline(values: List<Double>, color: Color, modifier: Modifier) {
-    Canvas(modifier) {
-        val lo = values.min()
-        val span = (values.max() - lo).coerceAtLeast(1.0)
-        val w = 2.dp.toPx()
-        val path = Path()
-        values.forEachIndexed { i, v ->
-            val x = size.width * i / (values.size - 1)
-            val y = w + (size.height - 2 * w) * (1 - (v - lo) / span).toFloat()
-            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
-        }
-        drawPath(path, color, style = Stroke(w, cap = StrokeCap.Round, join = StrokeJoin.Round))
-    }
 }
 
 /** One journal row from `/journal`. */
