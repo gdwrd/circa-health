@@ -142,7 +142,10 @@ def _now(d: date) -> dict:
         dose_end = f"{total // 60:02d}:{total % 60:02d}"
     return {"dose": dose, "dose_end": dose_end,
             "still_h": scoring.still_hours(_hourly("biometric_steps", d), datetime.now(samples.tz()).hour),
-            "notes": {f: n for f in scoring.FEELINGS if (n := db.note(f"now_{f}"))}}
+            "notes": {f: n for f in scoring.NOW_NOTES if (n := db.note(f"now_{f}"))},
+            "mood": {m[5:]: next((v for v in reversed(samples.raw(m, samples.midnight(d), samples.midnight(d + timedelta(1)))
+                                                       .values()) if v <= 5), None)
+                     for m in ("mood_energy", "mood_valence")}}
 
 
 def _score_day(d: date) -> None:
@@ -471,7 +474,7 @@ def put_note(key: str, body: dict = Body(...)) -> dict:
     """A note to yourself for the next time `key` happens; empty text removes it. Returns /today."""
     text, kinds = body.get("text"), key.split("+")
     if not (key == "signals" or kinds == sorted(set(kinds)) and all(k in scoring.EXPLAIN for k in kinds)
-            or key.startswith("now_") and key[4:] in scoring.FEELINGS) \
+            or key.startswith("now_") and key[4:] in scoring.NOW_NOTES) \
             or not isinstance(text, str) or len(text) > 280:
         raise HTTPException(422, "bad key or text")
     db.set_note(key, text.strip(), int(time.time()))
@@ -874,6 +877,32 @@ def _bp_ok(v: object) -> bool:
 def list_journal(days: int = 30) -> dict:
     since = _today() - timedelta(min(max(days, 1), 365) - 1)
     return {"entries": db.journal(since.isoformat()), "kinds": list(db.KINDS)}
+
+
+@api.get("/mind")
+def mind(days: int = 90) -> dict:
+    """Per day, oldest first: the scales (see scoring.scale), feeling taps by kind, load tags, the dose in mg
+    (null until MH2); plus every questionnaire total in the range."""
+    end = _today()
+    start = end - timedelta(min(max(days, 1), 365) - 1)
+    lo, hi = samples.midnight(start), samples.midnight(end + timedelta(1))
+    by: dict[str, dict[date, dict[float, float]]] = {}
+    for m in scoring.SCALES + tuple(f"moment_{k}" for k in scoring.FEELINGS + scoring.OLD_FEELINGS):
+        for t, v in samples.raw(m, lo, hi).items():
+            by.setdefault(m, {}).setdefault(_dt(t).date(), {})[t] = v
+    load: dict[str, list[str]] = {}
+    for e in db.journal(start.isoformat()):
+        if e["kind"].startswith("load_"):
+            load.setdefault(e["date"], []).append(e["kind"])
+    out = []
+    for i in range((end - start).days + 1):
+        d = start + timedelta(i)
+        out.append({"date": d.isoformat()}
+                   | {m.split("_")[1]: scoring.scale(m, by.get(m, {}).get(d, {})) for m in scoring.SCALES}
+                   | {"feelings": {k[7:]: n for k, s in by.items() if k.startswith("moment_")
+                                   and (n := sum(v == 1 for v in s.get(d, {}).values()))},
+                      "load": sorted(load.get(d.isoformat(), [])), "mg": None})
+    return {"days": out, "phq": [{"ts": t, "total": v} for t, v in samples.raw("phq9_total", lo, hi).items()]}
 
 
 @api.post("/journal")

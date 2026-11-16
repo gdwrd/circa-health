@@ -986,7 +986,7 @@ def test_moments_derived_auto_rows_now_and_feeling_notes(tmp_path, monkeypatch) 
     with TestClient(app) as c:
         j = c.get("/today", headers=H).json()
         assert [x["kind"] for x in j["moments"]] == ["tired", "coffee", "meal"]  # ascending ts
-        assert set(j["now"]) == {"dose", "dose_end", "still_h", "notes"} and j["now"]["dose"] is None
+        assert set(j["now"]) == {"dose", "dose_end", "still_h", "notes", "mood"} and j["now"]["dose"] is None
         assert j["now"]["notes"] == {} and j["now"]["dose_end"] is None
         p = c.get(f"/today?date={d - timedelta(1)}", headers=H).json()
         assert p["now"] is None and p["moments"] == []  # now is today only
@@ -996,12 +996,13 @@ def test_moments_derived_auto_rows_now_and_feeling_notes(tmp_path, monkeypatch) 
         assert [x["kind"] for x in c.get("/today", headers=H).json()["moments"]] == ["tired", "coffee"]
         db.add_journal(d.isoformat(), "medication", "09:50", None, 1)
         db.add_journal(d.isoformat(), "medication", "07:10", None, 2)  # logged later, earlier clock time: 09:50 still wins
-        for k, text in (("now_tired", "Coffee too early."), ("now_flat", "x"), ("now_wired", "x"), ("now_good", "x")):
+        for k, text in (("now_tired", "Coffee too early."), ("now_low", "x"), ("now_wired", "x"), ("now_foggy", "x")):
             assert c.put(f"/notes/{k}", json={"text": text}, headers=H).status_code == 200, k
-        assert c.put("/notes/now_bogus", json={"text": "x"}, headers=H).status_code == 422
+        for k in ("now_bogus", "now_flat", "now_good"):  # the old flat / good no longer take a note
+            assert c.put(f"/notes/{k}", json={"text": "x"}, headers=H).status_code == 422, k
         j = c.get("/today", headers=H).json()["now"]
         assert (j["dose"], j["dose_end"], j["notes"]) == ("09:50", "17:50",
-            {"tired": "Coffee too early.", "flat": "x", "wired": "x", "good": "x"})
+            {"foggy": "x", "tired": "Coffee too early.", "wired": "x", "low": "x"})
 
 
 def seed_nights(d: date, on: set[int], later: bool = True, gap: bool = True) -> None:

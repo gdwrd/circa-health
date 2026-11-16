@@ -263,8 +263,18 @@ DIRS = {"rhr": 1, "hrv": -1, "awake": 1, "recovery": 1, "spo2": -1, "temp": 1}
 FLOORS = {"rhr": 1.5, "hrv": 5.0, "awake": 10.0, "recovery": 0.10, "spo2": 1.0}
 EXPLAIN = ("alcohol", "workout", "sick", "travel", "stress", "late_meal")
 
-MOMENTS = ("tired", "flat", "wired", "good", "coffee", "alcohol", "meal")
-FEELINGS = MOMENTS[:4]
+SCALES = ("mood_energy", "mood_valence", "rate_focus", "rate_appetite", "rate_crash")
+FEELINGS = ("overstimulated", "numb", "anxious", "irritable", "focused", "foggy")
+OLD_FEELINGS = ("tired", "flat", "wired", "good")  # no longer offered; still read for earlier days
+MOMENTS = FEELINGS + OLD_FEELINGS + ("coffee", "alcohol", "meal")
+NOW_NOTES = FEELINGS + ("tired", "wired", "low")  # tired / wired / low: the reply card for Energy 1-2 / 5, Mood 1-2
+
+
+def scale(metric: str, vals: dict[float, float]) -> float | None:
+    """A day's value of a scale from {ts: value}: the mean of its mood_ samples, the latest of a rating; values
+    above 5 (a 9 cancels a tap at the same second) are ignored."""
+    v = [x for _, x in sorted(vals.items()) if x <= 5]
+    return None if not v else round(mean(v), 2) if metric.startswith("mood_") else v[-1]
 
 
 def derived(moments: list[tuple[int, str]]) -> set[str]:

@@ -417,7 +417,7 @@ def timeline(session: dict | None, workouts: list[dict], moments: list[dict], do
     """The day's recorded events in time order: the night's end, workouts (the phone's moves included), moments, doses."""
     ev = [{"t": w["start"], "kind": w["kind"], "label": f"{w['kind'].capitalize()} · {_duration(w['minutes'])}"}
           for w in workouts]
-    ev += [{"t": m["ts"], "kind": m["kind"], "label": LABEL[m["kind"]]} for m in moments]
+    ev += [{"t": m["ts"], "kind": m["kind"], "label": LABEL.get(m["kind"], m["kind"].capitalize())} for m in moments]
     ev += [{"t": t, "kind": "dose", "label": LABEL["dose"]} for t in doses]  # shown only, never advised on
     if session and "end" in session:
         ev.append({"t": session["end"], "kind": "wake", "label": LABEL["wake"]})

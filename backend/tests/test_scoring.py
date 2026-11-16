@@ -221,7 +221,8 @@ def test_derived_caffeine_and_meal_boundaries() -> None:
     assert derived([(10, "alcohol")]) == {"alcohol"}
     assert derived([(600, "coffee"), (1259, "meal"), (840, "wired"), (840, "good")]) == set()  # wired/good derive nothing
     assert derived([]) == set()
-    assert (MOMENTS[:4], FEELINGS) == (FEELINGS, ("tired", "flat", "wired", "good"))
+    assert FEELINGS == ("overstimulated", "numb", "anxious", "irritable", "focused", "foggy")
+    assert MOMENTS[:10] == FEELINGS + ("tired", "flat", "wired", "good")  # the old four still read on earlier days
 
 
 def test_moves_merge_and_minimums() -> None:

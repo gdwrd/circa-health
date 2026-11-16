@@ -68,7 +68,8 @@ def backup() -> None:
             f.unlink()
 
 
-KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "sick", "travel", "stress", "medication", "bp", "note", "breathe", "phone_in_bed")
+KINDS = ("alcohol", "caffeine_late", "late_meal", "workout", "sick", "travel", "stress", "medication", "bp", "note", "breathe", "phone_in_bed",
+         "load_social", "load_sensory", "load_masking")
 TAG_ALIASES = {"caffeine": "caffeine_late"}
 
 
