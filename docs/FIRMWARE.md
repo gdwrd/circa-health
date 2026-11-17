@@ -193,6 +193,206 @@ but blank only in the emulator, and the ROM's own flash use (boot patch, `ftl_sa
 | `0x840000`..`0x84D000` | 52 KB | apparently free. Between the end of the stock app and the staging area; a larger patched app grows into it. |
 | `0x802000`..`0x824000` | 136 KB | apparently free in the emulator only. The ROM's own data (boot patch, image headers, `ftl_save` storage) is not modelled and could sit here; treat as taken until the ring shows otherwise. |
 
+## Motion log (FW8a design, not built)
+
+One 4-byte record per minute, kept in flash and fetched at sync, so the backend can label minutes (`docs/MOTION.md`)
+without the phone nearby. **The ring stores features, the backend applies the thresholds:** the ride against walk margin
+is nil, so thresholds will move, and they must move without reflashing. Integer arithmetic only (Cortex-M0+: 16-bit
+Thumb and `bl`, 32×32→32 multiply, no divide). Sources of every address: [F] this file, [P] `docs/PLAN11.md` § What we
+know, [S] `emu/patch_fw.py`.
+
+### Per sample (batch hook, FW8b)
+
+At the accelerometer batch hook (`0x82DE32` at the end of the batch read `0x82DBBC` [P]), for every sample of the batch
+FW6 walks, whatever the stream mode. A sample is three int16 LE, 10 bits left-justified [S]: `x = int16 asr 6`
+(−512..511, 1 unit = 8 mg; the recordings' mg values are exactly 8 × this). Per sample, in this order:
+
+| Step | Formula | Range |
+|---|---|---|
+| magnitude | `a = isqrt(x² + y² + z²)` | x²+y²+z² ≤ 786 432 (20 bits); a ≤ 886 |
+| jerk pair (skipped while `have_prev` is 0) | `B.jsum += |x−px| + |y−py| + |z−pz|` | ≤ 3069 a pair |
+| previous | `px, py, pz = x, y, z`; `have_prev = 1` | |
+| pointing sums | `B.sx += x`, `B.sy += y`, `B.sz += z`; `B.n += 1` | |
+| one-second window | `ws += a`; `wq += a·a`; `wk += 1` | ws ≤ 22 150, wq ≤ 19.6 M |
+| window full (`wk = 25`) | `d = 25·wq − ws·ws`; `B.vsum += d >> 2`; `B.done += 1`; `B.moving += 1` if `d > 24414`; `ws = wq = wk = 0` | 25·wq and ws² ≤ 491 M; 0 ≤ d ≤ 122.7 M |
+
+- `isqrt` is the digit-by-digit square root (floor), no divide: `r = 0; b = 1 << 30; while b > v: b >>= 2;` then
+  `while b: if v ≥ r + b: v −= r + b; r = (r >> 1) + b else r >>= 1; b >>= 2`. About 10 rounds for a sample, 16 for
+  the minute's `vsum`. It replaces sqrt exactly (floor), so the 50 mg still threshold stays: std(|a|) < 50 mg ⇔
+  `25·Q − S² < 625 · (50/8)² = 24414.06` ⇔ `d ≤ 24414`.
+- The window and the previous sample run on across minute closes and sampling gaps (only the batch hook touches them):
+  a window counts in the minute it completes, so a minute has 60 or 61; the first pair and window after the ring
+  resumes sampling span the gap (at most one of each per restart).
+- **Merge:** after the loop, `cpsid i`; if `M.n < 1700`, add every `B` field into `M`; `cpsie i`; zero `B`. The
+  1700-sample stop bounds `M` if the closer stalls (worst case 1782 samples, 72 windows: `vsum` ≤ 2.21 G, `jsum` ≤
+  5.47 M, `|sx|` ≤ 912 k, all inside u32 / i32).
+
+### Per minute (closer, FW8b; storage FW8c)
+
+The closer runs once a minute **in task context** (never in an interrupt), in the task that writes the stock history
+through `0x827072` [F], at the work the minute interrupt `0x82576E` [F] triggers there. FW8b finds that hook; if no such
+point runs every minute while the ring sits in tap-wait, FW8b stops and reports (design change, not an agent's choice).
+
+1. `c` = clock word `0x2087B0` [F] (seconds since 2000-01-01, local time, +60 in `0x82576E`). If `c = W.acc_clock`,
+   return.
+2. `cpsid i`; copy `M` (24 bytes) and zero it; `cpsie i`.
+3. `t = W.acc_clock`; `W.acc_clock = c`. If `t < 789 004 800` (2025-01-01: clock not set, or the first close after a
+   boot) return: no record.
+4. Build the record (below); `W.last = record`, `W.last_t = t` (FW8b's check reads these with `A1 10`).
+5. Store it (Flash, below). The record's minute is `t`: it holds the samples merged between the close at `t` and this one.
+
+A minute with no samples (the ring stayed in tap-wait) gives still 60, sampled 0, pointing 7, jerk 0, level 0:
+**unsampled seconds count as still**, and jerk and level divide by the full minute, so unsampled time adds zero.
+
+### Record (u32 LE, bit 0 = least significant)
+
+| Bits | Field | Value | Clamp |
+|---|---|---|---|
+| 0..5 | still seconds | `60 − min(M.moving, 60)` | 0..60; 63 never written (erased flash reads 63) |
+| 6..11 | sampled seconds | `min(M.done, 60)` (completed windows) | 0..60 |
+| 12..14 | pointing | `M.n = 0` → 7; else axis k with the largest `|M.s_k|` (ties: x before y before z), code `2k + (M.s_k < 0)`: 0 +x, 1 −x, 2 +y, 3 −y, 4 +z, 5 −z | 6 unused |
+| 15 | reserved | 0 | |
+| 16..23 | jerk, 16 mg/sample steps (floor) | `(M.jsum · 348) >> 20` (= jsum / 3013, i.e. 8 mg × jsum / 1505 pairs / 16) | 255 (4080 mg/sample); `jsum·348` ≤ 1.9 G |
+| 24..31 | level, 8 mg steps | `r = isqrt(M.vsum)`; `(r · 677) >> 16` (= r / 96.8 = rms of the 60 one-second std(|a|), in 8 mg) | 255 (2040 mg) |
+
+- **Level is not MOTION.md's spread.** Spread (std of |a| over the whole minute) needs `n·Σa² − (Σa)²`, 64-bit on this
+  core; level reuses the window sums already made for still seconds. On the recordings it spans the same ranges as
+  spread (table below). No rule uses either.
+- **Rhythm: not stored** (bit 15 only). Autocorrelation needs a 1506-sample buffer and about 44 k multiply-adds a minute
+  (MOTION.md), no rule uses rhythm, and a cheap stand-in is untested; a later format byte adds it if a rule ever needs it.
+- **Pointing uses the raw sums, no axis offsets**: one fewer step, and it then matches MOTION.md's measured pointing
+  column on all 66 minutes; taking the offsets (−17 / −98 / −132 mg) off flips 7 of 66 near-tie minutes (4 ride minutes
+  −x → +y). Pointing is only a hint; no rule uses it.
+
+FW8d emits, per record, at the minute `t` (local seconds since 2000-01-01 → epoch ms exactly as the app converts the
+`A1 0F` clock), labels dropped like every metric:
+
+| Metric | Value |
+|---|---|
+| `motion_level` | level × 8 (mg) |
+| `motion_jerk` | jerk × 16 (mg/sample, floor; MOTION.md's ride threshold 800 = jerk 50) |
+| `motion_still` | still seconds (0..60; MOTION.md's desk threshold 21) |
+| `motion_sampled` | sampled seconds (0..60) |
+| `motion_pose` | pointing 0..5; not emitted for 7 |
+| `motion_rhythm` | not emitted (no field) |
+
+Backend labels (FW8d): desk = `motion_still ≥ 21`, ride = not desk and `motion_jerk ≥ 800`, both from MOTION.md; a minute
+with `motion_sampled = 0` is "still (not sampled)", never desk (untested: MOTION.md's rules come from fully sampled
+recordings).
+
+**Sampling:** the log works with the stock wake-on-motion behaviour (sampling starts on the motion interrupt and stops at
+the tap-wait decision `0x82E802` [F, PLAN11 FW4] after about 5 s without real movement); it does **not** keep the
+accelerometer on. Added cost: about 150 cycles a sample while sampling, one 4-byte flash write a minute, 1.45 sector
+erases a day (estimates, not measured). Open risk: how much of a walk or ride the stock sampling covers is unknown;
+`motion_sampled` shows it on the ring. If rides log well under 60 sampled seconds, jerk (divided by the full minute)
+drops and the ride rule misses them; that would need a sampling change (an FW4-style veto), designed then, not now.
+
+### Flash area and pages
+
+Area `0x87D000`..`0x880000` [F, "Free space for FW8"]: 12 KB, three 4 KB sectors (`0x87D000`, `0x87E000`, `0x87F000`),
+48 pages of 256 bytes, page `p` at `0x87D000 + 256·p`, sector of page `p` = `p >> 4`. Never any other area (the stock
+history is `0x872000`..`0x87D000`). Gate for FW8c: before the log patch goes on the ring, the 12 KB are read on the
+ring with `A1 10` (1024 reads of 12 bytes) and must be all `0xFF`; if not, stop.
+
+| Page offset | Bytes | Content |
+|---|---|---|
+| `+0` | 1 | marker `0x4D`; `0xFF` = blank page |
+| `+1` | 3 | seq of slot 0 (u24 LE): the record index, +1 per record since the log began, never reset (wraps after 16.7 M records, 31 years) |
+| `+4` | 4 | `t` of slot 0 (u32 LE) |
+| `+8 + 4i` | 4 | record in slot i, i = 0..61; `0xFFFFFFFF` = not written yet |
+
+A page holds 62 consecutive minutes: slot i is minute `t0 + 60·i` and seq `seq0 + i`.
+
+**Writing** (closer, through `0x827072` [F]; erases through `0x82702C` [F]; both from the closer's task only).
+RAM `W`: `page`, `slot`, `page_t`, `next_seq`.
+
+- First store after a boot (`W.ready = 0`): scan the 48 headers (plain loads, flash is memory-mapped). Valid page =
+  marker `0x4D`. Newest = the valid page with the largest seq; its count = slots up to the first `0xFFFFFFFF`.
+  `next_seq` = newest seq + count; `page` = newest; `slot = 62` (a boot always starts a new page). No valid page:
+  `next_seq = 0`, `page = 47`. `ready = 1`.
+- Append: if `slot < 62` and `t = page_t + 60·slot`, write the 4 bytes at `+8 + 4·slot`; `slot += 1`.
+- Otherwise a new page `p = (page + 1) mod 48`: if `p` is the first page of its sector (`p & 15 = 0`), look at that
+  page's marker: `0x4D` → erase the sector (once a wrap); `0xFF` → no erase; anything else → `W.state = 1` (stopped: the
+  area holds data that is not ours) and nothing more is written until a restart. Then write header and slot 0 as **one
+  12-byte write** (so every valid page holds at least one record); `page = p`, `slot = 1`, `page_t = t`.
+- `next_seq += 1` after every written record.
+- A gap (ring off, reset, clock set, a missed close) breaks the minute run and starts a new page; the rest of the old
+  page stays blank.
+
+**Wrap and wear:** pages fill in order and wrap from 47 to 0; a sector is erased only when the writer enters it again,
+so each sector is erased once a wrap. Without gaps: a wrap is 48 × 62 = 2976 minutes (49.6 h); the area holds 1984 to
+2976 minutes (33.1 h right after an erase, 49.6 h just before), with 1.45 erases a day in all and 0.48 per sector a day
+(100 k cycles, a typical NOR rating, not this chip's datasheet: centuries). Every gap costs the rest of a page.
+**The phone must sync at least every 33 hours** to lose nothing. Across a wrap a reader sees the oldest 16 pages
+vanish at once: `A1 0E`'s oldest seq jumps, and a request for older records starts at the oldest kept one.
+
+**What survives a reset:** every record in flash. Lost: the minute being built and the window in progress (RAM is lost
+at every reset on the ring, FW16g), and minutes until the clock is valid again (step 3).
+
+### RAM (`0x20DD5C`..`0x20DDB4`, 88 bytes)
+
+Free patch RAM starts at `0x20DD5C` (above the crash block `0x20DD10`..`0x20DD5C`; FW16f's counters there left in
+ca0006) [F, Memory map]; the heap starts at `0x20EC00` [F]. The block is outside the `.bss` fill, so FW8b extends the FW16a
+boot hook to zero it.
+
+| Offset | Bytes | Field | Writer |
+|---|---|---|---|
+| `+0x00` | 2 + 2 + 2 | `px`, `py`, `pz` (i16) | batch hook |
+| `+0x06` | 1 + 1 | `have_prev`, `wk` | batch hook |
+| `+0x08` | 4 | `wq` | batch hook |
+| `+0x0C` | 2 + 2 | `ws`, spare | batch hook |
+| `+0x10` | 24 | `B`: `jsum` u32, `sx` `sy` `sz` i32, `vsum` u32, `n` u16, `done` u8, `moving` u8 | batch hook |
+| `+0x28` | 24 | `M`: same layout as `B` | batch hook (merge) and closer, each under `cpsid i` |
+| `+0x40` | 4 | `acc_clock` | closer |
+| `+0x44` | 4 | `next_seq` | closer |
+| `+0x48` | 4 | `page_t` | closer |
+| `+0x4C` | 1 + 1 + 1 + 1 | `page`, `slot`, `ready`, `state` (0 logging, 1 stopped) | closer |
+| `+0x50` | 4 + 4 | `last`, `last_t`: the newest record and its minute | closer |
+
+### Commands (`A1` sub-types 0D and 0E)
+
+Readers take everything from flash (the RAM `W` is the closer's alone): scan the 48 headers, count each valid page's
+records up to the first `0xFFFFFFFF`. All packets are 16 bytes, byte 15 the checksum (`0x827714` [P]), unused bytes 0.
+
+| Packet | Bytes |
+|---|---|
+| request `A1 0E` | `0` A1, `1` 0E |
+| reply `A1 0E` | `0` A1, `1` 0E, `2..5` oldest seq (u32 LE; the smallest valid page seq), `6..9` next seq (u32 LE; newest seq + its count, 0 if empty), `10` state (`W.state`) |
+| request `A1 0D` | `0` A1, `1` 0D, `2..5` from (u32 LE) |
+| reply, head | `0` A1, `1` 0D, `2` `0x80`, `3..6` seq of the first record sent, `7..10` its minute `t0 + 60·(seq − seq0)`, `11` n = records that follow (0..62) |
+| reply, data | `0` A1, `1` 0D, `2` k = 1..3, `3..14` k records, record j at `3 + 4j` (u32 LE, as stored) |
+| reply, busy | `0` A1, `1` 0D, `2` `0xFE` |
+
+`A1 0D <from>`: the page holding `from` (`seq0 ≤ from < seq0 + count`), or the oldest page if `from` is older than
+everything kept; the reply is one head and `ceil(n / 3)` data packets, from that record to the end of its page (at most
+22 packets). `from` ≥ next seq → head with n = 0. Busy when FW7a's room rule (`LIGHT_ROOM`, 16 packets waiting in the
+send ring `TX_RING` [S]) says no; the phone retries after 200 ms.
+
+Phone loop (FW8d): `A1 0E`; if next < the stored watermark (area wiped, other ring), the watermark becomes oldest; then
+`A1 0D <watermark>` until a head with n = 0, watermark = head seq + n after each. A head seq above the requested `from`
+means the records between were lost to a wrap. Each record's minute = head minute + 60·j for the j-th record after it.
+
+### Measured on the recordings
+
+A one-off Python copy of the integer steps above (scratch script, not in the repo) against `emu/motion_stats.py`, on
+the 66 whole minutes in `recordings/` (windows and previous sample carried across minutes within a file, as on the
+ring):
+
+| | desk (34) | ride (18) | walk (8) | other (6) |
+|---|---|---|---|---|
+| still seconds | 18–58 | 0–8 | 0–9 | 0–18 |
+| jerk × 16, mg/sample | 64–368 | 688–2192 | 272–784 | 368–496 |
+| level × 8, mg | 16–248 | 336–904 | 184–328 | 344–408 |
+| spread (float, MOTION.md) | 38–319 | 351–990 | 194–341 | 357–468 |
+| desk rule (still ≥ 21) | 33 | 0 | 0 | 0 |
+| ride rule (jerk ≥ 800) | 0 | 17 | 0 | 0 |
+
+- Same verdicts as MOTION.md on every minute. Still seconds differ from the float by −4..+3 (window phase: the ring's
+  windows do not start at the minute; with windows reset each minute the difference is −1 on 2 minutes, from the floor
+  in `isqrt`). Jerk is 0.5–16 mg below the float (floor to 16 mg). Level is −19.8..+5.9 mg from the float rms of
+  per-second std.
+- Largest values seen: `d` 35.4 M (bound 122.7 M), minute `jsum` 413 k (bound 5.47 M).
+
 ## Patched image
 
 `RY02_3.00.33_fullaccel.bin` (built by `emu/patch_fw.py`, 384 bytes added) reports itself as `RY02_3.00.33_ca<nnnn>` instead of `…_250117` (device information, version command, and the file's wrapper; `nnnn` is `VERSION` in `patch_fw.py`, a 4-digit build number from `ca0001`, which is the old `circaB`. Older builds were `…_circa<n>`: 1 = app v4.1.0; 2 = v4.2.0 and 3 = v4.2.1, which both crash the ring; 4 = v4.2.2, the first without long jumps; 5 = v4.2.3, taps found in the samples, hard taps only; 6 = normal taps). The chip is a Cortex-M0+: appended code may use 16-bit Thumb instructions and `bl` only. A far `b` assembles to `b.w`, which faults on the ring; `patch_fw.py` refuses to build it and the emulator runs as a Cortex-M0. It adds these ring-to-phone packets:
@@ -209,7 +409,7 @@ but blank only in the emulator, and the ROM's own flash use (boot patch, `ftl_sa
 | `A1 12 <count> <values>`, `A1 12 FF` | FW16e | answer to `A1 12 <reg lo> <reg hi> <count>`: `count` (1..6) 16-bit always-on (AON) registers `reg`, `reg+2`, …, each little-endian, read through the ROM's `btaon_fast_read_safe` (0x32F94). `FF` = refused: `reg` odd, count 0 or above 6, or a register past `0x1DE`. Read only. `0x1C0`..`0x1CA`: the watchdog latch (pc >> 1 lo/hi, lr lo/hi, psr lo/hi); `0x1CC`..`0x1D6`: the AON watchdog's; `0x14` high byte: the reset-reason byte ("AON 0x15"). Decode with `emu/ringprobe.py crash` (from ca0004). |
 | `A1 13 <selector>` | FW16g | answer to `A1 13 <n>` (sets the fault selector, below) and to `A1 13 FF` (reads it back): the selector now. `A1 13` with no argument sets 0 (packets are zero-padded). Lives in RAM: 0 after every restart. From ca0006. |
 
-Patch sub-types in use: 05, 07..0C, 0F, 10..13; 0D / 0E are kept for FW8c; free from 14.
+Patch sub-types in use: 05, 07..0C, 0F, 10..13; 0D / 0E are kept for FW8c (layout in "Motion log" above); free from 14.
 
 ## Memory map, faults and resets (FW16a)
 
