@@ -245,7 +245,7 @@ private fun JsonElement?.num() = (this as? JsonPrimitive)?.doubleOrNull
 fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? = null, onJournalOpened: () -> Unit = {}, onReports: () -> Unit = {}) {
     val haptic = LocalHapticFeedback.current
     if (backend != true) return PlaceholderTab("Today", backend)
-    // Breathe and the Settings gear both come from LargeTitleScaffold (via LocalOpenBreathe / LocalOpenSettings).
+    // The Settings gear comes from LargeTitleScaffold (via LocalOpenSettings); Breathe is on the reply card.
     val ctx = LocalContext.current
     var data by remember { mutableStateOf<JsonObject?>(null) }
     var open by remember { mutableStateOf<String?>(null) }
@@ -1116,7 +1116,7 @@ private fun DayForm(date: String, es: List<Entry>, medTime: String, medStarted: 
             Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
                 Text(if (i == 0) "Dose" else "Second dose", style = AppType.body, modifier = Modifier.weight(1f))
                 if (i > 0) Text(
-                    "Remove", style = AppType.subhead, color = c.activity,
+                    "Remove", style = AppType.subhead, color = c.badText,
                     modifier = Modifier.clip(AppShape.small).clickable { run { Api.deleteJournal(ctx, d.id) } }.padding(AppSpace.s),
                 )
                 Text(
@@ -1437,9 +1437,7 @@ private fun BodySignals(s: JsonObject, lastTime: JsonObject?, onNote: (String) -
     var how by remember { mutableStateOf(false) }
     val nights = s["nights"].num()?.roundToInt() ?: 0
     val level = listOf("calm", "elevated", "high").indexOf(s["level"].str())
-    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-        Text("Body signals", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-        InsetCard {
+    Section("Body signals") {
             Column(Modifier.fillMaxWidth().clickable { how = !how }.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
                 val steps = listOf(c.signalCalm, c.signalElevated, c.signalHigh)
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
@@ -1450,6 +1448,7 @@ private fun BodySignals(s: JsonObject, lastTime: JsonObject?, onNote: (String) -
                         listOf("Calm", "Elevated", "High")[level], style = AppType.footnote, fontWeight = FontWeight.SemiBold,
                         color = c.label, modifier = Modifier.padding(start = AppSpace.s),
                     )
+                    ExpandChevron(how)
                 }
                 Text(listOf("Your body looks like itself.", "Some signs of strain.", "Clear signs of strain.")[level], style = AppType.headline)
                 val deltas = s["deltas"].obj()
@@ -1478,7 +1477,6 @@ private fun BodySignals(s: JsonObject, lastTime: JsonObject?, onNote: (String) -
                 Hairline(Modifier.padding(start = AppSpace.l))
                 LastTimeCard(it, onNote)
             }
-        }
     }
 }
 
@@ -1501,7 +1499,7 @@ private fun LastTimeCard(lt: JsonObject, onNote: (String) -> Unit) {
     val after = "After " + join((lt["kinds"] as? JsonArray)?.mapNotNull { LOGGED[it.str()] }.orEmpty().ifEmpty { listOf("what you logged") })
     val dm = DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())
     val note = lt["note"].str()
-    Column(Modifier.fillMaxWidth().padding(start = AppSpace.l, top = AppSpace.l, end = AppSpace.l, bottom = AppSpace.s), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+    Column(Modifier.fillMaxWidth().padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
         if (n > 0 || expect > 0) Row(verticalAlignment = Alignment.CenterVertically) {
             WalkDown(
                 n, expect, ring = why != "signals", closed = why == "closed", modifier = Modifier.weight(1f),
@@ -1543,10 +1541,7 @@ private fun LastTimeCard(lt: JsonObject, onNote: (String) -> Unit) {
             Text(note, style = AppType.subhead, modifier = Modifier.padding(top = AppSpace.xs))
             Text("You wrote this last time.", style = AppType.footnote, color = c.secondaryLabel)
         }
-        Text(
-            if (note == null) "Leave a note for next time" else "Edit note", style = AppType.body, color = c.tint,
-            modifier = Modifier.clip(AppShape.small).clickable(role = Role.Button) { haptic.tick(); editing = true }.padding(vertical = AppSpace.s),
-        )
+        TintButton(if (note == null) "Leave a note for next time" else "Edit note", Modifier.padding(top = AppSpace.xs)) { haptic.tick(); editing = true }
     }
     if (editing) NoteDialog(note, { editing = false }, onNote)
 }
@@ -1746,9 +1741,7 @@ private fun RightNow(day: String, mood: JsonObject?, things: List<String>, scope
     val looks = feelingLooks()
     // Today's latest, or the dot just tapped until the reload answers.
     fun shown(scale: String, key: String) = just?.takeIf { it.kind == scale }?.v ?: mood?.get(key).num()?.roundToInt()
-    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-        Text("Right now", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-        InsetCard {
+    Section("Right now") {
             Column(Modifier.fillMaxWidth().padding(vertical = AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
                 Text("I feel", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l))
                 DotScale("Energy", "Flat", "Wired", c.energy, shown("energy", "energy"), { pick = "energy" to it }) { put("energy", nowMs(), it) }
@@ -1771,7 +1764,6 @@ private fun RightNow(day: String, mood: JsonObject?, things: List<String>, scope
                     }
                 }
             }
-        }
     }
     pick?.let { (k, v) ->
         TimePickDialog(LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm")), { pick = null }) { hhmm ->
@@ -1798,7 +1790,7 @@ private class Just(val kind: String, val ts: Long, val id: Int? = null, val v: I
 
 /** After a feeling tap: what the ring and the log say right now (`/today.drive`, `/today.now`), your own note for this feeling, Breathe. */
 @Composable
-private fun NowCard(feeling: String, d: JsonObject, onNote: (String) -> Unit, onBreathe: () -> Unit, onClose: () -> Unit) {
+internal fun NowCard(feeling: String, d: JsonObject, onNote: (String) -> Unit, onBreathe: () -> Unit, onClose: () -> Unit) {
     val c = AppTheme.colors
     val haptic = LocalHapticFeedback.current
     var editing by remember { mutableStateOf(false) }
@@ -1816,17 +1808,16 @@ private fun NowCard(feeling: String, d: JsonObject, onNote: (String) -> Unit, on
         Column(Modifier.fillMaxWidth().padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
             if (facts.isNotEmpty()) Text(facts, style = AppType.subhead, color = c.secondaryLabel)
             Text(if (note != null) "Last time you wrote: $note" else "What would help right now? Leave yourself a note for next time.", style = AppType.subhead)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(
-                    if (note == null) "Leave a note" else "Edit note", style = AppType.body, color = c.tint,
-                    modifier = Modifier.clip(AppShape.small).clickable(role = Role.Button) { haptic.tick(); editing = true }.padding(vertical = AppSpace.s),
-                )
-                Text(
-                    "Close", style = AppType.body, color = c.tint,
-                    modifier = Modifier.clip(AppShape.small).clickable(role = Role.Button) { haptic.tick(); onClose() }.padding(vertical = AppSpace.s),
-                )
+            Row(Modifier.padding(top = AppSpace.xs), horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                TintButton(if (note == null) "Leave a note" else "Edit note", Modifier.weight(1f)) { haptic.tick(); editing = true }
+                TintButton("Breathe", Modifier.weight(1f)) { haptic.tick(); onBreathe() }
             }
-            TintButton("Breathe") { haptic.tick(); onBreathe() }
+            // Dismissing the card is not an action on it: quiet text under the two buttons.
+            Text(
+                "Close", style = AppType.body, color = c.tint,
+                modifier = Modifier.align(Alignment.CenterHorizontally).clip(AppShape.small).clickable(role = Role.Button) { haptic.tick(); onClose() }
+                    .padding(horizontal = AppSpace.m, vertical = AppSpace.s),
+            )
         }
     }
     if (editing) NoteDialog(note, { editing = false }, onNote)

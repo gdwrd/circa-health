@@ -3,6 +3,7 @@ package com.nsheremet.circa.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -128,7 +129,9 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
             containerColor = AppTheme.colors.background,
             contentWindowInsets = WindowInsets(0),
             bottomBar = {
-                TabBar(route, Modifier.hazeChild(haze, AppTheme.bar)) { go(it) }
+                // Only the five tabs draw the bar; Reports, Breathe and Settings keep just the system bar's inset.
+                if (TabItem.entries.any { it.route == route }) TabBar(route, Modifier.hazeChild(haze, AppTheme.bar)) { go(it) }
+                else Spacer(Modifier.navigationBarsPadding())
             },
         ) { inner ->
             // Content runs under the tab bar so the bar can blur it; LargeTitleScaffold pads its list end by this.

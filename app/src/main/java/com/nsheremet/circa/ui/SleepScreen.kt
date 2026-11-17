@@ -230,21 +230,14 @@ fun SleepScreen(backend: Boolean?) {
                         )
                     }
                     if (edited) {
-                        Hairline(Modifier.padding(start = AppSpace.l))
-                        Text(
-                            "Use the ring's times", style = AppType.body, color = c.tint,
-                            modifier = Modifier.fillMaxWidth().clickable { scope.launch { if (Api.clearSleep(ctx, date) != null) load() } }.padding(AppSpace.l),
-                        )
+                        TintButton("Use the ring's times", Modifier.padding(start = AppSpace.l, end = AppSpace.l, bottom = AppSpace.l)) {
+                            scope.launch { if (Api.clearSleep(ctx, date) != null) load() }
+                        }
                     }
                 }
             }
             shifted?.let { j -> item { BodyClock(j) } }
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                    Text("Stages", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-                    InsetCard { Hypnogram(segments(d["stages"] as? JsonArray, endS), startS, endS, hr, d["hr_low"].obj()?.hrPt()) }
-                }
-            }
+            item { Section("Stages") { Hypnogram(segments(d["stages"] as? JsonArray, endS), startS, endS, hr, d["hr_low"].obj()?.hrPt()) } }
             item {
                 val light = (total - rem - deep).coerceAtLeast(0.0)
                 val stages = listOf(
@@ -253,8 +246,7 @@ fun SleepScreen(backend: Boolean?) {
                 )
                 var expanded by remember { mutableStateOf<String?>(null) }
                 Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                Text("Time in stages", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-                InsetCard {
+                Section("Time in stages") {
                     // One stacked bar of the night, then the list.
                     Row(Modifier.fillMaxWidth().padding(AppSpace.l).height(12.dp).clip(CircleShape), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                         stages.filter { it.second.first > 0 }.forEach { (_, v) -> Box(Modifier.weight(v.first.toFloat()).fillMaxHeight().background(v.second)) }
@@ -266,6 +258,7 @@ fun SleepScreen(backend: Boolean?) {
                                 Box(Modifier.size(10.dp).background(v.second, CircleShape))
                                 Text(name, style = AppType.body, modifier = Modifier.weight(1f).padding(start = AppSpace.m))
                                 Text(duration(v.first.roundToInt()), style = AppType.body, color = c.secondaryLabel)
+                                ExpandChevron(expanded == name, Modifier.padding(start = AppSpace.xs))
                             }
                             AnimatedVisibility(expanded == name) {
                                 Text(STAGE_INFO[name].orEmpty(), style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.xs))
@@ -281,15 +274,14 @@ fun SleepScreen(backend: Boolean?) {
             }
             if (d.containsKey("sleep_extra")) item { BloodOxygen(d["sleep_extra"].obj()?.get("spo2").obj(), date != LocalDate.now()) }
         }
-        item { Text("Your pattern", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs)) }
+        // A group label over Bedtime, Regularity and Last 7 nights: smaller than their titles so the two do not stack as equals.
+        item { Text("Your pattern", style = AppType.headline, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.xs)) }
         // The window is from today, not this night, so it shows on an empty night too.
         d["bedtime"].obj()?.let { b -> item { Bedtime(b, week, d["plan"].obj()) } }
         if (week.any { it.second != null }) item { Regularity(d["contributors"].obj()?.get("regularity").num(), week, d["sleep_extra"].obj()?.get("regularity").obj()) }
         val t = trend ?: return@LargeTitleScaffold
         item {
-            Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                Text("Last 7 nights", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-                InsetCard {
+                Section("Last 7 nights") {
                     Text(
                         "Hours asleep · goal $need h", style = AppType.footnote, color = c.secondaryLabel,
                         modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.l),
@@ -326,7 +318,6 @@ fun SleepScreen(backend: Boolean?) {
                         producer, 200.dp,
                     )
                 }
-            }
         }
     }
     if (editing) EditNight(data?.get("session").obj(), date, { editing = false }) { start, end ->
@@ -510,9 +501,7 @@ internal fun Regularity(score: Double?, week: List<Pair<LocalDate, JsonObject?>>
             }
     }
     if (!framed) return strip()
-    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-        Text("Regularity", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-        InsetCard {
+    Section("Regularity") {
             Text(
                 buildAnnotatedString {
                     withStyle(SpanStyle(fontWeight = AppType.headline.fontWeight)) { append("Regularity" + (score?.let { " ${it.roundToInt()}" } ?: "")) }
@@ -525,7 +514,6 @@ internal fun Regularity(score: Double?, week: List<Pair<LocalDate, JsonObject?>>
                 style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.xs, end = AppSpace.l),
             )
             strip()
-        }
     }
 }
 
@@ -565,9 +553,7 @@ internal fun Bedtime(b: JsonObject, week: List<Pair<LocalDate, JsonObject?>>, pl
                     }
     }
     if (!framed) { if (ok) strip(); return }
-    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-        Text("Bedtime", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-        InsetCard {
+    Section("Bedtime") {
             Column(Modifier.padding(AppSpace.l)) {
                 // The time is the headline: tonight's in-bed time, else the best window; the state is the small line.
                 val time = inBed?.let { noonClock(it) } ?: if (ok) "${noonClock(start!!)}–${noonClock(end!!)}" else null
@@ -584,7 +570,6 @@ internal fun Bedtime(b: JsonObject, week: List<Pair<LocalDate, JsonObject?>>, pl
                 if (time == null) Text(line, style = AppType.headline)
                 else Text(line, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s))
             }
-        }
     }
 }
 
@@ -658,9 +643,7 @@ private fun BodyClock(j: JsonObject) {
 @Composable
 private fun BloodOxygen(sp: JsonObject?, past: Boolean) {
     val c = AppTheme.colors
-    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-        Text("Blood oxygen", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-        InsetCard {
+    Section("Blood oxygen") {
             Column(Modifier.padding(AppSpace.l)) {
                 if (sp == null) Text("No SpO₂ ${if (past) "that" else "last"} night — the ring's periodic SpO₂ may be off.", style = AppType.subhead, color = c.secondaryLabel)
                 else {
@@ -677,7 +660,6 @@ private fun BloodOxygen(sp: JsonObject?, past: Boolean) {
                     }
                 }
             }
-        }
     }
 }
 

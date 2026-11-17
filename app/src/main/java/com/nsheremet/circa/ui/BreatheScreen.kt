@@ -182,7 +182,10 @@ fun BreatheScreen(onBack: () -> Unit) {
                         Text("In through the nose 4 s, hold 7 s, out through the mouth 8 s.", style = AppType.subhead, color = c.secondaryLabel, textAlign = TextAlign.Center)
                         PhaseBar()
                         Column(Modifier.fillMaxWidth().clickable { expanded = !expanded }, horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("What the evidence says", style = AppType.footnote, color = c.tint)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("What the evidence says", style = AppType.footnote, color = c.secondaryLabel)
+                                ExpandChevron(expanded)
+                            }
                             AnimatedVisibility(expanded) {
                                 Text(
                                     "Slow breathing lowers your heart rate and raises heart rate variability for a few minutes afterwards; " +
@@ -216,13 +219,7 @@ fun BreatheScreen(onBack: () -> Unit) {
             }
             RUNNING -> {
                 item { BreatheRunning(phase, left, circle.value, fill.value, round, rounds, samples, hrNote, light) }
-                item {
-                    InsetCard {
-                        Box(Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable(onClick = ::stop).padding(horizontal = AppSpace.l), contentAlignment = Alignment.CenterStart) {
-                            Text("Stop", style = AppType.body, color = c.tint)
-                        }
-                    }
-                }
+                item { TintButton("Stop", onClick = ::stop) }
             }
             else -> {
                 item {

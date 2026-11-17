@@ -442,7 +442,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
         "Ring" -> {
         item {
-            Section(null, "Each sync reads new data from the ring and pushes it to the server.") {
+            SettingsGroup(null, "Each sync reads new data from the ring and pushes it to the server.") {
                 ValueRow("Last sync", synced(lastSync))
                 Hairline(Modifier.padding(start = AppSpace.l))
                 ButtonRow("Sync now") {
@@ -461,7 +461,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             }
         }
         item {
-            Section(
+            SettingsGroup(
                 "Setup",
                 "Point the server at the backend (:8429). " +
                     "Android delays background sync while battery optimisation is on.\n\n" +
@@ -484,7 +484,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             }
         }
         item {
-            Section("Developer", "For troubleshooting.") {
+            SettingsGroup("Developer", "For troubleshooting.") {
                 ChevronRow("Sync log", "") { showLog = true }
                 Hairline(Modifier.padding(start = AppSpace.l))
                 ChevronRow("Ring lab", "") { showLab = true }
@@ -507,7 +507,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
         "You" -> {
         item {
-            Section(null, "Your birth year sets your maximum heart rate for cardio zones. Goals shape the Activity and Sleep scores.") {
+            SettingsGroup(null, "Your birth year sets your maximum heart rate for cardio zones. Goals shape the Activity and Sleep scores.") {
                 // Birth year is stored by the backend; without one there are no cardio zones.
                 if (med != null) {
                     FieldRow("Birth year", birth, "Not set", KeyboardType.Number) {
@@ -534,7 +534,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
         med?.let { s ->
             item {
-                Section(null, "Wake times set tonight's bedtime plan; weekends mean the nights before Saturday and Sunday.") {
+                SettingsGroup(null, "Wake times set tonight's bedtime plan; weekends mean the nights before Saturday and Sunday.") {
                     listOf("wake_weekday" to "Wake up · weekdays", "wake_weekend" to "Wake up · weekends").forEachIndexed { i, (k, title) ->
                         if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
                         ChevronRow(title, (s[k] as? JsonPrimitive)?.contentOrNull.orEmpty().ifEmpty { null }?.let(::clock) ?: "Off") { pickWake = k }
@@ -542,7 +542,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 }
             }
             item {
-                Section(null, "Calm mode: words instead of numbers. Numbers stay one tap away.") {
+                SettingsGroup(null, "Calm mode: words instead of numbers. Numbers stay one tap away.") {
                     key(patchFailed) {
                         SwitchRow("Calm mode", (s["calm"] as? JsonPrimitive)?.contentOrNull == "1") { on ->
                             haptic.tick()
@@ -552,7 +552,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 }
             }
             item {
-                Section(null, "Guess first: say how recovered you feel before the scores show.") {
+                SettingsGroup(null, "Guess first: say how recovered you feel before the scores show.") {
                     key(patchFailed) {
                         SwitchRow("Guess first", (s["guess"] as? JsonPrimitive)?.contentOrNull == "1") { on ->
                             haptic.tick()
@@ -562,13 +562,13 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 }
             }
             item {
-                Section("Workouts", "The ring can't tell cycling from a gym session — both show few steps. Pick what you do most; you can change any session on the Activity screen.") {
+                SettingsGroup("Workouts", "The ring can't tell cycling from a gym session — both show few steps. Pick what you do most; you can change any session on the Activity screen.") {
                     ChevronRow("Low-step sessions are", lowStepLabel((s["low_step_kind"] as? JsonPrimitive)?.contentOrNull)) { pickLowStep = true }
                 }
             }
         }
         item {
-            Section(null) {
+            SettingsGroup(null) {
                 ChevronRow("Right now tiles", "${INTAKES.count { it.first !in hiddenTiles }} on") { open("Right now tiles") }
             }
         }
@@ -576,7 +576,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         "Medication" -> med?.let { s ->
             val started = (s["medication_started"] as? JsonPrimitive)?.contentOrNull.orEmpty()
             item {
-                Section(null, "Used to mark doses on the Heart screen and to compare your heart rate with the days before you started.") {
+                SettingsGroup(null, "Used to mark doses on the Heart screen and to compare your heart rate with the days before you started.") {
                     key(patchFailed) {
                         SwitchRow("I take medication", started.isNotEmpty()) { on ->
                             patchMed("medication_started", JsonPrimitive(if (on) LocalDate.now().toString() else ""))
@@ -600,7 +600,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             }
             if (started.isNotEmpty()) item {
                 val steps = Api.doseSteps(s)
-                Section("Dose steps", "A day counts under the latest step on or before it. Body › Mind shows each step side by side.") {
+                SettingsGroup("Dose steps", "A day counts under the latest step on or before it. Body › Mind shows each step side by side.") {
                     val fmt = DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())
                     steps.forEach { st ->
                         Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(start = AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
@@ -622,7 +622,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
         "Mind" -> if (med != null) {
             item {
-                Section("Things to mark", "Name something that comes and goes: a migraine, an afternoon crash, heartburn. Tap it when it happens and " +
+                SettingsGroup("Things to mark", "Name something that comes and goes: a migraine, an afternoon crash, heartburn. Tap it when it happens and " +
                     "Circa shows what your body did the day before. Clear the name to stop; old marks are kept.") {
                     things.forEachIndexed { i, name ->
                         if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
@@ -634,7 +634,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 }
             }
             item {
-                Section("Questionnaire", "The PHQ-9: nine questions about the last two weeks. Stored only when all nine are answered.") {
+                SettingsGroup("Questionnaire", "The PHQ-9: nine questions about the last two weeks. Stored only when all nine are answered.") {
                     key(patchFailed) {
                         SwitchRow("Depression questionnaire every two weeks", (med?.get("phq") as? JsonPrimitive)?.contentOrNull == "1") { on ->
                             haptic.tick()
@@ -650,7 +650,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             val groups = NOTIFY_GROUPS.filter { med != null || it.first == "Day" }
             groups.forEachIndexed { gi, (header, kinds) ->
                 item {
-                    Section(
+                    SettingsGroup(
                         header,
                         if (gi < groups.lastIndex) null
                         else if (notifyGranted) "Notifications arrive with a sync, so they can run a few minutes late."
@@ -674,7 +674,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
         "Phone" -> {
         item {
-            Section(null, "Screen on/off times fix nights where you scrolled in bed. Only the times are sent." +
+            SettingsGroup(null, "Screen on/off times fix nights where you scrolled in bed. Only the times are sent." +
                 (if (phoneOn && !usageOk) " Allow Usage access for Circa to start. Greyed out? In App info, tap ⋮ › Allow restricted settings first." else "")) {
                 SwitchRow("Phone as sleep sensor", phoneOn) { on ->
                     if (on && ctx.lastScreenMs != 0L) ctx.lastScreenMs = System.currentTimeMillis()  // never send the time it was off
@@ -688,7 +688,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             }
         }
         item {
-            Section(null, "Hold my place shows where in a podcast or audiobook you fell asleep. Android calls the permission notification access; " +
+            SettingsGroup(null, "Hold my place shows where in a podcast or audiobook you fell asleep. Android calls the permission notification access; " +
                 "Circa only uses it to see what is playing and never reads your notifications." +
                 (if (holdOn && !listenOk) " Allow Notification access for Circa to start. Greyed out? In App info, tap ⋮ › Allow restricted settings first." else "")) {
                 SwitchRow("Hold my place", holdOn) { on ->
@@ -704,7 +704,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             }
         }
         item {
-            Section(null, "Notice rides and walks lets your phone tell Circa when you start and stop walking, running or cycling, and adds them to Activity. " +
+            SettingsGroup(null, "Notice rides and walks lets your phone tell Circa when you start and stop walking, running or cycling, and adds them to Activity. " +
                 "Android calls the permission physical activity; Circa never reads your location.") {
                 key(movesDenied) {
                     SwitchRow("Notice rides and walks", movesOn) { on ->
@@ -717,7 +717,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             }
         }
         item {
-            Section("Driving", "When your phone connects to this Bluetooth device, Circa checks last night's sleep and how long you have been awake, " +
+            SettingsGroup("Driving", "When your phone connects to this Bluetooth device, Circa checks last night's sleep and how long you have been awake, " +
                 "and warns once if you are short. It never says you are fine to drive. It needs the ring on since you woke up.") {
                 ChevronRow("Car", car.ifEmpty { "None" }) {
                     haptic.tick()
@@ -736,7 +736,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
         "Right now tiles" -> {
         item {
-            Section(null, "The \"I just had\" tiles on Today. A hidden tile keeps what it already logged.") {
+            SettingsGroup(null, "The \"I just had\" tiles on Today. A hidden tile keeps what it already logged.") {
                 INTAKES.forEachIndexed { i, (kind, label, _) ->
                     if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
                     SwitchRow(label, kind !in hiddenTiles) { on ->
@@ -750,7 +750,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
         "Reports" -> {
         item {
-            Section(null, "Circa can write each report card as a short note, on this phone, with an open model (Gemma 4). " +
+            SettingsGroup(null, "Circa can write each report card as a short note, on this phone, with an open model (Gemma 4). " +
                 "Nothing you write or measure leaves the phone for it. Without the model the cards show their plain text.") {
                 SwitchRow("Write reports", writerOn) { on ->
                     haptic.tick()
@@ -766,7 +766,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
         "Data" -> med?.let { s ->
         item {
-            Section(null, "The last 90 days as a one-page PDF or a spreadsheet file. Estimates from a consumer ring, not medical measurements.") {
+            SettingsGroup(null, "The last 90 days as a one-page PDF or a spreadsheet file. Estimates from a consumer ring, not medical measurements.") {
                 ButtonRow("Share report", enabled = !sharing) {
                     share("circa-report.pdf", "application/pdf") { Api.exportCsv(ctx)?.let { csv -> { f: File -> writeReport(ctx, csv, f) } } }
                 }
@@ -779,7 +779,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         // MH6: shown once there is a dose step.
         Api.doseSteps(s).firstOrNull()?.let { first ->
             item {
-                Section(null, "Dose steps, averages by dose, blood pressure by step and the last 14 days of mood on one page, for your prescriber.") {
+                SettingsGroup(null, "Dose steps, averages by dose, blood pressure by step and the last 14 days of mood on one page, for your prescriber.") {
                     ButtonRow("Titration summary (PDF)", enabled = !sharing) {
                         share("circa-titration.pdf", "application/pdf") { loadTitration(ctx, s, first) }
                     }
@@ -1290,7 +1290,7 @@ private fun SyncLogScreen(onBack: () -> Unit) {
 // ── iOS grouped-list pieces ────────────────────────────────────────────────
 
 @Composable
-internal fun Section(header: String?, footer: String? = null, rows: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
+internal fun SettingsGroup(header: String?, footer: String? = null, rows: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
     Column {
         // null: the page's large title already names it.
         if (header != null) Text(

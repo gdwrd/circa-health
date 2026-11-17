@@ -23,7 +23,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -201,7 +204,7 @@ private fun WhatAffectsYou(kinds: List<Pair<String, JsonObject>>, onTest: (() ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(name, style = AppType.headline)
                         Text(" · $nWith ${if (kind == "sick") "days" else "nights"}", style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.weight(1f))
-                        Text(if (open) "Less" else "More", style = AppType.footnote, color = c.tint)
+                        ExpandChevron(open)
                     }
                     stress?.invoke()
                     lead?.invoke()
@@ -230,9 +233,12 @@ private fun WhatAffectsYou(kinds: List<Pair<String, JsonObject>>, onTest: (() ->
             }
             if (onTest != null) {
                 if (rows.isNotEmpty()) Hairline(Modifier.padding(start = AppSpace.l))
-                Column(Modifier.fillMaxWidth().clickable(role = Role.Button) { haptic.tick(); onTest() }.padding(AppSpace.l)) {
-                    Text("Test it yourself", style = AppType.body, color = c.tint)
-                    Text("Try one habit for 14 days and see what changes.", style = AppType.footnote, color = c.secondaryLabel)
+                Row(Modifier.fillMaxWidth().clickable(role = Role.Button) { haptic.tick(); onTest() }.padding(AppSpace.l), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Test it yourself", style = AppType.body)
+                        Text("Try one habit for 14 days and see what changes.", style = AppType.footnote, color = c.secondaryLabel)
+                    }
+                    Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = c.secondaryLabel)
                 }
             }
         }

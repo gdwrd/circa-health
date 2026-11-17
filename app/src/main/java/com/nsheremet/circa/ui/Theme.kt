@@ -8,6 +8,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -40,7 +41,6 @@ import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.Settings as SettingsIcon
-import androidx.compose.material.icons.rounded.SelfImprovement
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.semantics.Role
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -338,7 +338,7 @@ val LocalBottomBar = compositionLocalOf { 0.dp }
 /** Opens Settings (App provides it); LargeTitleScaffold puts a gear on every screen without a back link. */
 val LocalOpenSettings = compositionLocalOf<(() -> Unit)?> { null }
 
-/** Opens Breathe (App provides it, only with the backend); LargeTitleScaffold puts a Breathe button on every screen without a back link. */
+/** Opens Breathe (App provides it, only with the backend); Stress and the "I feel…" reply card use it. */
 val LocalOpenBreathe = compositionLocalOf<(() -> Unit)?> { null }
 
 object AppTheme {
@@ -463,16 +463,10 @@ fun LargeTitleScaffold(
     val c = AppTheme.colors
     val haptic = LocalHapticFeedback.current
     val open = LocalOpenSettings.current.takeIf { back == null }
-    val breathe = LocalOpenBreathe.current.takeIf { back == null }
-    val action: (@Composable () -> Unit)? = if (open == null && breathe == null) action else ({
+    val action: (@Composable () -> Unit)? = if (open == null) action else ({
         Row(verticalAlignment = Alignment.CenterVertically) {
             action?.invoke()
-            breathe?.let { b ->
-                Box(Modifier.size(44.dp).clip(CircleShape).clickable(role = Role.Button) { haptic.tick(); b() }, contentAlignment = Alignment.Center) {
-                    Icon(Icons.Rounded.SelfImprovement, "Breathe", tint = c.tint, modifier = Modifier.size(24.dp))
-                }
-            }
-            open?.let { o ->
+            open.let { o ->
                 Box(Modifier.size(44.dp).clip(CircleShape).clickable(role = Role.Button) { haptic.tick(); o() }, contentAlignment = Alignment.Center) {
                     Icon(Icons.Rounded.SettingsIcon, "Settings", tint = c.tint, modifier = Modifier.size(24.dp))
                 }
@@ -628,6 +622,16 @@ internal fun TintButton(text: String, modifier: Modifier = Modifier, onClick: ()
     Text(
         text, style = AppType.headline, color = c.tint, textAlign = TextAlign.Center,
         modifier = modifier.fillMaxWidth().clip(AppShape.small).background(c.tint.copy(alpha = 0.12f)).clickable(onClick = onClick).padding(vertical = AppSpace.m),
+    )
+}
+
+/** Small chevron at the end of a row that expands: points right, turns down while [open]. */
+@Composable
+internal fun ExpandChevron(open: Boolean, modifier: Modifier = Modifier) {
+    val turn by animateFloatAsState(if (open) 90f else 0f, if (LocalReduceMotion.current) snap() else spring(), label = "chevron")
+    Icon(
+        Icons.AutoMirrored.Rounded.KeyboardArrowRight, if (open) "Collapse" else "Expand", tint = AppTheme.colors.secondaryLabel,
+        modifier = modifier.size(20.dp).graphicsLayer { rotationZ = turn },
     )
 }
 

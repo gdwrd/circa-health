@@ -379,7 +379,10 @@ private fun CardioLoad(cd: JsonObject, today: Boolean) {
             Modifier.fillMaxWidth().clickable(enabled = status != "needs_age" && minutes != null) { open = !open }.padding(AppSpace.l),
             verticalArrangement = Arrangement.spacedBy(AppSpace.s),
         ) {
-            Text("Cardio load", style = AppType.footnote, color = c.secondaryLabel)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Cardio load", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.weight(1f))
+                if (status != "needs_age" && minutes != null) ExpandChevron(open)
+            }
             if (status == "needs_age") {
                 Text("Set your birth year in Settings to get heart-rate zones.", style = AppType.footnote, color = c.secondaryLabel)
                 return@Column

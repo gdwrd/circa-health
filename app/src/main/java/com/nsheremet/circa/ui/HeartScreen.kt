@@ -251,10 +251,7 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
         onDismissRequest = { measure = false }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = c.background, shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp),
     ) {
-        Column(Modifier.padding(horizontal = AppSpace.l).padding(bottom = AppSpace.xl), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
-            Text("Heart rate now", style = AppType.title)
-            InsetCard { MeasureNow() }
-        }
+        Box(Modifier.padding(horizontal = AppSpace.l).padding(bottom = AppSpace.xl)) { Section("Heart rate now") { MeasureNow() } }
     }
 }
 
@@ -310,12 +307,12 @@ private fun MeasureNow() {
         Text(status, style = AppType.subhead, color = c.secondaryLabel, textAlign = TextAlign.Center)
         Box(
             Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(AppShape.small)
-                .background(if (measuring) c.background else c.heart.copy(alpha = 0.12f))
+                .background(if (measuring) c.background else c.tint.copy(alpha = 0.12f))
                 .clickable(enabled = !measuring, onClick = ::start),
             contentAlignment = Alignment.Center,
         ) {
             Text(if (measuring) "Measuring…" else if (bpm != null) "Measure again" else "Measure now",
-                style = AppType.headline, color = if (measuring) c.secondaryLabel else c.heart)
+                style = AppType.headline, color = if (measuring) c.secondaryLabel else c.tint)
         }
     }
 }
@@ -355,9 +352,14 @@ private fun BreathingCard(breaths: List<JsonObject>) {
             val start = b["start"].num() ?: return@forEachIndexed
             val secs = ((b["end"].num() ?: start) - start).roundToInt()
             var open by remember(start) { mutableStateOf(false) }
+            val pts = (b["points"] as? JsonArray)?.mapNotNull { o -> o.obj()?.let { p -> p["t"].num()?.let { t -> p["bpm"].num()?.let { (t - start).roundToInt().toDouble() to it } } } }
+                ?.distinctBy { it.first }?.sortedBy { it.first }.orEmpty()
             if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
             Column(Modifier.fillMaxWidth().clickable { open = !open }.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
-                Text("${clock(start)} · ${b["rounds"].num()?.roundToInt() ?: 0} rounds · ${secs / 60}:%02d".format(secs % 60), style = AppType.body)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("${clock(start)} · ${b["rounds"].num()?.roundToInt() ?: 0} rounds · ${secs / 60}:%02d".format(secs % 60), style = AppType.body, modifier = Modifier.weight(1f))
+                    if (pts.isNotEmpty()) ExpandChevron(open)
+                }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(AppSpace.xs)) {
                     val hr0 = b["hr_start"].num()
                     val hr1 = b["hr_end"].num()
@@ -373,8 +375,6 @@ private fun BreathingCard(breaths: List<JsonObject>) {
                     }
                 }
             }
-            val pts = (b["points"] as? JsonArray)?.mapNotNull { o -> o.obj()?.let { p -> p["t"].num()?.let { t -> p["bpm"].num()?.let { (t - start).roundToInt().toDouble() to it } } } }
-                ?.distinctBy { it.first }?.sortedBy { it.first }.orEmpty()
             if (open && pts.isNotEmpty()) {
                 val byX = pts.toMap() // points are 5 s apart (backend step): label every 30 s
                 Chart(listOf(pts), c.breathe, true, 6, 0, height = 120.dp, marker = { x -> "${byX[x]?.roundToInt()} bpm · ${x.roundToInt()} s" }) { x -> "${x.roundToInt()} s" }

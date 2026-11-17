@@ -113,41 +113,12 @@ fun StressScreen(backend: Boolean?, header: @Composable () -> Unit) {
     LaunchedEffect(Unit) { Api.today(ctx).obj()?.let { today = it } }
 
     val c = AppTheme.colors
-    val openBreathe = LocalOpenBreathe.current
     LargeTitleScaffold("Body", refreshing = refreshing, onRefresh = {
         scope.launch { refreshing = true; try { load(); Api.today(ctx).obj()?.let { today = it } } finally { refreshing = false } }
     }) {
         item { Box(Modifier.padding(bottom = AppSpace.m)) { header() } }
         item { DayPicker(date) { date = it } }
-        today?.let { t -> item {
-            val level = (t["resilience"] as? JsonPrimitive)?.contentOrNull
-            val idx = LEVELS.indexOfFirst { it.first == level }
-            Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                Text("Resilience", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-                InsetCard {
-                    Row(Modifier.clickable { detail = true }, verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f).padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                        if (idx < 0) {
-                            Text(
-                                "Learning · ${(t["baseline_days"] as? JsonPrimitive)?.contentOrNull ?: "?"} days",
-                                style = AppType.headline,
-                            )
-                            Text("Resilience appears once 5 of the last 14 days have data.", style = AppType.subhead, color = c.secondaryLabel)
-                        } else {
-                            Text(LEVELS[idx].first.replaceFirstChar { it.uppercase() }, style = AppType.largeTitle)
-                            Capsules(idx)
-                            Text(LEVELS[idx].second, style = AppType.subhead, color = c.secondaryLabel)
-                        }
-                    }
-                    Icon(
-                        Icons.AutoMirrored.Rounded.KeyboardArrowRight, null,
-                        tint = c.secondaryLabel, modifier = Modifier.padding(end = AppSpace.m),
-                    )
-                    }
-                }
-                openBreathe?.let { open -> TintButton("Breathe") { open() } }
-            }
-        } }
+        today?.let { t -> item { Resilience(t) { detail = true } } }
         val d = data ?: return@LargeTitleScaffold
         val st = d["stress"].obj()
         val zones = listOf(
@@ -202,6 +173,39 @@ fun StressScreen(backend: Boolean?, header: @Composable () -> Unit) {
     }
 }
 
+/** `/today.resilience` (14-day, never follows the picker); a tap opens the detail; the Breathe button under it when Breathe can open. */
+@Composable
+internal fun Resilience(t: JsonObject, onDetail: () -> Unit) {
+    val c = AppTheme.colors
+    val openBreathe = LocalOpenBreathe.current
+    val level = (t["resilience"] as? JsonPrimitive)?.contentOrNull
+    val idx = LEVELS.indexOfFirst { it.first == level }
+    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+        Section("Resilience") {
+            Row(Modifier.clickable(onClick = onDetail), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f).padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+                    if (idx < 0) {
+                        Text(
+                            "Learning · ${(t["baseline_days"] as? JsonPrimitive)?.contentOrNull ?: "?"} days",
+                            style = AppType.headline,
+                        )
+                        Text("Resilience appears once 5 of the last 14 days have data.", style = AppType.subhead, color = c.secondaryLabel)
+                    } else {
+                        Text(LEVELS[idx].first.replaceFirstChar { it.uppercase() }, style = AppType.largeTitle)
+                        Capsules(idx)
+                        Text(LEVELS[idx].second, style = AppType.subhead, color = c.secondaryLabel)
+                    }
+                }
+                Icon(
+                    Icons.AutoMirrored.Rounded.KeyboardArrowRight, null,
+                    tint = c.secondaryLabel, modifier = Modifier.padding(end = AppSpace.m),
+                )
+            }
+        }
+        openBreathe?.let { open -> TintButton("Breathe") { open() } }
+    }
+}
+
 private fun zoneOf(v: Double) = if (v <= 25) 0 else if (v <= 50) 1 else if (v <= 75) 2 else 3
 
 /** 30-min stress columns across the day, each in its zone colour ([accent]: all in one). [framed] false: the chart alone (inside a report card). */
@@ -240,10 +244,7 @@ internal fun ThroughTheDay(samples: List<Pair<Int, Double>>, starts: List<Double
         )
     }
     if (!framed) return chart()
-    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-        Text("Through the day", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-        InsetCard { chart() }
-    }
+    Section("Through the day") { chart() }
 }
 
 /** Five capsules; the first idx+1 fill one after another (600 ms total), at once under reduce-motion. */
@@ -299,8 +300,7 @@ private fun ResilienceDetail(onBack: () -> Unit) {
         val ra = rv.average()
         item {
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-                Text("Contributors", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-                InsetCard {
+                Section("Contributors") {
                     Bar("Daytime stress (14-day avg)", String.format(Locale.US, "%.1f h", la), la / 8, c.zoneStressed)
                     Hairline(Modifier.padding(start = AppSpace.l))
                     Bar("Readiness (14-day avg)", ra.roundToInt().toString(), ra / 100, c.readiness)
@@ -381,8 +381,5 @@ internal fun MiniChart(
         )
     }
     if (title == null) return chart()
-    Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-        Text(title, style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
-        InsetCard { chart() }
-    }
+    Section(title) { chart() }
 }

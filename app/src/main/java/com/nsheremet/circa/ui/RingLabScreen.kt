@@ -180,7 +180,7 @@ internal fun RingLabScreen(onBack: () -> Unit) {
         back = { Text("‹ Settings", style = AppType.headline, color = c.tint, modifier = Modifier.clickable(enabled = !flashing) { recording?.cancel(); onBack() }.padding(start = AppSpace.xs, bottom = AppSpace.xs)) },
     ) {
         item {
-            Section(
+            SettingsGroup(
                 "Raw motion",
                 "Records every accelerometer sample (25 a second) to a file you can share. Needs the patched firmware; stock firmware sends one sample a second. " +
                     "Firmware before the no-gaps patch only samples while the ring thinks it is moving. Streaming drains the ring's battery fast.",
@@ -228,7 +228,7 @@ internal fun RingLabScreen(onBack: () -> Unit) {
             }
         }
         item {
-            Section(
+            SettingsGroup(
                 "Light",
                 "Records the optical sensor's samples to a file shared with the motion recordings. " +
                     "Runs a live heart rate measurement while recording, so the green light is on. Needs the patched firmware.",
@@ -242,7 +242,7 @@ internal fun RingLabScreen(onBack: () -> Unit) {
         }
         item {
             val f = file
-            Section(
+            SettingsGroup(
                 "Firmware",
                 "Installs an update file on the ring over Bluetooth. A file that is wrong for this ring, or modified code that fails to start, " +
                     "can leave the ring unusable with no way to repair it. Keep the ring on its charger and next to the phone until it restarts.",
