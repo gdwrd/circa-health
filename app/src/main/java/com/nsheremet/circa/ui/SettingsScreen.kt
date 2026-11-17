@@ -169,7 +169,7 @@ import kotlin.math.roundToInt
 
 @SuppressLint("MissingPermission")
 @Composable
-fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, backTo: String, onBack: () -> Unit) {
+fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, backTo: String, initialPage: String? = null, onBack: () -> Unit) {
     val ctx = LocalContext.current
     val activity = ctx as ComponentActivity
     val c = AppTheme.colors
@@ -328,7 +328,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     }
 
     // MH0: null is the root list of groups; a group's name opens its page (pages, not nav routes, as Sync log is).
-    var page by rememberSaveable { mutableStateOf<String?>(null) }
+    var page by rememberSaveable { mutableStateOf(initialPage) }
     fun up(p: String?) = if (p == "Right now tiles") "You" else null // the tiles page opens from You
     BackHandler(enabled = page != null) { page = up(page) }
 

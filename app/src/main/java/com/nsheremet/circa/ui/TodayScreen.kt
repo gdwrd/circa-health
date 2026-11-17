@@ -13,6 +13,9 @@ import androidx.compose.material.icons.rounded.ElectricBolt
 import androidx.compose.material.icons.rounded.Hotel
 import androidx.compose.material.icons.rounded.SmokingRooms
 import com.nsheremet.circa.Prefs.hiddenTiles
+import com.nsheremet.circa.Prefs.ringAddress
+import com.nsheremet.circa.Prefs.vmUrl
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.HorizontalRule
 import androidx.compose.material.icons.rounded.Medication
 import androidx.compose.material.icons.rounded.Restaurant
@@ -242,11 +245,18 @@ private fun JsonElement?.num() = (this as? JsonPrimitive)?.doubleOrNull
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? = null, onJournalOpened: () -> Unit = {}, onReports: () -> Unit = {}) {
+fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? = null, onJournalOpened: () -> Unit = {}, onSetup: (String) -> Unit = {}, onReports: () -> Unit = {}) {
     val haptic = LocalHapticFeedback.current
-    if (backend != true) return PlaceholderTab("Today", backend)
-    // The Settings gear comes from LargeTitleScaffold (via LocalOpenSettings); Breathe is on the reply card.
     val ctx = LocalContext.current
+    // First run: the setup card while the ring or the server is missing (Today recomposes on the way back from Settings).
+    val ringSet = !ctx.ringAddress.isNullOrBlank()
+    val serverSet = ctx.vmUrl.isNotBlank()
+    if (backend != true) {
+        if (ringSet && serverSet) return PlaceholderTab("Today", backend)
+        return LargeTitleScaffold("Today") { item { SetupCard(ringSet, serverSet, false, onSetup) } }
+    }
+    // The Settings gear comes from LargeTitleScaffold (via LocalOpenSettings); Breathe is on the reply card.
+    var birthSet by remember { mutableStateOf(false) } // About you: birth year is known only from the server's settings
     var data by remember { mutableStateOf<JsonObject?>(null) }
     var open by remember { mutableStateOf<String?>(null) }
     BackHandler(open != null) { open = null }
@@ -284,6 +294,7 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
         loadJournal()
         Api.settings(ctx)?.let { s ->
             s["medication_time"].str()?.let { medTime = it }; medStarted = s["medication_started"].str()
+            birthSet = !s["birth_year"].str().isNullOrBlank()
             val names = (1..3).map { s["mark_$it"].str().orEmpty() }
             things = names
             if (names != ctx.markNames) { ctx.markNames = names; MarkWidget().updateAll(ctx) }
@@ -303,6 +314,7 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
     LargeTitleScaffold("Today", refreshing = refreshing, onRefresh = {
         scope.launch { refreshing = true; try { load() } finally { refreshing = false } }
     }) {
+        if (!ringSet || !serverSet) item { SetupCard(ringSet, serverSet, birthSet, onSetup) }
         val d = data ?: return@LargeTitleScaffold
         // Until the 14-day baseline is full (backend "learning" ends at 5 days, when baselines start).
         val n = d["baseline_days"].str()?.substringBefore('/')?.toIntOrNull() ?: 0
@@ -447,6 +459,26 @@ fun TodayScreen(backend: Boolean?, onBreathe: () -> Unit, journalDate: String? =
         item { DaySoFar(d, journal.filter { it.date == day }, things, tapped, scope, { Api.today(ctx).obj()?.let { data = it } }) { sheet = true } }
     }
     if (sheet) CheckInSheet(journal, medTime, medStarted, scope, sheetDay, data, ::loadJournal) { sheet = false; sheetDay = null }
+}
+
+/** First run: three rows into Settings ([onOpen] gets the page name); a done row shows a tick in place of its chevron and stays tappable. */
+@Composable
+private fun SetupCard(ring: Boolean, server: Boolean, you: Boolean, onOpen: (String) -> Unit) {
+    val c = AppTheme.colors
+    val haptic = LocalHapticFeedback.current
+    Section("Set up Circa") {
+        listOf(Triple("Find your ring", ring, "Ring"), Triple("Connect the server", server, "Ring"), Triple("About you", you, "You")).forEachIndexed { i, (label, done, page) ->
+            if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
+            Row(
+                Modifier.fillMaxWidth().clickable(role = Role.Button) { haptic.tick(); onOpen(page) }.padding(AppSpace.l),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(label, style = AppType.body, modifier = Modifier.weight(1f))
+                if (done) Icon(Icons.Rounded.CheckCircle, "Done", tint = c.readiness)
+                else Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = c.secondaryLabel)
+            }
+        }
+    }
 }
 
 /** One Day so far line; [color] null = a quiet intake (rounded square), else a disc in that colour, as the Right now tiles. [onTap] null = not tappable. */

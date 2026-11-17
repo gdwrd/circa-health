@@ -128,6 +128,7 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
         val haze = remember { HazeState() }
         // One day for Sleep, Activity and Body; a cold start begins at today. Reports and Trends keep their own.
         var date by rememberSaveable { mutableStateOf(LocalDate.now()) }
+        var settingsPage by remember { mutableStateOf<String?>(null) } // the page Settings opens on: Today's setup rows set it, the gear clears it
 
         Scaffold(
             containerColor = AppTheme.colors.background,
@@ -141,14 +142,16 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
             // Content runs under the tab bar so the bar can blur it; LargeTitleScaffold pads its list end by this.
             CompositionLocalProvider(
                 LocalBottomBar provides inner.calculateBottomPadding(),
-                LocalOpenSettings provides { nav.navigate("settings") { launchSingleTop = true } },
+                LocalOpenSettings provides { settingsPage = null; nav.navigate("settings") { launchSingleTop = true } },
                 LocalOpenBreathe provides (if (backend == true) ({ nav.navigate("breathe") { launchSingleTop = true } }) else null),
             ) {
             SharedTransitionLayout { CompositionLocalProvider(LocalShared provides this) {
             NavHost(nav, startDestination = TabItem.Today.route, modifier = Modifier.haze(haze)) {
                 composable(TabItem.Today.route) {
                     CompositionLocalProvider(LocalNavScope provides this) {
-                        TodayScreen(backend, { nav.navigate("breathe") }, journalDate, onLinkHandled) { nav.navigate("reports") { launchSingleTop = true } }
+                        TodayScreen(backend, { nav.navigate("breathe") }, journalDate, onLinkHandled, { settingsPage = it; nav.navigate("settings") { launchSingleTop = true } }) {
+                            nav.navigate("reports") { launchSingleTop = true }
+                        }
                     }
                 }
                 composable("reports") { CompositionLocalProvider(LocalNavScope provides this) { ReportScreen(backend) { nav.popBackStack() } } }
@@ -160,7 +163,7 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
                 composable("settings") {
                     val prev = nav.previousBackStackEntry?.destination?.route
                     val from = TabItem.entries.firstOrNull { it.route == prev }?.label ?: if (prev == "reports") "Reports" else "Today"
-                    SettingsScreen(hasPermissions, requestPermissions, from) { nav.popBackStack() }
+                    SettingsScreen(hasPermissions, requestPermissions, from, settingsPage) { nav.popBackStack() }
                 }
             }
             } }
