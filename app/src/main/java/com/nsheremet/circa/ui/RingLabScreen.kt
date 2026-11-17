@@ -93,7 +93,8 @@ internal fun RingLabScreen(onBack: () -> Unit) {
     var flashNote by remember { mutableStateOf("") }
 
     val busy = recording != null || lightJob != null || flashing || checking
-    BackHandler { if (!flashing) { recording?.cancel(); lightJob?.cancel(); onBack() } } // leaving mid-update would hide its result
+    // leaving mid-update would hide its result; a stray touch in a pocket must not end a recording (Stop does)
+    BackHandler { if (!flashing && recording == null && lightJob == null) onBack() }
     val view = LocalView.current
     DisposableEffect(busy) { view.keepScreenOn = busy; onDispose { view.keepScreenOn = false } }
 
@@ -177,7 +178,7 @@ internal fun RingLabScreen(onBack: () -> Unit) {
 
     LargeTitleScaffold(
         "Ring lab",
-        back = { Text("‹ Settings", style = AppType.headline, color = c.tint, modifier = Modifier.clickable(enabled = !flashing) { recording?.cancel(); onBack() }.padding(start = AppSpace.xs, bottom = AppSpace.xs)) },
+        back = { Text("‹ Settings", style = AppType.headline, color = c.tint, modifier = Modifier.clickable(enabled = !flashing && recording == null && lightJob == null) { onBack() }.padding(start = AppSpace.xs, bottom = AppSpace.xs)) },
     ) {
         item {
             SettingsGroup(
