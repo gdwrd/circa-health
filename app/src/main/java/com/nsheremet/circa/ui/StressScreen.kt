@@ -82,14 +82,13 @@ private val LEVELS = listOf(
 )
 
 @Composable
-fun StressScreen(backend: Boolean?, header: @Composable () -> Unit) {
+fun StressScreen(backend: Boolean?, date: LocalDate, onDate: (LocalDate) -> Unit, header: @Composable () -> Unit) {
     if (backend != true) return NoBackendTab("Body", backend)
     val ctx = LocalContext.current
     var detail by remember { mutableStateOf(false) }
     if (detail) return ResilienceDetail { detail = false }
     var data by remember { mutableStateOf<JsonObject?>(null) }
     var today by remember { mutableStateOf<JsonObject?>(null) } // resilience is 14-day: never follows the picker
-    var date by remember { mutableStateOf(LocalDate.now()) }
     var samples by remember { mutableStateOf<List<Pair<Int, Double>>>(emptyList()) }
     var starts by remember { mutableStateOf<List<Double>>(emptyList()) }
     val scope = rememberCoroutineScope()
@@ -117,7 +116,7 @@ fun StressScreen(backend: Boolean?, header: @Composable () -> Unit) {
         scope.launch { refreshing = true; try { load(); Api.today(ctx).obj()?.let { today = it } } finally { refreshing = false } }
     }) {
         item { Box(Modifier.padding(bottom = AppSpace.m)) { header() } }
-        item { DayPicker(date) { date = it } }
+        item { DayPicker(date, onDate) }
         today?.let { t -> item { Resilience(t) { detail = true } } }
         val d = data ?: return@LargeTitleScaffold
         val st = d["stress"].obj()

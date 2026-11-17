@@ -136,14 +136,13 @@ internal fun segments(stages: JsonArray?, endS: Double): List<Seg> {
 }
 
 @Composable
-fun SleepScreen(backend: Boolean?) {
+fun SleepScreen(backend: Boolean?, date: LocalDate = LocalDate.now(), onDate: (LocalDate) -> Unit = {}) {
     if (backend != true) return NoBackendTab("Sleep", backend)
     val ctx = LocalContext.current
     var data by remember { mutableStateOf<JsonObject?>(null) }
     var trend by remember { mutableStateOf<List<Pair<String, Double?>>?>(null) }
     var week by remember { mutableStateOf<List<Pair<LocalDate, JsonObject?>>>(emptyList()) }
     val producer = remember { CartesianChartModelProducer() }
-    var date by remember { mutableStateOf(LocalDate.now()) }
     val need = remember { ctx.sleepNeedHours }
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
@@ -170,7 +169,7 @@ fun SleepScreen(backend: Boolean?) {
     }, refreshing = refreshing, onRefresh = {
         scope.launch { refreshing = true; try { load() } finally { refreshing = false } }
     }) {
-        item { DayPicker(date) { date = it } }
+        item { DayPicker(date, onDate) }
         val d = data ?: return@LargeTitleScaffold
         val ses = d["session"].obj()
         // Under 30 min the clock is steady and the card has nothing to say.

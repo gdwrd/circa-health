@@ -42,6 +42,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -62,6 +63,7 @@ import com.nsheremet.circa.Prefs.vmUrl
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.doubleOrNull
 import kotlin.math.roundToInt
+import java.time.LocalDate
 
 private enum class TabItem(val route: String, val label: String, val icon: ImageVector, val outline: ImageVector) {
     Today("today", "Today", Icons.Rounded.Today, Icons.Outlined.Today),
@@ -124,6 +126,8 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
         }
         val journalDate = link?.takeIf { it.first == "journal" }?.second
         val haze = remember { HazeState() }
+        // One day for Sleep, Activity and Body; a cold start begins at today. Reports and Trends keep their own.
+        var date by rememberSaveable { mutableStateOf(LocalDate.now()) }
 
         Scaffold(
             containerColor = AppTheme.colors.background,
@@ -148,9 +152,9 @@ fun App(hasPermissions: () -> Boolean, requestPermissions: () -> Unit, link: Pai
                     }
                 }
                 composable("reports") { CompositionLocalProvider(LocalNavScope provides this) { ReportScreen(backend) { nav.popBackStack() } } }
-                composable(TabItem.Sleep.route) { SleepScreen(backend) }
-                composable(TabItem.Activity.route) { ActivityScreen(backend, link?.takeIf { it.first == "workout" }?.second, onLinkHandled) }
-                composable(TabItem.Body.route) { BodyScreen(backend) }
+                composable(TabItem.Sleep.route) { SleepScreen(backend, date, { date = it }) }
+                composable(TabItem.Activity.route) { ActivityScreen(backend, date, { date = it }, link?.takeIf { it.first == "workout" }?.second, onLinkHandled) }
+                composable(TabItem.Body.route) { BodyScreen(backend, date, { date = it }) }
                 composable(TabItem.Trends.route) { TrendsScreen(backend, link?.first == "month", link?.first == "insights", onLinkHandled) }
                 composable("breathe") { BreatheScreen { nav.popBackStack() } }
                 composable("settings") {

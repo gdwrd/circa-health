@@ -86,14 +86,13 @@ private const val SLOT_S = 300.0
 internal class Hour(val h: Int, val steps: Double, val worn: Boolean)
 
 @Composable
-fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: () -> Unit = {}) {
+fun ActivityScreen(backend: Boolean?, date: LocalDate = LocalDate.now(), onDate: (LocalDate) -> Unit = {}, linkDate: String? = null, onLinkHandled: () -> Unit = {}) {
     if (backend != true) return NoBackendTab("Activity", backend)
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
-    var date by remember { mutableStateOf(LocalDate.now()) }
     // "Was this a workout?" notification: show the day it asks about.
     LaunchedEffect(linkDate) {
-        if (linkDate != null) { runCatching { LocalDate.parse(linkDate) }.getOrNull()?.let { date = it }; onLinkHandled() }
+        if (linkDate != null) { runCatching { LocalDate.parse(linkDate) }.getOrNull()?.let(onDate); onLinkHandled() }
     }
     var hours by remember { mutableStateOf<List<JsonObject>?>(null) }
     var day by remember { mutableStateOf<JsonObject?>(null) }
@@ -134,7 +133,7 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
     LargeTitleScaffold("Activity", refreshing = refreshing, onRefresh = {
         scope.launch { refreshing = true; try { load(); loadDay() } finally { refreshing = false } }
     }) {
-        item { DayPicker(date) { date = it } }
+        item { DayPicker(date, onDate) }
         val hs = hours ?: return@LargeTitleScaffold
         val total = hs.sumOf { it["steps"].num() ?: 0.0 }
         item {

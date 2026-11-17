@@ -103,7 +103,7 @@ private const val SLOT_S = 300.0
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
+fun HeartScreen(backend: Boolean?, date: LocalDate, onDate: (LocalDate) -> Unit, header: @Composable () -> Unit) {
     if (backend != true) return NoBackendTab("Body", backend)
     val ctx = LocalContext.current
     var hr by remember { mutableStateOf<List<Pair<Double, Double>>?>(null) }
@@ -112,7 +112,6 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
     var loaded by remember { mutableStateOf(false) }
     var doses by remember { mutableStateOf<List<Long>>(emptyList()) }
     var windowH by remember { mutableStateOf(6.0) }
-    var date by remember { mutableStateOf(LocalDate.now()) }
     var day by remember { mutableStateOf<JsonObject?>(null) }
     var nextInputs by remember { mutableStateOf<JsonObject?>(null) } // the night that starts on [date] belongs to the next wake date
     var workouts by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
@@ -166,7 +165,7 @@ fun HeartScreen(backend: Boolean?, header: @Composable () -> Unit) {
     }) {
         item { Box(Modifier.padding(bottom = AppSpace.m)) { header() } }
         if (!loaded) return@LargeTitleScaffold
-        item { DayPicker(date) { date = it } }
+        item { DayPicker(date, onDate) }
         item {
             Section("Heart rate") {
                 val pts = hr.orEmpty()
