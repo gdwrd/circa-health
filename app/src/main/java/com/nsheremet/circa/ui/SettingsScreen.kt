@@ -129,6 +129,7 @@ import com.nsheremet.circa.PulseHrv
 import com.nsheremet.circa.R
 import com.nsheremet.circa.SampleStore
 import com.nsheremet.circa.Prefs.apiToken
+import com.nsheremet.circa.Prefs.autoReadings
 import com.nsheremet.circa.Prefs.batteryAlerts
 import com.nsheremet.circa.Prefs.carAddress
 import com.nsheremet.circa.Prefs.carName
@@ -460,6 +461,11 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                     else -> ""
                 }
                 ChevronRow("Sync every", intervalLabel(interval) + stretch) { pickInterval = true }
+            }
+        }
+        item {
+            SettingsGroup(null, "A sync takes a stress reading about every 30 minutes, day and night, while the ring is worn: about a minute of ring light each time. Uses ring battery.") {
+                SwitchRow("Automatic stress readings", ctx.autoReadings) { ctx.autoReadings = it }
             }
         }
         item {
@@ -1424,16 +1430,17 @@ internal fun ButtonRow(title: String, enabled: Boolean = true, color: Color = Ap
 internal suspend fun runLiveHr(
     ctx: Context, address: String, onBpm: (Int) -> Unit = {}, durationMs: Long = 30_000, stopWhenStable: Boolean = true,
     onLight: ((List<Int>) -> Unit)? = null,
+    shared: ColmiConnection? = null, // the sync's open connection (ST3): not connected, disconnected or flagged here
     onProgress: (String) -> Unit,
 ): String {
-    val conn = ColmiConnection(ctx, address)
+    val conn = shared ?: ColmiConnection(ctx, address)
     var measurementStarted = false
     var packets = 0; var valid = 0; var restarts = 0
     var lastLight = 0L // last light packet since the last start request; 0 = none
     val wave = ArrayList<Int>(); val waveMs = ArrayList<Long>() // the whole reading for ST1, with arrival times
-    SyncWorker.liveHrActive = true // a background sync would take the ring mid-stream
+    if (shared == null) SyncWorker.liveHrActive = true // a background sync would take the ring mid-stream
     return try {
-        val connected = conn.connect()
+        val connected = shared != null || conn.connect()
         if (!connected) return "Could not connect (ring may be busy syncing — try again in a few seconds)"
 
         onProgress("Measuring (keep ring still)…")
@@ -1511,9 +1518,8 @@ internal suspend fun runLiveHr(
                 withContext(NonCancellable) { withTimeoutOrNull(2_000) { conn.writePacket(ColmiProtocol.lightOffRequest()) } }
             }.onFailure { Log.w("Settings", "Light copy off failed", it) }
         }
-        conn.disconnect()
-        SyncWorker.liveHrActive = false
-        if (!stopWhenStable) SyncLog.add(ctx, "Breathe live HR: $packets packets, $valid valid, $restarts restarts")
+        if (shared == null) { conn.disconnect(); SyncWorker.liveHrActive = false }
+        if (!stopWhenStable && shared == null) SyncLog.add(ctx, "Breathe live HR: $packets packets, $valid valid, $restarts restarts")
         if (wave.isNotEmpty()) runCatching {
             // NonCancellable: Measure's sheet and Breathe's Done end the reading by cancelling
             withContext(NonCancellable) {

@@ -42,6 +42,8 @@ object Prefs {
     private const val KEY_REPORT_WRITER   = "report_writer"
     private const val KEY_REPORT_NAME     = "report_name"
     private const val KEY_HIDDEN_TILES    = "hidden_tiles"
+    private const val KEY_AUTO_READINGS   = "auto_readings"
+    private const val KEY_LAST_AUTO_MS    = "last_auto_reading_ms"
 
     private fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -129,6 +131,16 @@ object Prefs {
     var Context.reportName: String
         get() = prefs(this).getString(KEY_REPORT_NAME, "") ?: ""
         set(v) = prefs(this).edit().putString(KEY_REPORT_NAME, v).apply()
+
+    /** Settings › Ring switch; on (default) = a sync takes a pulse reading when the last one started 30 min or more ago. */
+    var Context.autoReadings: Boolean
+        get() = prefs(this).getBoolean(KEY_AUTO_READINGS, true)
+        set(v) = prefs(this).edit().putBoolean(KEY_AUTO_READINGS, v).apply()
+
+    /** Start of the last automatic pulse reading (light turned on); 0 = never. */
+    var Context.lastAutoReadingMs: Long
+        get() = prefs(this).getLong(KEY_LAST_AUTO_MS, 0L)
+        set(v) = prefs(this).edit().putLong(KEY_LAST_AUTO_MS, v).apply()
 
     /** Settings › Right now tiles: the "I just had" tile kinds left off Today. */
     var Context.hiddenTiles: Set<String>

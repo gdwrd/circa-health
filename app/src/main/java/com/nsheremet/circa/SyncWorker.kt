@@ -34,6 +34,13 @@ import com.nsheremet.circa.ColmiProtocol.SleepSession
 import com.nsheremet.circa.ColmiProtocol.Spo2Sample
 import com.nsheremet.circa.ColmiProtocol.StressSample
 import com.nsheremet.circa.Prefs.apiToken
+import com.nsheremet.circa.Prefs.autoReadings
+import com.nsheremet.circa.Prefs.lastAutoReadingMs
+import com.nsheremet.circa.ui.runLiveHr
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicInteger
 import com.nsheremet.circa.Prefs.batteryAlerts
 import com.nsheremet.circa.Prefs.batteryWarned
 import com.nsheremet.circa.Prefs.chargedTold
@@ -72,6 +79,18 @@ import java.util.concurrent.TimeUnit
 private const val TAG = "SyncWorker"
 private const val NOTIF_CHANNEL = "ring_sync"
 private const val NOTIF_ID = 1
+
+/** Why no automatic reading runs now; null = take one, "" = not due (switch off or under 30 min since the last start; not logged). */
+internal fun autoReadingSkip(on: Boolean, lastMs: Long, nowMs: Long, battery: BatteryStatus?, worn: Boolean?, live: Boolean): String? = when {
+    !on || nowMs - lastMs < 30 * 60_000L -> ""
+    live -> "Measure or Breathe is running"
+    battery == null -> "no battery reading"
+    battery.charging -> "charging"
+    battery.level <= 20 -> "battery ${battery.level} %"
+    worn == null -> "wear state unknown (firmware without it, or no measurement since the ring started)"
+    !worn -> "ring not worn"
+    else -> null
+}
 
 class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
 
@@ -290,6 +309,12 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             } else {
                 log("Server: pushed $sent samples to $vmUrl (${pusher.lastResult})")
             }
+            // ── Automatic pulse reading (ST3): after the push, so a failed reading never costs the sync's data ──
+            when (val skip = autoReadingSkip(ctx.autoReadings, ctx.lastAutoReadingMs, System.currentTimeMillis(), battery, wear?.worn, liveHrActive)) {
+                null -> autoReading(conn, address)
+                "" -> {}
+                else -> log("Stress reading: skipped, $skip")
+            }
             // Every sync, not only after a push: the hash skips unchanged cards, and a model that just arrived gets its first run.
             // Before the notifications: the morning / weekly body is the start of the note written here.
             runCatching { writeReports(applicationContext) }.onSuccess { it?.let(log) }
@@ -323,6 +348,22 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             conn.disconnect()
             runCatching { warnIfStale() } // every attempt incl. "could not connect", which is the case it exists for
         }
+    }
+
+    /** 75 s of light on the sync's connection through runLiveHr (its stop sequence, gate and push); ends after 10 s without an `A1 0C`. */
+    private suspend fun autoReading(conn: ColmiConnection, address: String) = coroutineScope {
+        val ctx = applicationContext
+        ctx.lastAutoReadingMs = System.currentTimeMillis()
+        val packets = AtomicInteger(); val samples = AtomicInteger()
+        val job = launch {
+            runLiveHr(ctx, address, durationMs = 75_000, stopWhenStable = false, shared = conn,
+                onLight = { packets.incrementAndGet(); samples.addAndGet(it.size) }) {}
+        }
+        delay(10_000)
+        if (packets.get() == 0) { job.cancel(); SyncLog.add(ctx, "Stress reading: skipped, no light samples in 10 s (firmware without the light copy)") }
+        job.join()
+        // runLiveHr logs "gate failed" or "pulse ... pushed" only when it kept a sample
+        if (packets.get() > 0 && samples.get() == 0) SyncLog.add(ctx, "Stress reading: ${packets.get()} light packets, all saturated, nothing sent")
     }
 
     // ── Collection helpers ─────────────────────────────────────────────────
