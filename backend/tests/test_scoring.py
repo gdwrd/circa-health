@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.scoring import (FEELINGS, MOMENTS, activity_score, band, baseline, bedtime_window, confidence, derived, drive, guess_stats, low_index, moves,
+from app.scoring import (FEELINGS, MOMENTS, activity_score, band, baseline, bedtime_window, confidence, derived, drive, guess_stats, low_index, motion_label, moves,
                          readiness_score, regularity, resilience, robust, sleep_debt, sleep_score, social_jetlag, still_hours, strain, stress_zones,
                          suggest, tonight, what_if, wind_down)
 
@@ -266,3 +266,9 @@ def test_drive_one_missing_hour_is_not_worn() -> None:
     assert drive(NOW, [s], {497, 498, 499})["worn"] is True
     assert drive(NOW, [s], {496, 497, 499, 500})["worn"] is False
     assert drive(NOW, [(NOW - 8 * 3600, NOW - 600, 440.0)], set())["worn"] is True  # woke this hour: no full hour yet
+
+
+def test_motion_label_boundaries() -> None:
+    assert motion_label(60, 0, 0) == "unsampled"  # tap-wait minute: still 60 but not desk
+    assert motion_label(21, 2000, 60) == "desk" and motion_label(20, 784, 60) == "active"
+    assert motion_label(20, 800, 60) == "ride" and motion_label(20, 800, 1) == "ride"

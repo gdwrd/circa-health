@@ -336,3 +336,17 @@ def strain(night: dict, base: dict) -> dict:
     level = None if index is None else "calm" if index < 25 else "elevated" if index <= 50 else "high"
     return {"index": index, "level": level, "flags": {k: round(zs[k], 2) for k in flagged},
             "deltas": {k: deltas[k] for k in flagged}, "usual": {k: usual[k] for k in flagged}, "available": len(zs)}
+
+
+# Motion log minutes (FW8d, docs/MOTION.md). Thresholds fitted to one user and a handful of sessions, not validated.
+DESK_STILL_S = 21  # still seconds of 60 (still share 0.35)
+RIDE_JERK_MG = 800  # mg per sample
+
+
+def motion_label(still: float, jerk: float, sampled: float) -> str:
+    """One motion-log minute: unsampled (ring in tap-wait, never desk), desk, ride, else active."""
+    if sampled == 0:
+        return "unsampled"
+    if still >= DESK_STILL_S:
+        return "desk"
+    return "ride" if jerk >= RIDE_JERK_MG else "active"

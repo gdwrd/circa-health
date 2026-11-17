@@ -44,6 +44,7 @@ object Prefs {
     private const val KEY_HIDDEN_TILES    = "hidden_tiles"
     private const val KEY_AUTO_READINGS   = "auto_readings"
     private const val KEY_LAST_AUTO_MS    = "last_auto_reading_ms"
+    private const val KEY_LAST_MOTION_SEQ = "last_motion_seq"
 
     private fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -141,6 +142,11 @@ object Prefs {
     var Context.lastAutoReadingMs: Long
         get() = prefs(this).getLong(KEY_LAST_AUTO_MS, 0L)
         set(v) = prefs(this).edit().putLong(KEY_LAST_AUTO_MS, v).apply()
+
+    /** Next motion-log seq to fetch from the ring (A1 0D); advanced after the push that carried the records. */
+    var Context.lastMotionSeq: Long
+        get() = prefs(this).getLong(KEY_LAST_MOTION_SEQ, 0L)
+        set(v) = prefs(this).edit().putLong(KEY_LAST_MOTION_SEQ, v).apply()
 
     /** Settings › Right now tiles: the "I just had" tile kinds left off Today. */
     var Context.hiddenTiles: Set<String>

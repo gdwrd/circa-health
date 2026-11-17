@@ -36,6 +36,7 @@ import com.nsheremet.circa.ColmiProtocol.StressSample
 import com.nsheremet.circa.Prefs.apiToken
 import com.nsheremet.circa.Prefs.autoReadings
 import com.nsheremet.circa.Prefs.lastAutoReadingMs
+import com.nsheremet.circa.Prefs.lastMotionSeq
 import com.nsheremet.circa.ui.runLiveHr
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -267,6 +268,45 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 else -> "Ring: ${if (wear.worn) "worn" else "not worn"} since ${wear.sinceMs?.let { java.util.Date(it) } ?: "unknown time"}"
             })
 
+            // ── Motion log (patched firmware ca0008; older firmware answers A1 FF, no answer is the same) ──
+            conn.writePacket(ColmiProtocol.motionInfoRequest())
+            val motionInfo = withTimeoutOrNull(3_000) {
+                var p: ByteArray
+                do p = conn.notifyV1.receive() while (p.size < 2 || p[0] != ColmiProtocol.CMD_RAW_STREAM || (p[1] != 0x0E.toByte() && p[1] != 0xFF.toByte()))
+                ColmiProtocol.parseMotionInfo(p)
+            }
+            val motion = mutableListOf<Pair<Long, Int>>()   // (minute ms, record)
+            var motionSeq: Long? = null                      // the new watermark, saved after the push
+            if (motionInfo == null) log("Ring: no motion log (firmware without it)")
+            else {
+                suspend fun nextMotion(): ByteArray? = withTimeoutOrNull(3_000) {
+                    var p: ByteArray
+                    do p = conn.notifyV1.receive() while (p.size < 16 || p[0] != ColmiProtocol.CMD_RAW_STREAM || p[1] != 0x0D.toByte())
+                    p
+                }
+                var w = applicationContext.lastMotionSeq
+                if (motionInfo.next < w) w = motionInfo.oldest   // area wiped or another ring
+                var busy = 0
+                var pages = 0
+                var done = false
+                while (pages < 48) {   // the whole area at most; the rest comes next sync
+                    conn.writePacket(ColmiProtocol.motionLogRequest(w))
+                    val p = nextMotion() ?: break
+                    if (ColmiProtocol.isMotionBusy(p)) { if (++busy > 5) break; delay(200); continue }
+                    val head = ColmiProtocol.parseMotionHead(p) ?: break
+                    if (head.n == 0) { done = true; break }
+                    val recs = mutableListOf<Int>()
+                    while (recs.size < head.n) recs += ColmiProtocol.parseMotionRecords(nextMotion() ?: break) ?: break
+                    if (recs.size < head.n) break   // a packet lost: this page again next sync
+                    recs.forEachIndexed { j, r -> motion += ColmiProtocol.ringClockMs(head.t + 60L * j) to r }
+                    w = head.seq + head.n
+                    pages++
+                }
+                motionSeq = w
+                log("Ring: motion log ${motion.size} minutes, next ${motionInfo.next}${if (done) "" else ", more next sync"}" +
+                    if (motionInfo.state == 1) ", logging stopped (foreign data in its area)" else "")
+            }
+
             log(
                 "Ring: read ${hrSamples.size} HR, ${hrvSamples.size} HRV, ${activitySamples.size} activity, " +
                     "${stressSamples.size} stress, ${spo2Samples.size} SpO2, ${sleepSessions.size} sleep sessions" +
@@ -276,7 +316,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             // ── Compute + push metrics ────────────────────────────────────
             val metrics = buildMetrics(
                 battery, hrSamples, hrvSamples,
-                activitySamples, stressSamples, spo2Samples, sleepSessions, wear
+                activitySamples, stressSamples, spo2Samples, sleepSessions, wear, motion
             )
 
             // Everything read is kept on the phone; every unsent row goes out, so a failed push is retried with no age limit.
@@ -303,6 +343,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 store.markSent(chunk)
                 sent += chunk.size
             }
+            motionSeq?.let { ctx.lastMotionSeq = it }
             if (sent == 0) {
                 Log.i(TAG, "No new metrics to push")
                 log("Server: nothing new to push")
@@ -508,7 +549,8 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         stressSamples: List<StressSample>,
         spo2Samples: List<Spo2Sample>,
         sessions: List<SleepSession>,
-        wear: ColmiProtocol.WearState?
+        wear: ColmiProtocol.WearState?,
+        motion: List<Pair<Long, Int>>
     ): List<Metric> {
         val metrics = mutableListOf<Metric>()
         val labels  = mapOf("device" to "colmi_r02")
@@ -525,6 +567,16 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         // ── Wear: the state at the minute it last changed; the same sample each sync until it changes again ──
         if (wear?.worn != null && wear.sinceMs != null) {
             metrics += Metric("ring_worn", labels, if (wear.worn) 1.0 else 0.0, wear.sinceMs)
+        }
+
+        // ── Motion log: one record a minute (docs/FIRMWARE.md § Motion log); the backend labels the minutes ──
+        for ((ms, r) in motion) {
+            val m = ColmiProtocol.parseMotionRecord(r)
+            metrics += Metric("motion_level",   labels, m.levelMg.toDouble(), ms)
+            metrics += Metric("motion_jerk",    labels, m.jerkMg.toDouble(),  ms)
+            metrics += Metric("motion_still",   labels, m.still.toDouble(),   ms)
+            metrics += Metric("motion_sampled", labels, m.sampled.toDouble(), ms)
+            if (m.pose <= 5) metrics += Metric("motion_pose", labels, m.pose.toDouble(), ms)
         }
 
         // ── Heart rate: raw 5-min samples (ring's native granularity) ─────

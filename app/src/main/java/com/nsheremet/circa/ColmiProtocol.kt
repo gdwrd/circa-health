@@ -468,7 +468,54 @@ object ColmiProtocol {
         val worn = when (value[2].toInt()) { 1 -> true; 2 -> false; else -> return WearState(null, null) }
         val t = ByteBuffer.wrap(value, 3, 4).order(ByteOrder.LITTLE_ENDIAN).int.toLong() and 0xFFFFFFFFL
         if (t < 631_152_000L) return WearState(worn, null)
-        val since = java.time.LocalDateTime.of(2000, 1, 1, 0, 0).plusSeconds(t - t % 60)
-        return WearState(worn, since.atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli())
+        return WearState(worn, ringClockMs(t))
     }
+
+    /** The ring's clock (seconds since 2000-01-01, local time set-time wrote) to epoch ms, cut to the minute. */
+    fun ringClockMs(t: Long): Long =
+        java.time.LocalDateTime.of(2000, 1, 1, 0, 0).plusSeconds(t - t % 60).atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+
+    // A1 0E / A1 0D: motion log, one record a minute in flash (patched firmware ca0008, docs/FIRMWARE.md § Motion log);
+    // older firmware answers A1 FF.
+    fun motionInfoRequest(): ByteArray = buildPacket(byteArrayOf(CMD_RAW_STREAM, 0x0E))
+    fun motionLogRequest(from: Long): ByteArray =
+        buildPacket(byteArrayOf(CMD_RAW_STREAM, 0x0D) + ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(from.toInt()).array())
+
+    /** [oldest] / [next]: seq range kept (next = 0 when empty); [state] 1 = logging stopped (foreign data in its area). */
+    data class MotionInfo(val oldest: Long, val next: Long, val state: Int)
+
+    /** `A1 0E <oldest u32> <next u32> <state>`; null for anything else (A1 FF). */
+    fun parseMotionInfo(value: ByteArray): MotionInfo? {
+        if (value.size < 16 || value[0] != CMD_RAW_STREAM || value[1] != 0x0E.toByte()) return null
+        return MotionInfo(leUint32(value, 2), leUint32(value, 6), value[10].toInt() and 0xff)
+    }
+
+    /** Head of an `A1 0D` reply: first record's [seq] and minute [t] (ring clock), [n] records follow (0 = nothing newer). */
+    data class MotionHead(val seq: Long, val t: Long, val n: Int)
+
+    fun parseMotionHead(value: ByteArray): MotionHead? {
+        if (value.size < 16 || value[0] != CMD_RAW_STREAM || value[1] != 0x0D.toByte() || value[2] != 0x80.toByte()) return null
+        return MotionHead(leUint32(value, 3), leUint32(value, 7), value[11].toInt() and 0xff)
+    }
+
+    /** Data packet of an `A1 0D` reply: 1..3 records (u32 LE) from byte 3; null for a head, busy or anything else. */
+    fun parseMotionRecords(value: ByteArray): List<Int>? {
+        if (value.size < 16 || value[0] != CMD_RAW_STREAM || value[1] != 0x0D.toByte()) return null
+        val k = value[2].toInt()
+        if (k !in 1..3) return null
+        return List(k) { leUint32(value, 3 + 4 * it).toInt() }
+    }
+
+    /** `A1 0D FE`: the ring's send queue is full; ask again after 200 ms. */
+    fun isMotionBusy(value: ByteArray): Boolean =
+        value.size >= 16 && value[0] == CMD_RAW_STREAM && value[1] == 0x0D.toByte() && value[2] == 0xFE.toByte()
+
+    /** One minute's record: still / sampled seconds, pointing 0..5 (+x -x +y -y +z -z; 7 = no samples), jerk and level in mg. */
+    data class MotionRecord(val still: Int, val sampled: Int, val pose: Int, val jerkMg: Int, val levelMg: Int)
+
+    fun parseMotionRecord(r: Int): MotionRecord =
+        MotionRecord(r and 63, (r shr 6) and 63, (r shr 12) and 7, ((r shr 16) and 0xff) * 16, ((r ushr 24) and 0xff) * 8)
+
+    private fun leUint32(buf: ByteArray, offset: Int): Long =
+        ByteBuffer.wrap(buf, offset, 4).order(ByteOrder.LITTLE_ENDIAN).int.toLong() and 0xFFFFFFFFL
 }
