@@ -90,6 +90,10 @@ sends one sample per second.  Patches, applied in this order to the stock image,
        the call at BATCH_CALL runs the batch between os_sched_suspend and os_sched_resume (the pair the stock app uses at
        0x833452): no task runs mid-batch, a stop that falls due runs right after it.  The batch only computes (no OS call);
        interrupts stay on.  Light samples are untouched.
+  FW8b motion log records (docs/FIRMWARE.md "Motion log"), RAM only: every batch's samples (the batch hook, via SCANS after
+       TAP_SCAN) add to the minute's sums at LOG; qc_app's clock step (CLOCK_CALL, every wake of its loop, so every minute
+       tap-wait or not) closes a record when CLOCK has moved: LOG+0x50 = record, LOG+0x54 = its minute.  Read with a1 10.
+       The boot hook zeroes LOG.  No flash storage yet (FW8c).
   Version: the firmware texts the ring reports end in _ca<VERSION, 4 digits> (e.g. _ca0001) instead of _250117, in the
   file's wrapper too.  Builds before ca0001 were tagged _circa<one character: 0-9, then A = 10>.
 
@@ -182,6 +186,11 @@ BAD_FRAME, UNREADABLE = 0xBADF0000, 0xDEAD0000      # frame not in RAM; stacked 
 BATCH_CALL, BATCH = 0x830922, 0x83BCA8
 WORK_PTR = 0x20850C                     # 0x20C194 (static) from start 0x83BB00 to stop 0x83BA20, else 0
 OS_SCHED_SUSPEND, OS_SCHED_RESUME = 0x131FE, 0x1321C
+# FW8b motion log (docs/FIRMWARE.md "Motion log").  qc_app's loop 0x825246 wakes on its semaphore (given by the minute
+# interrupt 0x82576E, among others) and calls the clock step 0x82512C here every time: it adds the banked seconds to CLOCK.
+CLOCK_CALL, CLOCK_STEP = 0x82526C, 0x82512C
+LOG = CRASH + 76                        # 88 bytes, offsets as in the design's RAM table
+CLOCK_VALID = 789004800                 # 2025-01-01 in seconds since 2000
 
 # Entered instead of the epilogue: sp is still the batch-read frame, r4 = bytes in this batch,
 # the samples sit at sp+0x11.  r5-r7 are free because the epilogue restores them.
@@ -919,6 +928,13 @@ known:
     str   r2, [r0, #8]
     str   r3, [r1]
 start:
+    ldr   r0, =0x{LOG:x}
+    movs  r1, #0
+    movs  r2, #84
+clear:
+    str   r1, [r0, r2]
+    subs  r2, #4
+    bpl   clear
     ldr   r3, =0x{OS_SCHED_START | 1:x}
     bx    r3
 """
@@ -1038,6 +1054,264 @@ SEND_TAP = f"""
 """
 
 
+# FW8b, FULL_ACCEL's call: r0 = samples, r1 = bytes, given to both scans.
+SCANS = """
+    push  {r0, r1, r4, lr}
+    bl    TAP_SCAN
+    pop   {r0, r1}
+    bl    LOG_SCAN
+    pop   {r4, pc}
+"""
+
+# FW8b: r0 = v -> r0 = floor(sqrt(v)), digit by digit, no divide; r1-r3 clobbered.
+ISQRT = """
+    movs  r1, #0
+    movs  r2, #1
+    lsls  r2, r2, #30
+shrink:
+    cmp   r2, r0
+    bls   digit
+    lsrs  r2, r2, #2
+    bne   shrink
+digit:
+    cmp   r2, #0
+    beq   fin
+    adds  r3, r1, r2
+    cmp   r0, r3
+    blo   low
+    subs  r0, r0, r3
+    lsrs  r1, r1, #1
+    adds  r1, r1, r2
+    b     step
+low:
+    lsrs  r1, r1, #1
+step:
+    lsrs  r2, r2, #2
+    b     digit
+fin:
+    mov   r0, r1
+    bx    lr
+"""
+
+# FW8b per-sample steps, r0 = samples (xl xh yl yh zl zh each), r1 = bytes; then B merged into M under cpsid i.
+# B's last word packs n (u16), done, moving: one word add each, no carry crosses (n < 1731, done and moving < 256).
+LOG_SCAN = f"""
+    push  {{r4, r5, r6, r7, lr}}
+    mov   r5, r0
+    adds  r6, r0, r1
+    ldr   r4, =0x{LOG:x}
+next:
+    cmp   r5, r6
+    bhs   merge
+    movs  r7, #0
+    movs  r3, #0
+axis:
+    adds  r0, r5, r3
+    ldrb  r1, [r0, #1]
+    lsls  r1, r1, #24
+    asrs  r1, r1, #22
+    ldrb  r2, [r0, #0]
+    lsrs  r2, r2, #6
+    adds  r1, r1, r2
+    mov   r2, r1
+    muls  r2, r1, r2
+    adds  r7, r7, r2
+    lsls  r2, r3, #1
+    adds  r2, r2, r4
+    ldr   r0, [r2, #0x14]
+    adds  r0, r0, r1
+    str   r0, [r2, #0x14]
+    ldrb  r0, [r4, #6]
+    cmp   r0, #0
+    beq   first
+    ldrsh r0, [r4, r3]
+    subs  r0, r1, r0
+    bpl   pos
+    rsbs  r0, r0, #0
+pos:
+    ldr   r2, [r4, #0x10]
+    adds  r2, r2, r0
+    str   r2, [r4, #0x10]
+first:
+    strh  r1, [r4, r3]
+    adds  r3, #2
+    cmp   r3, #6
+    blo   axis
+    adds  r5, #6
+    movs  r0, #1
+    strb  r0, [r4, #6]
+    ldr   r0, [r4, #0x24]
+    adds  r0, #1
+    str   r0, [r4, #0x24]
+    mov   r0, r7
+    bl    ISQRT
+    ldrh  r1, [r4, #0xc]
+    adds  r1, r1, r0
+    strh  r1, [r4, #0xc]
+    muls  r0, r0, r0
+    ldr   r2, [r4, #8]
+    adds  r2, r2, r0
+    str   r2, [r4, #8]
+    ldrb  r0, [r4, #7]
+    adds  r0, #1
+    strb  r0, [r4, #7]
+    cmp   r0, #25
+    blo   next
+    movs  r0, #25
+    muls  r0, r2, r0
+    muls  r1, r1, r1
+    subs  r0, r0, r1
+    lsrs  r1, r0, #2
+    ldr   r2, [r4, #0x20]
+    adds  r2, r2, r1
+    str   r2, [r4, #0x20]
+    movs  r1, #1
+    lsls  r1, r1, #16
+    ldr   r2, =24414
+    cmp   r0, r2
+    bls   counted
+    movs  r2, #1
+    lsls  r2, r2, #24
+    adds  r1, r1, r2
+counted:
+    ldr   r2, [r4, #0x24]
+    adds  r2, r2, r1
+    str   r2, [r4, #0x24]
+    movs  r0, #0
+    str   r0, [r4, #8]
+    strh  r0, [r4, #0xc]
+    strb  r0, [r4, #7]
+    b     next
+merge:
+    cpsid i
+    ldrh  r0, [r4, #0x3c]
+    ldr   r1, =1700
+    cmp   r0, r1
+    bhs   full
+    movs  r3, #0
+sum:
+    adds  r2, r4, r3
+    ldr   r0, [r2, #0x10]
+    ldr   r1, [r2, #0x28]
+    adds  r1, r1, r0
+    str   r1, [r2, #0x28]
+    adds  r3, #4
+    cmp   r3, #24
+    blo   sum
+full:
+    cpsie i
+    movs  r0, #0
+    movs  r3, #0x10
+zero:
+    str   r0, [r4, r3]
+    adds  r3, #4
+    cmp   r3, #0x28
+    blo   zero
+    pop   {{r4, r5, r6, r7, pc}}
+"""
+
+# FW8b closer, replaces bl CLOCK_STEP at CLOCK_CALL (qc_app, task context): the stock step, then steps 1-4 of the design.
+# r4-r7 hold the loop's constants: saved.  M is copied to the stack: jsum, sx, sy, sz, vsum, n (u16), done, moving.
+CLOSER = f"""
+    push  {{r4, r5, r6, r7, lr}}
+    bl    0x{CLOCK_STEP:x}
+    ldr   r4, =0x{LOG:x}
+    ldr   r0, =0x{CLOCK:x}
+    ldr   r6, [r0]
+    ldr   r5, [r4, #0x40]
+    cmp   r6, r5
+    beq   out
+    sub   sp, #24
+    mov   r7, sp
+    cpsid i
+    movs  r3, #0
+copy:
+    adds  r2, r4, r3
+    ldr   r0, [r2, #0x28]
+    str   r0, [r7, r3]
+    movs  r0, #0
+    str   r0, [r2, #0x28]
+    adds  r3, #4
+    cmp   r3, #24
+    blo   copy
+    cpsie i
+    str   r6, [r4, #0x40]
+    ldr   r0, =0x{CLOCK_VALID:x}
+    cmp   r5, r0
+    blo   done
+    ldrb  r0, [r7, #23]
+    cmp   r0, #60
+    bls   moving
+    movs  r0, #60
+moving:
+    movs  r6, #60
+    subs  r6, r6, r0
+    ldrb  r0, [r7, #22]
+    cmp   r0, #60
+    bls   sampled
+    movs  r0, #60
+sampled:
+    lsls  r0, r0, #6
+    orrs  r6, r0
+    movs  r2, #7
+    ldrh  r0, [r7, #20]
+    cmp   r0, #0
+    beq   pointed
+    movs  r1, #0
+    mvns  r1, r1
+    movs  r3, #4
+axis:
+    ldr   r0, [r7, r3]
+    movs  r4, #0
+    cmp   r0, #0
+    bge   plus
+    rsbs  r0, r0, #0
+    movs  r4, #1
+plus:
+    cmp   r0, r1
+    ble   later
+    mov   r1, r0
+    subs  r2, r3, #4
+    lsrs  r2, r2, #1
+    adds  r2, r2, r4
+later:
+    adds  r3, #4
+    cmp   r3, #16
+    blo   axis
+pointed:
+    lsls  r2, r2, #12
+    orrs  r6, r2
+    ldr   r0, [r7, #0]
+    ldr   r1, =348
+    muls  r0, r1, r0
+    lsrs  r0, r0, #20
+    cmp   r0, #255
+    bls   jerk
+    movs  r0, #255
+jerk:
+    lsls  r0, r0, #16
+    orrs  r6, r0
+    ldr   r0, [r7, #16]
+    bl    ISQRT
+    ldr   r1, =677
+    muls  r0, r1, r0
+    lsrs  r0, r0, #16
+    cmp   r0, #255
+    bls   level
+    movs  r0, #255
+level:
+    lsls  r0, r0, #24
+    orrs  r6, r0
+    ldr   r4, =0x{LOG:x}
+    str   r6, [r4, #0x50]
+    str   r5, [r4, #0x54]
+done:
+    add   sp, #24
+out:
+    pop   {{r4, r5, r6, r7, pc}}
+"""
+
+
 def asm(src: str, addr: int) -> bytes:
     code = bytes(Ks(KS_ARCH_ARM, KS_MODE_THUMB).asm(src, addr)[0])
     # The chip is a Cortex-M0+: bl and mrs are the only 32-bit instructions we may emit.  A far "b" assembles to b.w, which
@@ -1063,16 +1337,18 @@ def patch(stock: bytes) -> bytes:
         while len(img) % 4: img.append(0xFF)
         return new_addr
 
-    def redirect(site: int, expect: bytes, code: str) -> None:
-        """Append code and turn the 4 bytes at site into a call to it."""
+    def redirect(site: int, expect: bytes, code: str) -> int:
+        """Append code and turn the 4 bytes at site into a call to it; returns the code's address."""
         assert img[off(site):off(site) + 4] == expect, f"{site:#x} does not hold the expected code"
-        img[off(site):off(site) + 4] = asm(f"bl 0x{append(code):x}", site)
+        new_addr = append(code)
+        img[off(site):off(site) + 4] = asm(f"bl 0x{new_addr:x}", site)
+        return new_addr
 
     text = b"3.00.33_ca%04d" % VERSION
     assert len(text) == len(STOCK_TEXT) and img.count(STOCK_TEXT) == 3     # 4 digits keep the stock text's length (up to 9999)
     img[:] = img.replace(STOCK_TEXT, text)
     scan = append(TAP_SCAN.replace("SEND_TAP", hex(append(SEND_TAP))))                        # FW6
-    redirect(HOOK, EPILOGUE, FULL_ACCEL.replace("TAP_SCAN", hex(scan)))                       # FW1
+    accel = redirect(HOOK, EPILOGUE, FULL_ACCEL.replace("TAP_SCAN", hex(scan)))               # FW1; FW8b retargets its bl below
     redirect(UNKNOWN_SUB, UNKNOWN_CODE, MOTION_CMD.replace("DEBUG_CMD", hex(append(DEBUG_CMD) | 1)))   # FW4, FW16a
     redirect(STILL_CALL, asm(f"bl 0x{STILL_CHECK:x}", STILL_CALL), STILL_VETO)                # FW4
     redirect(LIGHT_HOOK, LIGHT_EPILOGUE, LIGHT_COPY)                                          # FW7a
@@ -1085,7 +1361,14 @@ def patch(stock: bytes) -> bytes:
     assert img[off(WDG_CB_LITERAL):off(WDG_CB_LITERAL) + 4] == struct.pack("<I", STOCK_WDG_CB | 1)
     struct.pack_into("<I", img, off(WDG_CB_LITERAL), append(RESET_SEEN.replace("SAVE", save)) | 1)
     redirect(BATCH_CALL, asm(f"bl 0x{BATCH:x}", BATCH_CALL), BATCH_LOCK)    # FW17, after FAULT_HOOK: FAULT_SPIN stays put
-    assert CRASH >= WEAR + 8 and REC + 60 <= 0x20EC00 and FAULT_SEL < WEAR    # outside / inside the zero-fill below, below the heap
+    # FW8b, appended last so FAULT_SPIN stays put: FULL_ACCEL is reassembled in place (same length) calling SCANS instead
+    isqrt = hex(append(ISQRT))
+    scans = SCANS.replace("TAP_SCAN", hex(scan)).replace("LOG_SCAN", hex(append(LOG_SCAN.replace("ISQRT", isqrt))))
+    code = asm(FULL_ACCEL.replace("TAP_SCAN", hex(append(scans))), accel)
+    assert img[off(accel):off(accel) + len(code)] == asm(FULL_ACCEL.replace("TAP_SCAN", hex(scan)), accel)
+    img[off(accel):off(accel) + len(code)] = code
+    redirect(CLOCK_CALL, asm(f"bl 0x{CLOCK_STEP:x}", CLOCK_CALL), CLOSER.replace("ISQRT", isqrt))
+    assert CRASH >= WEAR + 8 and REC + 60 <= LOG and LOG + 88 <= 0x20EC00 and FAULT_SEL < WEAR    # outside / inside the zero-fill below, below the heap
     assert img[off(BSS_LEN):off(BSS_LEN) + 4] == struct.pack("<I", 0x55DC)
     # FW6, FW12, FW7a, FW15b, FW16g: the startup zero-fill runs on over TAP_STATE, SEQ, LIGHT, FAULT_SEL and WEAR; the overlay is copied in over its part afterwards
     struct.pack_into("<I", img, off(BSS_LEN), WEAR + 8 - 0x208654)

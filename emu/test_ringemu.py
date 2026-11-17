@@ -3,7 +3,7 @@
 Run: python -m pytest -q -p no:faulthandler test_ringemu.py
 (unicorn trips a harmless, handled access violation on Windows that faulthandler would print.)
 """
-import collections, contextlib, io, struct
+import collections, contextlib, io, math, struct
 
 import pytest
 
@@ -209,6 +209,96 @@ def test_double_taps_in_a_real_recording():
     early = [i for i in at if i <= 440]
     assert len(early) == 8 and all(i <= t < i + 32 for i, t in zip(early, (122, 242, 278, 308, 319, 366, 397, 435))), at
     assert not [i for i in at if 540 <= i <= 720] and len(at) <= 22, at
+
+
+class MotionLog:
+    """docs/FIRMWARE.md "Motion log": the design's integer steps, in Python, fed what the firmware saw."""
+    def __init__(self):
+        self.prev, self.ws, self.wq, self.wk, self.acc = None, 0, 0, 0, 0
+        self.m = dict.fromkeys(("jsum", "s0", "s1", "s2", "vsum", "n", "done", "moving"), 0)
+
+    def batch(self, samples):
+        b = dict.fromkeys(self.m, 0)
+        for v in samples:
+            a = math.isqrt(sum(c * c for c in v))
+            if self.prev: b["jsum"] += sum(abs(c - p) for c, p in zip(v, self.prev))
+            self.prev = v
+            for k in range(3): b[f"s{k}"] += v[k]
+            b["n"] += 1
+            self.ws, self.wq, self.wk = self.ws + a, self.wq + a * a, self.wk + 1
+            if self.wk == 25:
+                d = 25 * self.wq - self.ws * self.ws
+                b["vsum"], b["done"], b["moving"] = b["vsum"] + (d >> 2), b["done"] + 1, b["moving"] + (d > 24414)
+                self.ws = self.wq = self.wk = 0
+        if self.m["n"] < 1700:
+            for f in b: self.m[f] += b[f]
+
+    def close(self, c):
+        """-> (t, record), or None when the closer makes no record."""
+        if c == self.acc: return None
+        m, t, self.acc = self.m, self.acc, c
+        self.m = dict.fromkeys(m, 0)
+        if t < 789004800: return None
+        s = [m[f"s{k}"] for k in range(3)]
+        k = max(range(3), key=lambda k: (abs(s[k]), -k))                   # ties: x before y before z
+        pointing = 7 if m["n"] == 0 else 2 * k + (s[k] < 0)
+        assert m["jsum"] * 348 < 1 << 32 and m["vsum"] < 1 << 32
+        jerk, level = min(m["jsum"] * 348 >> 20, 255), min(math.isqrt(m["vsum"]) * 677 >> 16, 255)
+        return t, (60 - min(m["moving"], 60)) | min(m["done"], 60) << 6 | pointing << 12 | jerk << 16 | level << 24
+
+
+@model_kernel   # the reference takes batches in hook-entry order; only the cooperative model keeps that the merge order
+def test_motion_log_builds_a_record_every_minute(tmp_path):
+    # FW8b: an hour of scripted motion, minute ticks, A1 07 / 08 for a stretch of tap-wait; each minute's record read
+    # back with A1 10 and compared with MotionLog fed the exact batches and closes the firmware ran.
+    import cmdmap, patch_fw
+    patched = tmp_path / "patched.bin"
+    patched.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()))
+    e = ringemu.Emu(quiet_mem=True, image=patched)
+    flat, side = [(0, 0, 1000)], [(-1000, 0, 0)]
+    down, ahead = [(0, -1000, 0), (0, -200, 0)], [(1000, 0, 0), (200, 0, 0)]      # |a| 125 / 25 steps: never still
+    plan = {0: flat, 10: down, 20: None, 25: flat, 30: flat, 40: side, 50: ahead}  # from minute: pattern (None: the fake spin)
+    for r in range(25, 30): plan[r], plan[r + 0.5] = flat, down                     # mixed: half flat, half down
+    for at, rec in plan.items():
+        e.hw[f"rec{at}"] = {"at": int(at * 60000) + 1, "interval": None, "fire": lambda rec=rec: setattr(e, "recording", rec)}
+    e.command(2000, cmdmap.SET_TIME)
+    e.command(12000, bytes([0xA1, 0x07]))
+    e.command(30 * 60000 + 20000, bytes([0xA1, 0x08]))                              # minutes 32..40: tap-wait
+    e.command(40 * 60000 + 1000, bytes([0xA1, 0x07]))
+    for r in range(1, 61): e.command(r * 60000 + 500, bytes([0xA1, 0x10]) + struct.pack("<IB", patch_fw.LOG + 0x50, 8))
+    e.hw["rtc"] = {"at": 60000, "interval": 60000, "fire": cmdmap.minute_tick(e), "keep": True}
+    events = []
+    def batch(uc, a, size, _):
+        sp, n = e.r(ringemu.UC_ARM_REG_SP), e.r(ringemu.UC_ARM_REG_R4)
+        raw = struct.unpack(f"<{n // 2}h", e.uc.mem_read(sp + 0x11, n))
+        events.append(("batch", e.resets, [tuple(c >> 6 for c in raw[i:i + 3]) for i in range(0, len(raw), 3)]))
+    e.uc.hook_add(ringemu.UC_HOOK_CODE, batch, begin=patch_fw.HOOK, end=patch_fw.HOOK)
+    after_close = patch_fw.CLOCK_CALL + 4
+    e.uc.hook_add(ringemu.UC_HOOK_CODE, lambda uc, a, size, _: events.append(("close", e.resets, e.r32(patch_fw.CLOCK))),
+                  begin=after_close, end=after_close)
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(60 * 60000 + 1000)
+    assert e.resets == 1 and not e.hung
+    ref, want, boot = MotionLog(), [], None
+    for kind, resets, arg in events:
+        if resets != boot: ref, boot = MotionLog(), resets                         # the boot hook zeroes the block
+        if kind == "batch": ref.batch(arg)
+        elif (rec := ref.close(arg)): want.append(rec)
+    six = 790668000                                                                 # cmdmap.SET_TIME
+    assert [t for t, _ in want] == [six + 60 * i for i in range(60)]
+    got = [struct.unpack("<II", n[3:11])[::-1] for n in e.notified if n[:3] == bytes([0xA1, 0x10, 8])]
+    assert got == want                                                              # 60 records, each read after its close
+    rec = {i + 1: r for i, (_, r) in enumerate(want)}
+    field = lambda r, lo, bits: rec[r] >> lo & (1 << bits) - 1
+    for r in range(2, 11): assert rec[r] == 60 | 60 << 6 | 4 << 12                # flat: still, +z, no jerk, no level
+    for r in range(42, 51): assert rec[r] == 60 | 60 << 6 | 1 << 12               # on its side: -x
+    for r in range(32, 41): assert rec[r] == 60 | 7 << 12                         # tap-wait: no samples
+    # |a| 125 / 25 in turn: jerk 1500 pairs x 100 x 348 >> 20 = 49; every window d = 1560000, level isqrt(60 x 390000) x 677 >> 16 = 49
+    for r, axis in [*((r, 3) for r in range(12, 21)), *((r, 0) for r in range(52, 61))]:
+        assert rec[r] == 60 << 6 | axis << 12 | 49 << 16 | 49 << 24, (r, hex(rec[r]))
+    assert all(20 <= field(r, 0, 6) <= 40 and field(r, 6, 6) == 60 for r in range(27, 31))   # half still
+    assert 40 <= field(1, 6, 6) < 60 and 15 <= field(31, 6, 6) < 40 and 0 < field(41, 6, 6) < 60    # partly sampled
 
 
 def worn(image):
