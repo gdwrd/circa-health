@@ -658,7 +658,8 @@ def test_experiment_daily_line_done_and_muted(monkeypatch) -> None:
     at(monkeypatch, 8, day=D + timedelta(7))
     notify.evaluate(set())
     assert kinds() == ["experiment"] * 3
-    assert (notify.pending()[-1]["title"], notify.pending()[-1]["extra"]) == ("Your experiment is done", {"open": "today"})
+    assert ({k: notify.pending()[-1][k] for k in ("title", "body", "extra")} == {"title": "Your experiment is done",
+            "body": "Open Trends › Insights to see what it showed.", "extra": {"open": "insights"}})
     with TestClient(app) as c:
         assert c.patch("/settings", json={"muted": "experiment"}, headers=H).json()["muted"] == "experiment"
 

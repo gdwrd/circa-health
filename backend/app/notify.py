@@ -450,7 +450,8 @@ def _experiment(now: datetime, dates: set[date]) -> None:
         return
     i = (now.date() - date.fromisoformat(e["start"])).days
     if i == e["days"]:
-        _add("experiment", "Your experiment is done", "Open Today to see what it showed.", now, {"open": "today"})
+        _add("experiment", "Your experiment is done", "Open Trends › Insights to see what it showed.", now,
+             {"open": "insights"})
     elif 0 <= i < e["days"]:
         _add("experiment", f"Experiment day {i + 1} of {e['days']}",
              f"Today: {EXPERIMENT[e['kind']][e['plan'][i] == '0']}.", now)
