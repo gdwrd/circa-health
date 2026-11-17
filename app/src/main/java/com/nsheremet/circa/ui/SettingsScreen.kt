@@ -71,7 +71,6 @@ import androidx.compose.material.icons.rounded.IosShare
 import androidx.compose.material.icons.rounded.Medication
 import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.rounded.Person
-import androidx.compose.material.icons.rounded.Coffee
 import com.nsheremet.circa.Prefs.hiddenTiles
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.Psychology
@@ -330,7 +329,8 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
 
     // MH0: null is the root list of groups; a group's name opens its page (pages, not nav routes, as Sync log is).
     var page by rememberSaveable { mutableStateOf<String?>(null) }
-    BackHandler(enabled = page != null) { page = null }
+    fun up(p: String?) = if (p == "Right now tiles") "You" else null // the tiles page opens from You
+    BackHandler(enabled = page != null) { page = up(page) }
 
     if (showLog) return SyncLogScreen { showLog = false }
     if (showLab) return RingLabScreen { showLab = false }
@@ -342,7 +342,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         page, label = "page",
         transitionSpec = {
             // iOS push: the page comes in from the right over the root, which drifts a third to the left; Back reverses it.
-            val push = targetState != null
+            val push = targetState != null && up(initialState) != targetState
             val move = spring<IntOffset>(Spring.DampingRatioNoBouncy, Spring.StiffnessMediumLow)
             when {
                 reduce -> EnterTransition.None togetherWith ExitTransition.None
@@ -355,7 +355,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         p ?: "Settings",
         back = {
             if (p == null) Text("‹ $backTo", style = AppType.headline, color = c.tint, modifier = Modifier.clickable(onClick = onBack).padding(start = AppSpace.xs, bottom = AppSpace.xs))
-            else Text("‹ Settings", style = AppType.headline, color = c.tint, modifier = Modifier.clickable { page = null }.padding(start = AppSpace.xs, bottom = AppSpace.xs))
+            else Text("‹ " + (up(p) ?: "Settings"), style = AppType.headline, color = c.tint, modifier = Modifier.clickable { page = up(p) }.padding(start = AppSpace.xs, bottom = AppSpace.xs))
         },
     ) {
         when (p) {
@@ -399,8 +399,6 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 GroupRow(Icons.Rounded.RadioButtonUnchecked, c.sleep, "Ring", if (interval <= 0) "Sync off" else "Every ${intervalLabel(interval)}") { open("Ring") }
                 GroupHairline()
                 GroupRow(Icons.Rounded.Person, c.tint, "You", steps.toIntOrNull()?.let { "%,d steps".format(it) }.orEmpty()) { open("You") }
-                GroupHairline()
-                GroupRow(Icons.Rounded.Coffee, c.energy, "Right now tiles", "${INTAKES.count { it.first !in hiddenTiles }} on") { open("Right now tiles") }
             }
         }
         med?.let { s ->
@@ -424,10 +422,8 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 GroupRow(Icons.Rounded.PhoneAndroid, c.readiness, "Phone", if (phone == 0) "Off" else "$phone on") { open("Phone") }
                 GroupHairline()
                 GroupRow(Icons.AutoMirrored.Rounded.Article, c.stageAwake, "Reports", if (writerOn) "On" else "Off") { open("Reports") }
-                if (med != null) {
-                    GroupHairline()
-                    GroupRow(Icons.Rounded.IosShare, c.secondaryLabel, "Data", "") { open("Data") }
-                }
+                GroupHairline()
+                GroupRow(Icons.Rounded.IosShare, c.secondaryLabel, "Data", if (med == null) "Needs the server" else "", enabled = med != null) { open("Data") }
             }
         }
         item {
@@ -462,10 +458,6 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                     else -> ""
                 }
                 ChevronRow("Sync every", intervalLabel(interval) + stretch) { pickInterval = true }
-                Hairline(Modifier.padding(start = AppSpace.l))
-                ChevronRow("Sync log", "") { showLog = true }
-                Hairline(Modifier.padding(start = AppSpace.l))
-                ChevronRow("Ring lab", "") { showLab = true }
             }
         }
         item {
@@ -489,13 +481,20 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                     if (!batteryOk) MainActivity.requestBatteryExemption(ctx)
                     else Toast.makeText(ctx, "Already unrestricted", Toast.LENGTH_SHORT).show()
                 }
+            }
+        }
+        item {
+            Section("Developer", "For troubleshooting.") {
+                ChevronRow("Sync log", "") { showLog = true }
                 Hairline(Modifier.padding(start = AppSpace.l))
-                ButtonRow("Clear cached data") {
+                ChevronRow("Ring lab", "") { showLab = true }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                ButtonRow("Clear cached data", color = c.badText) {
                     Api.clearCache(ctx)
                     Toast.makeText(ctx, "Cache cleared", Toast.LENGTH_SHORT).show()
                 }
                 Hairline(Modifier.padding(start = AppSpace.l))
-                ButtonRow("Send all history") {
+                ButtonRow("Send all history", color = c.badText) {
                     activity.lifecycleScope.launch {
                         withContext(Dispatchers.IO) { SampleStore.get(ctx).markAllUnsent() }
                         storedTick++
@@ -508,10 +507,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
         "You" -> {
         item {
-            Section(null, "Your birth year sets your maximum heart rate for cardio zones. Goals shape the Activity and Sleep scores." +
-                if (med != null) " Wake times set tonight's bedtime plan; weekends mean the nights before Saturday and Sunday." +
-                    " Calm mode: words instead of numbers. Numbers stay one tap away." +
-                    " Guess first: say how recovered you feel before the scores show." else "") {
+            Section(null, "Your birth year sets your maximum heart rate for cardio zones. Goals shape the Activity and Sleep scores.") {
                 // Birth year is stored by the backend; without one there are no cardio zones.
                 if (med != null) {
                     FieldRow("Birth year", birth, "Not set", KeyboardType.Number) {
@@ -534,19 +530,29 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                     sleepNeed = it
                     saveGoal("sleep_need_min", need(it)?.let { h -> (h * 60).roundToInt() })
                 }
-                med?.let { s ->
-                    listOf("wake_weekday" to "Wake up · weekdays", "wake_weekend" to "Wake up · weekends").forEach { (k, title) ->
-                        Hairline(Modifier.padding(start = AppSpace.l))
+            }
+        }
+        med?.let { s ->
+            item {
+                Section(null, "Wake times set tonight's bedtime plan; weekends mean the nights before Saturday and Sunday.") {
+                    listOf("wake_weekday" to "Wake up · weekdays", "wake_weekend" to "Wake up · weekends").forEachIndexed { i, (k, title) ->
+                        if (i > 0) Hairline(Modifier.padding(start = AppSpace.l))
                         ChevronRow(title, (s[k] as? JsonPrimitive)?.contentOrNull.orEmpty().ifEmpty { null }?.let(::clock) ?: "Off") { pickWake = k }
                     }
-                    Hairline(Modifier.padding(start = AppSpace.l))
+                }
+            }
+            item {
+                Section(null, "Calm mode: words instead of numbers. Numbers stay one tap away.") {
                     key(patchFailed) {
                         SwitchRow("Calm mode", (s["calm"] as? JsonPrimitive)?.contentOrNull == "1") { on ->
                             haptic.tick()
                             patchMed("calm", JsonPrimitive(if (on) "1" else ""))
                         }
                     }
-                    Hairline(Modifier.padding(start = AppSpace.l))
+                }
+            }
+            item {
+                Section(null, "Guess first: say how recovered you feel before the scores show.") {
                     key(patchFailed) {
                         SwitchRow("Guess first", (s["guess"] as? JsonPrimitive)?.contentOrNull == "1") { on ->
                             haptic.tick()
@@ -555,12 +561,15 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                     }
                 }
             }
-        }
-        med?.let { s ->
             item {
                 Section("Workouts", "The ring can't tell cycling from a gym session — both show few steps. Pick what you do most; you can change any session on the Activity screen.") {
                     ChevronRow("Low-step sessions are", lowStepLabel((s["low_step_kind"] as? JsonPrimitive)?.contentOrNull)) { pickLowStep = true }
                 }
+            }
+        }
+        item {
+            Section(null) {
+                ChevronRow("Right now tiles", "${INTAKES.count { it.first !in hiddenTiles }} on") { open("Right now tiles") }
             }
         }
         }
@@ -666,12 +675,7 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         "Phone" -> {
         item {
             Section(null, "Screen on/off times fix nights where you scrolled in bed. Only the times are sent." +
-                (if (phoneOn && !usageOk) " Allow Usage access for Circa to start. Greyed out? In App info, tap ⋮ › Allow restricted settings first." else "") +
-                "\n\nHold my place shows where in a podcast or audiobook you fell asleep. Android calls the permission notification access; " +
-                "Circa only uses it to see what is playing and never reads your notifications." +
-                (if (holdOn && !listenOk) " Allow Notification access for Circa to start. Greyed out? In App info, tap ⋮ › Allow restricted settings first." else "") +
-                "\n\nNotice rides and walks lets your phone tell Circa when you start and stop walking, running or cycling, and adds them to Activity. " +
-                "Android calls the permission physical activity; Circa never reads your location.") {
+                (if (phoneOn && !usageOk) " Allow Usage access for Circa to start. Greyed out? In App info, tap ⋮ › Allow restricted settings first." else "")) {
                 SwitchRow("Phone as sleep sensor", phoneOn) { on ->
                     if (on && ctx.lastScreenMs != 0L) ctx.lastScreenMs = System.currentTimeMillis()  // never send the time it was off
                     ctx.phoneSensor = on; phoneOn = on
@@ -681,7 +685,12 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                     Hairline(Modifier.padding(start = AppSpace.l))
                     ChevronRow("Usage access", "Off") { ctx.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
                 }
-                Hairline(Modifier.padding(start = AppSpace.l))
+            }
+        }
+        item {
+            Section(null, "Hold my place shows where in a podcast or audiobook you fell asleep. Android calls the permission notification access; " +
+                "Circa only uses it to see what is playing and never reads your notifications." +
+                (if (holdOn && !listenOk) " Allow Notification access for Circa to start. Greyed out? In App info, tap ⋮ › Allow restricted settings first." else "")) {
                 SwitchRow("Hold my place", holdOn) { on ->
                     haptic.tick()
                     ctx.holdPlace = on; holdOn = on
@@ -692,7 +701,11 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                     Hairline(Modifier.padding(start = AppSpace.l))
                     ChevronRow("Notification access", "Off") { haptic.tick(); ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
                 }
-                Hairline(Modifier.padding(start = AppSpace.l))
+            }
+        }
+        item {
+            Section(null, "Notice rides and walks lets your phone tell Circa when you start and stop walking, running or cycling, and adds them to Activity. " +
+                "Android calls the permission physical activity; Circa never reads your location.") {
                 key(movesDenied) {
                     SwitchRow("Notice rides and walks", movesOn) { on ->
                         haptic.tick()
@@ -1213,18 +1226,18 @@ private val NOTIFY_GROUPS = listOf(
 
 /** Root row of a Settings group: tinted icon tile, name, short current value, chevron. */
 @Composable
-private fun GroupRow(icon: ImageVector, tint: Color, title: String, value: String, onClick: () -> Unit) {
+private fun GroupRow(icon: ImageVector, tint: Color, title: String, value: String, enabled: Boolean = true, onClick: () -> Unit) {
     val c = AppTheme.colors
     Row(
-        Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable(role = Role.Button, onClick = onClick).padding(start = AppSpace.l, end = AppSpace.s),
+        Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable(enabled = enabled, role = Role.Button, onClick = onClick).padding(start = AppSpace.l, end = AppSpace.s),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.size(30.dp).background(tint.copy(alpha = 0.16f), RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
             Icon(icon, null, tint = tint, modifier = Modifier.size(18.dp))
         }
-        Text(title, style = AppType.body, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(start = AppSpace.m))
+        Text(title, style = AppType.body, color = if (enabled) c.label else c.secondaryLabel, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(start = AppSpace.m))
         Text(value, style = AppType.body, color = c.secondaryLabel, maxLines = 1, modifier = Modifier.padding(start = AppSpace.s))
-        Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = c.secondaryLabel)
+        if (enabled) Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = c.secondaryLabel)
     }
 }
 
@@ -1392,10 +1405,10 @@ private fun StartDateDialog(initial: String, onDismiss: () -> Unit, onPick: (Str
 }
 
 @Composable
-internal fun ButtonRow(title: String, enabled: Boolean = true, onClick: () -> Unit) {
+internal fun ButtonRow(title: String, enabled: Boolean = true, color: Color = AppTheme.colors.tint, onClick: () -> Unit) {
     val c = AppTheme.colors
     Box(Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable(enabled = enabled, onClick = onClick).padding(horizontal = AppSpace.l), contentAlignment = Alignment.CenterStart) {
-        Text(title, style = AppType.body, color = if (enabled) c.tint else c.secondaryLabel)
+        Text(title, style = AppType.body, color = if (enabled) color else c.secondaryLabel)
     }
 }
 
