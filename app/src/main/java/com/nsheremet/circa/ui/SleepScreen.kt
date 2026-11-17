@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -44,13 +45,14 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
@@ -159,25 +161,28 @@ fun SleepScreen(backend: Boolean?) {
     var editing by remember { mutableStateOf(false) }
 
     val c = AppTheme.colors
-    LargeTitleScaffold("Sleep", refreshing = refreshing, onRefresh = {
+    val haptic = LocalHapticFeedback.current
+    LargeTitleScaffold("Sleep", action = {
+        Box(
+            Modifier.heightIn(min = 44.dp).clip(CircleShape).clickable(role = Role.Button) { haptic.tick(); editing = true }.padding(horizontal = AppSpace.s),
+            contentAlignment = Alignment.Center,
+        ) { Text("Edit", style = AppType.body, color = c.tint) }
+    }, refreshing = refreshing, onRefresh = {
         scope.launch { refreshing = true; try { load() } finally { refreshing = false } }
     }) {
         item { DayPicker(date) { date = it } }
         val d = data ?: return@LargeTitleScaffold
         val ses = d["session"].obj()
+        // Under 30 min the clock is steady and the card has nothing to say.
+        val shifted = d["jetlag"].obj()?.takeIf { abs(it["delta_min"].num()?.roundToInt() ?: 0) >= 30 }
         if (ses == null) {
             item {
                 InsetCard {
                     if (date == LocalDate.now()) EmptyState(Icons.Rounded.Bedtime, "No sleep recorded", "Wear the ring to bed; last night appears after the morning sync. Or add it yourself with Edit.")
                     else EmptyState(Icons.Rounded.Bedtime, "No sleep recorded for this night", "Wear the ring to bed and sync in the morning. Or add it yourself with Edit.")
-                    Text(
-                        "Edit", style = AppType.headline, color = c.tint, textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth().clickable { editing = true }.padding(bottom = AppSpace.l),
-                    )
                 }
             }
-            // The window is from today, not this night, so it still shows.
-            d["bedtime"].obj()?.let { b -> item { Bedtime(b, week, d["plan"].obj()) } }
+            shifted?.let { j -> item { BodyClock(j) } }
         } else {
             val startS = ses["start"].num() ?: 0.0
             val endS = ses["end"].num() ?: startS
@@ -198,10 +203,7 @@ fun SleepScreen(backend: Boolean?) {
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(Modifier.weight(1f)) {
-                            Row {
-                                Text("Time asleep", style = AppType.subhead, color = c.secondaryLabel)
-                                Text("Edit", style = AppType.subhead, color = c.tint, modifier = Modifier.padding(start = AppSpace.m).clickable { editing = true })
-                            }
+                            Text("Time asleep", style = AppType.subhead, color = c.secondaryLabel)
                             Text(
                                 buildAnnotatedString {
                                     val unit = SpanStyle(fontSize = 17.sp, color = c.secondaryLabel)
@@ -236,6 +238,7 @@ fun SleepScreen(backend: Boolean?) {
                     }
                 }
             }
+            shifted?.let { j -> item { BodyClock(j) } }
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
                     Text("Stages", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
@@ -276,11 +279,12 @@ fun SleepScreen(backend: Boolean?) {
                 )
                 }
             }
-            item { Regularity(d["contributors"].obj()?.get("regularity").num(), week, d["sleep_extra"].obj()?.get("regularity").obj()) }
-            d["bedtime"].obj()?.let { b -> item { Bedtime(b, week, d["plan"].obj()) } }
             if (d.containsKey("sleep_extra")) item { BloodOxygen(d["sleep_extra"].obj()?.get("spo2").obj(), date != LocalDate.now()) }
         }
-        d["jetlag"].obj()?.let { j -> item { BodyClock(j) } }
+        item { Text("Your pattern", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs)) }
+        // The window is from today, not this night, so it shows on an empty night too.
+        d["bedtime"].obj()?.let { b -> item { Bedtime(b, week, d["plan"].obj()) } }
+        if (week.any { it.second != null }) item { Regularity(d["contributors"].obj()?.get("regularity").num(), week, d["sleep_extra"].obj()?.get("regularity").obj()) }
         val t = trend ?: return@LargeTitleScaffold
         item {
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
@@ -565,19 +569,20 @@ internal fun Bedtime(b: JsonObject, week: List<Pair<LocalDate, JsonObject?>>, pl
         Text("Bedtime", style = AppType.title, modifier = Modifier.padding(start = AppSpace.xs))
         InsetCard {
             Column(Modifier.padding(AppSpace.l)) {
-                val (head, line) = when {
-                    ok -> "Your best nights start ${noonClock(start!!)}–${noonClock(end!!)}" to
+                // The time is the headline: tonight's in-bed time, else the best window; the state is the small line.
+                val time = inBed?.let { noonClock(it) } ?: if (ok) "${noonClock(start!!)}–${noonClock(end!!)}" else null
+                val sub = if (inBed != null) "In bed tonight · up at ${noonClock(plan?.get("wake_min").num() ?: 0.0)}" else if (ok) "Your best nights start in this window" else null
+                val line = when {
+                    ok -> (if (inBed != null) "Best nights start ${noonClock(start!!)}–${noonClock(end!!)} · " else "") +
                         "Sleep quality ${b["score_in"].num()?.roundToInt()} in that window · ${b["score_out"].num()?.roundToInt()} outside · $nights nights"
-                    status == "flat" -> "No clear best bedtime yet" to "Your sleep looks similar at every bedtime over $nights nights."
-                    else -> "Learning your best bedtime" to "$nights/14 nights — keep wearing the ring to bed."
+                    status == "flat" -> "No clear best bedtime yet · similar at every bedtime over $nights nights"
+                    else -> "Learning your best bedtime · $nights/14 nights"
                 }
-                if (plan != null) Text(
-                    "Tonight: in bed by ${noonClock(inBed ?: 0.0)} · up at ${noonClock(plan["wake_min"].num() ?: 0.0)}",
-                    style = AppType.subhead, modifier = Modifier.padding(bottom = AppSpace.xs),
-                )
-                Text(head, style = AppType.headline)
+                time?.let { Text(it, style = AppType.title) }
+                sub?.let { Text(it, style = AppType.subhead, color = c.secondaryLabel) }
                 if (ok) strip()
-                Text(line, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = if (ok) AppSpace.s else AppSpace.xs))
+                if (time == null) Text(line, style = AppType.headline)
+                else Text(line, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.s))
             }
         }
     }
@@ -586,7 +591,7 @@ internal fun Bedtime(b: JsonObject, week: List<Pair<LocalDate, JsonObject?>>, pl
 // Time-zone simile by whole hours of shift (1 to 5 or more).
 private val CITIES = listOf("Athens", "Istanbul", "Dubai", "Delhi", "Bangkok")
 
-/** `/sleep.jetlag` (28 days): weekday and weekend sleep midpoints (minutes after noon) as two dots on a night band, the shift as a flight arc. */
+/** `/sleep.jetlag` (28 days), drawn only when shifted 30 min or more: weekday and weekend sleep midpoints (minutes after noon) as two dots on a night band, the shift as a flight arc. */
 @Composable
 private fun BodyClock(j: JsonObject) {
     val c = AppTheme.colors
@@ -594,7 +599,6 @@ private fun BodyClock(j: JsonObject) {
     val we = j["weekend_min"].num() ?: return
     val delta = j["delta_min"].num()?.roundToInt() ?: return
     val shift = abs(delta)
-    val steady = shift < 30
     val city = CITIES[(shift / 60.0).roundToInt().coerceIn(1, 5) - 1]
     val reduce = LocalReduceMotion.current
     // One 600 ms ease: the weekend dot flies the arc while the number counts up.
@@ -605,11 +609,10 @@ private fun BodyClock(j: JsonObject) {
     val fs = LocalDensity.current.fontScale
     Section("Body clock") {
         Column(Modifier.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-            if (steady) Text("Your clock is steady.", style = AppType.headline)
-            else Text(duration((shift * fly.value).roundToInt()), style = AppType.title)
+            Text(duration((shift * fly.value).roundToInt()), style = AppType.title)
             // Two footnote lines (flight label, hours) scale with the system font; the band and the arc do not.
             Canvas(
-                Modifier.fillMaxWidth().height((if (steady) 18 * fs + 32 else 36 * fs + 42).dp)
+                Modifier.fillMaxWidth().height((36 * fs + 42).dp)
                     .semantics { contentDescription = "Middle of your sleep: ${noonClock(wd)} on weekdays, ${noonClock(we)} on weekends." },
             ) {
                 val lo = floor((minOf(wd, we) - 90) / 60) * 60
@@ -624,16 +627,13 @@ private fun BodyClock(j: JsonObject) {
                 }
                 val a = Offset(x(wd), cy)
                 val b = Offset(x(we), cy)
-                var head = b
-                if (!steady) {
-                    val to = measurer.measure("to $city", label)
-                    val top = Offset((a.x + b.x) / 2, 2 * (to.size.height + 4.dp.toPx()) - cy) // control point: the arc peaks just under the label
-                    fun at(t: Float) = a * ((1 - t) * (1 - t)) + top * (2 * (1 - t) * t) + b * (t * t)
-                    head = at(fly.value)
-                    val arc = Path().apply { moveTo(a.x, a.y); for (i in 1..24) at(fly.value * i / 24).let { lineTo(it.x, it.y) } }
-                    drawPath(arc, c.sleepLight, style = Stroke(1.5.dp.toPx(), cap = StrokeCap.Round, pathEffect = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx()))))
-                    drawText(to, topLeft = Offset((top.x - to.size.width / 2f).coerceIn(0f, size.width - to.size.width), 0f), alpha = fly.value)
-                }
+                val to = measurer.measure("to $city", label)
+                val top = Offset((a.x + b.x) / 2, 2 * (to.size.height + 4.dp.toPx()) - cy) // control point: the arc peaks just under the label
+                fun at(t: Float) = a * ((1 - t) * (1 - t)) + top * (2 * (1 - t) * t) + b * (t * t)
+                val head = at(fly.value)
+                val arc = Path().apply { moveTo(a.x, a.y); for (i in 1..24) at(fly.value * i / 24).let { lineTo(it.x, it.y) } }
+                drawPath(arc, c.sleepLight, style = Stroke(1.5.dp.toPx(), cap = StrokeCap.Round, pathEffect = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx()))))
+                drawText(to, topLeft = Offset((top.x - to.size.width / 2f).coerceIn(0f, size.width - to.size.width), 0f), alpha = fly.value)
                 listOf(a to c.sleep, head to c.sleepLight).forEach { (o, col) ->
                     drawCircle(c.card, 7.dp.toPx(), o)
                     drawCircle(col, 5.dp.toPx(), o)
@@ -647,7 +647,7 @@ private fun BodyClock(j: JsonObject) {
                     }
                 }
             }
-            if (!steady) Text(
+            Text(
                 "Your weekends run ${duration(shift)} ${if (delta > 0) "later" else "earlier"}, like flying to $city every Friday.",
                 style = AppType.subhead,
             )
@@ -666,12 +666,15 @@ private fun BloodOxygen(sp: JsonObject?, past: Boolean) {
                 else {
                     val low = sp["low_count"].num()?.roundToInt() ?: 0
                     Text("Average ${sp["mean"].num()?.roundToInt()} % · lowest ${sp["min"].num()?.roundToInt()} %", style = AppType.headline)
-                    Text(
-                        if (low == 0) "No dips below 90 %" else "$low ${if (low == 1) "dip" else "dips"} below 90 %",
-                        style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.xs),
-                    )
-                    val n = sp["n"].num()?.roundToInt() ?: 0
-                    if (n > 0) Spo2Dots(n, low.coerceAtMost(n))
+                    // Without a dip the one line says it all; the dot row draws only with one.
+                    if (low > 0) {
+                        Text(
+                            "$low ${if (low == 1) "dip" else "dips"} below 90 %",
+                            style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.xs),
+                        )
+                        val n = sp["n"].num()?.roundToInt() ?: 0
+                        if (n > 0) Spo2Dots(n, low.coerceAtMost(n))
+                    }
                 }
             }
         }
