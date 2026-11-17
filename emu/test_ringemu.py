@@ -301,6 +301,175 @@ def test_motion_log_builds_a_record_every_minute(tmp_path):
     assert 40 <= field(1, 6, 6) < 60 and 15 <= field(31, 6, 6) < 40 and 0 < field(41, 6, 6) < 60    # partly sampled
 
 
+STILL_MINUTE = 60 | 7 << 12             # FW8b record of a minute in tap-wait: still 60, sampled 0, pointing 7, no jerk or level
+
+
+def set_time(h, m):
+    bcd = lambda v: v // 10 << 4 | v % 10
+    return bytes([0x01, 0x25, 0x01, 0x20, bcd(h), bcd(m), 0, 1])            # 2025-01-20 h:m, as cmdmap.SET_TIME
+
+
+def log_page(seq, t, records):
+    """A motion log page as FW8c writes it: marker, u24 seq and t of slot 0, then the records."""
+    return bytes([0x4D]) + seq.to_bytes(3, "little") + struct.pack(f"<I{len(records)}I", t, *records)
+
+
+def motion_log(tmp_path, cmds=(), pages=None):
+    """FW8c: the patched image on a still ring (tap-wait all along: no samples, so the closer alone runs), clock set at 2 s,
+    a minute tick every 60 s, pages preloaded into the log area -> emu, not booted.  e.erased: FLASH_ERASE's addresses in the
+    log area (the stock first boot erases 0x872000 and 0x873000)."""
+    import cmdmap, patch_fw
+    patched = tmp_path / "patched.bin"
+    patched.write_bytes(patch_fw.patch(ringemu.IMAGE.read_bytes()))
+    e = ringemu.Emu(quiet_mem=True, image=patched)
+    e.still = True
+    for p, page in (pages or {}).items(): e.uc.mem_write(patch_fw.AREA + 256 * p, page)
+    e.command(2000, cmdmap.SET_TIME)
+    for t, cmd in cmds: e.command(t, cmd)
+    e.hw["rtc"] = {"at": 60000, "interval": 60000, "fire": cmdmap.minute_tick(e), "keep": True}
+    e.erased = []
+    e.uc.hook_add(ringemu.UC_HOOK_CODE, lambda uc, a, size, _: e.r(ringemu.UC_ARM_REG_R0) >= patch_fw.AREA and e.erased.append(e.r(ringemu.UC_ARM_REG_R0)),
+                  begin=patch_fw.FLASH_ERASE, end=patch_fw.FLASH_ERASE)
+    return e
+
+
+def fetch(e, at, start=0):
+    """The phone loop of the design (FW8d) from `at`: a1 0d <watermark> until a head with n = 0, watermark = head seq + n,
+    again after a busy reply -> ([(seq, minute, record)], [(from, head seq, minute, n)]), filled while e runs."""
+    got, heads, st = [], [], {"w": start, "seen": None, "wait": False, "done": False}
+    def tick():
+        if st["seen"] is None: st["seen"] = len(e.notified)
+        for n in e.notified[st["seen"]:]:
+            if n[:2] != bytes([0xA1, 0x0D]): continue
+            if n[2] == 0xFE: st["wait"] = False
+            elif n[2] == 0x80:
+                st["seq"], st["t"], st["left"] = struct.unpack("<IIB", n[3:12])
+                heads.append((st["w"], st["seq"], st["t"], st["left"]))
+                st["done"] = st["left"] == 0
+            else:
+                for j in range(n[2]):
+                    got.append((st["seq"], st["t"], struct.unpack_from("<I", n, 3 + 4 * j)[0]))
+                    st["seq"], st["t"], st["left"] = st["seq"] + 1, st["t"] + 60, st["left"] - 1
+            if n[2] != 0xFE and st["left"] == 0: st["wait"], st["w"] = False, st["seq"]
+        st["seen"] = len(e.notified)
+        if not st["done"] and not st["wait"]:
+            pkt = (bytes([0xA1, 0x0D]) + struct.pack("<I", st["w"])).ljust(15, bytes(1))
+            e.ble_write(pkt + bytes([sum(pkt) & 0xFF]))
+            st["wait"] = True
+    e.hw[f"fetch{at}"] = {"at": at, "interval": 300, "fire": tick, "keep": True}
+    return got, heads
+
+
+def replies(e, sub):
+    return [n for n in e.notified if n[:2] == bytes([0xA1, sub])]
+
+
+def test_motion_log_survives_a_reset_and_a_gap_starts_a_page(tmp_path):
+    # FW8c: 20 records, a chip reset (08: the boot starts a new page; the emulator keeps the clock through it), the clock
+    # set to 06:30, then to 08:00: four pages, seqs running on; a1 0e right after the reset sees the 20 records in flash.
+    import patch_fw
+    e = motion_log(tmp_path, cmds=[(1230000, bytes([0x08])), (1245000, bytes([0xA1, 0x0E])), (1290000, set_time(6, 30)),
+                                   (2430000, set_time(8, 0))])
+    got, heads = fetch(e, 50 * 60000)
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(52 * 60000)
+    assert e.resets == 2 and not e.hung and not e.erased
+    assert replies(e, 0x0E)[0][2:11] == struct.pack("<IIB", 0, 20, 0)          # oldest 0, next 20, logging
+    six = 790668000
+    pages = [bytes(e.uc.mem_read(patch_fw.AREA + 256 * p, 256)) for p in range(48)]
+    count = lambda pg: next((i for i in range(62) if pg[8 + 4 * i:12 + 4 * i] == b"\xff" * 4), 62)
+    kept = [(int.from_bytes(pg[1:4], "little"), struct.unpack_from("<I", pg, 4)[0], count(pg)) for pg in pages[:4]]
+    assert kept == [(0, six, 20), (20, six + 1200, 2), (22, six + 1800, 20), (42, six + 7200, 12)]
+    assert all(pg[0] == 0x4D and pg[8 + 4 * n:] == b"\xff" * (248 - 4 * n) for pg, (_, _, n) in zip(pages, kept))
+    assert all(pg == b"\xff" * 256 for pg in pages[4:])
+    want = [(s0 + i, t0 + 60 * i, STILL_MINUTE) for s0, t0, n in kept for i in range(n)]
+    assert len(got) >= 50 and got == want[:len(got)]                            # fetched at 50 min: page 3 still growing
+    assert [h[:2] for h in heads] == [(0, 0), (20, 20), (22, 22), (42, 42), (len(got), len(got))]   # a page per request
+    assert heads[-1][2:] == (0, 0)                                              # from = next: n = 0
+
+
+def test_motion_log_wraps_keeping_the_newest_day(tmp_path):
+    # FW8c: pages 0..46 preloaded full (seq 0..2913, as 47 x 62 minutes before the clock's 06:00); the firmware fills page 47,
+    # then page 0 erases sector 0 once.  The phone fetches everything from 0: the oldest 16 pages are gone, the rest (and
+    # so the newest 1440 minutes) comes back in one seq run.  The stock history area ends byte-identical to a stock run's.
+    import cmdmap, patch_fw
+    six = 790668000
+    base = six - 60 * 47 * 62
+    rec = lambda s: s * 2654435761 & 0x7FFFFFFF                                 # any record but blank
+    pages = {p: log_page(62 * p, base + 60 * 62 * p, [rec(62 * p + i) for i in range(62)]) for p in range(47)}
+    cmds = [(30 * 60000, bytes([0xA1, 0x0E])), (75 * 60000, bytes([0xA1, 0x0E])), (75 * 60000 + 500, bytes([0xA1, 0x0D]) + struct.pack("<I", 1000)),
+            (75 * 60000 + 1000, bytes([0xA1, 0x0D]) + struct.pack("<I", 99999))]
+    e = motion_log(tmp_path, cmds=cmds, pages=pages)
+    got, heads = fetch(e, 76 * 60000)
+    stock = ringemu.Emu(quiet_mem=True)                                         # the same 80 minutes on the stock image
+    stock.still = True
+    stock.command(2000, cmdmap.SET_TIME)
+    stock.hw["rtc"] = {"at": 60000, "interval": 60000, "fire": cmdmap.minute_tick(stock), "keep": True}
+    for emu in (e, stock):
+        emu.boot()
+        with contextlib.redirect_stdout(io.StringIO()):
+            emu.run(80 * 60000)
+    assert e.resets == 1 and not e.hung
+    assert e.erased == [patch_fw.AREA]                                          # sector 0, once
+    history = lambda emu: bytes(emu.uc.mem_read(0x872000, 0xB000))
+    assert history(e) == history(stock) and history(e) != b"\xff" * 0xB000     # stock history as stock writes it
+    assert replies(e, 0x0E)[0][2:11] == struct.pack("<IIB", 0, 47 * 62 + 29, 0)  # before the wrap: 29 records in page 47
+    oldest, nxt, state = struct.unpack("<IIB", replies(e, 0x0E)[1][2:11])   # after: the oldest seq jumped by 16 pages
+    assert oldest == 16 * 62 and state == 0 and 47 * 62 + 62 < nxt < 47 * 62 + 62 + 16
+    tx = replies(e, 0x0D)
+    assert tx[0][2:12] == bytes([0x80]) + struct.pack("<IIB", 1000, base + 60 * 1000, 62 - 8)  # from inside page 16
+    assert [n[2] for n in tx[1:19]] == [3] * 18 and tx[1][3:7] == struct.pack("<I", rec(1000))
+    assert tx[19][2:12] == bytes([0x80]) + struct.pack("<IIB", 99999, 0, 0)  # from >= next: n = 0
+    assert [s for s, t, r in got] == list(range(oldest, len(got) + oldest)) and got[-1][0] >= nxt - 1
+    assert heads[0][:2] == (0, oldest)                                      # from older than kept: the oldest record
+    assert got[:31 * 62] == [(s, base + 60 * s, rec(s)) for s in range(oldest, 47 * 62)]
+    new = got[31 * 62:]
+    assert all(r == STILL_MINUTE for s, t, r in new) and [t for s, t, r in new] == [new[0][1] + 60 * i for i in range(len(new))]
+    assert len(got) >= 1440 and new[0][1] >= six
+    page0 = bytes(e.uc.mem_read(patch_fw.AREA, 16))
+    assert page0[:4] == bytes([0x4D]) + (47 * 62 + 62).to_bytes(3, "little")
+    assert bytes(e.uc.mem_read(patch_fw.AREA + 256, 0xF00)) == b"\xff" * 0xF00  # rest of sector 0 erased
+
+
+def test_motion_log_stops_on_foreign_data(tmp_path):
+    # FW8c: the first page of a sector holds a byte that is neither 0x4D nor blank: the log stops (state 1), nothing is
+    # written or erased.
+    import patch_fw
+    foreign = bytes(range(1, 17))
+    e = motion_log(tmp_path, cmds=[(5 * 60000, bytes([0xA1, 0x0E]))], pages={0: foreign})
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(5 * 60000 + 2000)
+    assert not e.erased and e.uc.mem_read(patch_fw.LOG + 0x4F, 1)[0] == 1
+    assert bytes(e.uc.mem_read(patch_fw.AREA, 0x3000)) == foreign + b"\xff" * (0x3000 - 16)
+    assert replies(e, 0x0E)[0][2:11] == struct.pack("<IIB", 0, 0, 1)
+
+
+def test_motion_log_answers_busy_while_the_send_ring_is_full(tmp_path):
+    # FW8c: one full page; the link takes no notification from 10 s to 13 s.  The first a1 0d queues its 22 packets, the
+    # second finds them waiting and answers busy; both go out in order once the link takes them again.
+    t0 = 790668000 - 3720
+    e = motion_log(tmp_path, cmds=[(10000, bytes([0xA1, 0x0D]) + bytes(4)), (11000, bytes([0xA1, 0x0D]) + bytes(4))],
+                   pages={0: log_page(0, t0, list(range(1, 63)))})
+    stock_call = e.rom_SystemCall_Stack
+    def blocked():
+        if e.arg(0) == 0x3108 and 9500 < e.now < 13000:
+            e.uc.mem_write(e.arg(7), bytes(1))
+            return 0
+        return stock_call()
+    e.rom_SystemCall_Stack = blocked
+    e.hw["credits"] = {"at": 13000, "interval": 500, "fire": lambda: e.spawn("ble:done", 0x82A5CE | 1), "keep": True}
+    e.boot()
+    with contextlib.redirect_stdout(io.StringIO()):
+        e.run(16000)
+    tx = replies(e, 0x0D)
+    assert [n[2] for n in tx] == [0x80] + [3] * 20 + [2, 0xFE]
+    assert tx[0][3:12] == struct.pack("<IIB", 0, t0, 62)
+    assert b"".join(n[3:3 + 4 * n[2]] for n in tx[1:-1]) == struct.pack("<62I", *range(1, 63))
+    assert all(sum(n[:15]) & 0xFF == n[15] for n in tx)
+
+
 def worn(image):
     """30 s on a moving finger with the phone connected -> (accelerometer interrupts, double-tap packets, resets)."""
     e = ringemu.Emu(quiet_mem=True, trace=True, image=image)

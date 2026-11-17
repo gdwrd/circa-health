@@ -193,7 +193,7 @@ but blank only in the emulator, and the ROM's own flash use (boot patch, `ftl_sa
 | `0x840000`..`0x84D000` | 52 KB | apparently free. Between the end of the stock app and the staging area; a larger patched app grows into it. |
 | `0x802000`..`0x824000` | 136 KB | apparently free in the emulator only. The ROM's own data (boot patch, image headers, `ftl_save` storage) is not modelled and could sit here; treat as taken until the ring shows otherwise. |
 
-## Motion log (FW8a design, not built)
+## Motion log (FW8a design; built in the emulator: records FW8b, flash and `A1 0D` / `0E` FW8c, ca0008)
 
 One 4-byte record per minute, kept in flash and fetched at sync, so the backend can label minutes (`docs/MOTION.md`)
 without the phone nearby. **The ring stores features, the backend applies the thresholds:** the ride against walk margin
@@ -233,7 +233,8 @@ The closer runs once a minute **in task context** (never in an interrupt), in th
 through `0x827072` [F], at the work the minute interrupt `0x82576E` [F] triggers there. FW8b finds that hook; if no such
 point runs every minute while the ring sits in tap-wait, FW8b stops and reports (design change, not an agent's choice).
 
-1. `c` = clock word `0x2087B0` [F] (seconds since 2000-01-01, local time, +60 in `0x82576E`). If `c = W.acc_clock`,
+1. `c` = clock word `0x2087B0` [F] (seconds since 2000-01-01, local time; it moves in `qc_app`'s clock step `0x82512C`,
+   while the interrupt `0x82576E` only banks the seconds in `0x2098AC`). If `c = W.acc_clock`,
    return.
 2. `cpsid i`; copy `M` (24 bytes) and zero it; `cpsie i`.
 3. `t = W.acc_clock`; `W.acc_clock = c`. If `t < 789 004 800` (2025-01-01: clock not set, or the first close after a
@@ -303,7 +304,9 @@ ring with `A1 10` (1024 reads of 12 bytes) and must be all `0xFF`; if not, stop.
 
 A page holds 62 consecutive minutes: slot i is minute `t0 + 60·i` and seq `seq0 + i`.
 
-**Writing** (closer, through `0x827072` [F]; erases through `0x82702C` [F]; both from the closer's task only).
+**Writing** (closer, through `0x827072` [F]; erases through `0x82702C` [F]; both from the closer's task only). Those two
+are the return addresses of the ROM calls; the functions called are the wrappers `0x827054(buf, addr, len)` and
+`0x827014(addr)` (4 KB sector), each holding the flash mutex `0x2088A4`.
 RAM `W`: `page`, `slot`, `page_t`, `next_seq`.
 
 - First store after a boot (`W.ready = 0`): scan the 48 headers (plain loads, flash is memory-mapped). Valid page =

@@ -93,7 +93,12 @@ sends one sample per second.  Patches, applied in this order to the stock image,
   FW8b motion log records (docs/FIRMWARE.md "Motion log"), RAM only: every batch's samples (the batch hook, via SCANS after
        TAP_SCAN) add to the minute's sums at LOG; qc_app's clock step (CLOCK_CALL, every wake of its loop, so every minute
        tap-wait or not) closes a record when CLOCK has moved: LOG+0x50 = record, LOG+0x54 = its minute.  Read with a1 10.
-       The boot hook zeroes LOG.  No flash storage yet (FW8c).
+       The boot hook zeroes LOG.
+  FW8c the closer stores each record in flash at AREA (docs/FIRMWARE.md "Flash area and pages": 48 pages of a header and 62
+       records, boot scan, append, new page on a gap, sector erase once a wrap, stop with state 1 on foreign data) through
+       the stock wrappers FLASH_WRITE / FLASH_ERASE, from qc_app (which also writes stock history through them; they hold
+       the flash mutex).  a1 0e answers oldest seq, next seq, state; a1 0d <from 4 LE> answers a head (a1 0d 80 seq t n) and
+       ceil(n / 3) data packets (a1 0d k <k records>), or a1 0d fe while LIGHT_ROOM packets wait.  Readers scan the flash.
   Version: the firmware texts the ring reports end in _ca<VERSION, 4 digits> (e.g. _ca0001) instead of _250117, in the
   file's wrapper too.  Builds before ca0001 were tagged _circa<one character: 0-9, then A = 10>.
 
@@ -122,7 +127,7 @@ START_SAMPLING = 0x20BA3F               # flag the motion interrupt sets; the ne
 READ_TICK = 0x82E63C                    # gsensor_read_timer_id callback; the motion interrupt calls it directly
 MOTION_ONLY = 0x10
 TAP_T, TAP_Q, TAP_LO, TAP_HI, TAP_RUN = 20, 15, 3, 8, 4     # 640 mg, 480 mg; 120..320 ms apart at 25 Hz
-VERSION = 7                             # build number, tag ca0007.  Old scheme (tag circa<n>): 1 = v4.1.0 (FW1); 2, 3 = v4.2.0,
+VERSION = 8                             # build number, tag ca0008.  Old scheme (tag circa<n>): 1 = v4.1.0 (FW1); 2, 3 = v4.2.0,
                                         # v4.2.1 (crash on b.w); 4 = v4.2.2 (chip-detected taps, never fired on the ring); 5 = taps found
                                         # in the samples (v4.2.3, firm taps only); 6 = normal taps (v4.2.4); 7 = motion stream ends when
                                         # the phone leaves (FW11); 8 = numbered samples (FW12); 9 = light samples (FW7a); 10 (circaA) =
@@ -133,7 +138,8 @@ VERSION = 7                             # build number, tag ca0007.  Old scheme 
                                         # a1 12, ROM readable to 0x43F4C (FW16e); 5 (ca0005) = watchdog experiment:
                                         # bounded stand-in kick in the TIM5 handler, counters in a1 11 (FW16f; never
                                         # flashed); 6 (ca0006) = FW16f removed, the HardFault's word in the latch (FW16g);
-                                        # 7 (ca0007) = the PPG batch runs with the scheduler suspended (FW17)
+                                        # 7 (ca0007) = the PPG batch runs with the scheduler suspended (FW17); 8 (ca0008) =
+                                        # motion log records (FW8b) stored in flash, a1 0d / 0e (FW8c)
 LIGHT_READ = 0x830238                   # optical read helper (reg, buf, len) for I2C 0x44; its epilogue below
 LIGHT_HOOK = 0x830268                   # mov r0, r4 ; pop {r1-r7, pc}: r4 = 0 if read, r6 = len, r7 = buf, [sp] = register,
 LIGHT_EPILOGUE = bytes.fromhex("2046febd")   # [sp + 28] = the helper's return address (only the helper reaches here)
@@ -191,6 +197,9 @@ OS_SCHED_SUSPEND, OS_SCHED_RESUME = 0x131FE, 0x1321C
 CLOCK_CALL, CLOCK_STEP = 0x82526C, 0x82512C
 LOG = CRASH + 76                        # 88 bytes, offsets as in the design's RAM table
 CLOCK_VALID = 789004800                 # 2025-01-01 in seconds since 2000
+# FW8c.  Stock flash wrappers (each takes the flash mutex 0x2088A4 for up to 500 ms around the ROM call): FLASH_WRITE(buf,
+# addr, len) -> ROM 0x8600(addr, len, buf); FLASH_ERASE(addr) -> ROM 0x81A0(2, addr), one 4 KB sector, blocking.
+AREA, FLASH_WRITE, FLASH_ERASE = 0x87D000, 0x827054, 0x827014
 
 # Entered instead of the epilogue: sp is still the batch-read frame, r4 = bytes in this batch,
 # the samples sit at sp+0x11.  r5-r7 are free because the epilogue restores them.
@@ -296,14 +305,15 @@ MOTION_CMD = f"""
     beq   light
     cmp   r0, #0xf
     beq   wear
+    cmp   r0, #0xd
+    beq   debug
+    cmp   r0, #0xe
+    beq   debug
     cmp   r0, #0x10
-    beq   debug
-    cmp   r0, #0x11
-    beq   debug
-    cmp   r0, #0x12
-    beq   debug
+    blo   other
     cmp   r0, #0x13
-    beq   debug
+    bls   debug
+other:
     strb  r5, [r6]
     movs  r0, #0xa1
     bx    lr
@@ -1305,10 +1315,315 @@ level:
     ldr   r4, =0x{LOG:x}
     str   r6, [r4, #0x50]
     str   r5, [r4, #0x54]
+    mov   r0, r6
+    mov   r1, r5
+    bl    STORE
 done:
     add   sp, #24
 out:
     pop   {{r4, r5, r6, r7, pc}}
+"""
+
+# FW8c: r0 = page 0..47 -> r0 = seq of slot 0 (0xFFFFFFFF: no 0x4D marker), r1 = records up to the first blank, r2 = page
+# address; r3 clobbered.  Plain loads: the flash is memory-mapped.
+PAGE_INFO = f"""
+    lsls  r2, r0, #8
+    ldr   r3, =0x{AREA:x}
+    adds  r2, r2, r3
+    movs  r0, #0
+    mvns  r0, r0
+    movs  r1, #0
+    ldrb  r3, [r2]
+    cmp   r3, #0x4d
+    bne   out
+count:
+    cmp   r1, #62
+    beq   got
+    lsls  r3, r1, #2
+    adds  r3, r2, r3
+    ldr   r3, [r3, #8]
+    adds  r3, #1
+    beq   got
+    adds  r1, #1
+    b     count
+got:
+    ldr   r0, [r2]
+    lsrs  r0, r0, #8
+out:
+    bx    lr
+"""
+
+# FW8c: r0 = 5 words out, r1 = from.  out: oldest seq (0xFFFFFFFF: no page), its page, next seq (newest seq + count, 0 if
+# none), newest page (47 if none), page holding from (0xFFFFFFFF: none).  Kept pages hold one run of seqs.
+SCAN = """
+    push  {r4, r5, r6, r7, lr}
+    mov   r4, r0
+    mov   r5, r1
+    movs  r0, #0
+    mvns  r1, r0
+    str   r1, [r4, #0]
+    str   r1, [r4, #16]
+    str   r0, [r4, #8]
+    movs  r0, #47
+    str   r0, [r4, #12]
+    movs  r6, #0
+page:
+    mov   r0, r6
+    bl    PAGE_INFO
+    adds  r3, r0, #1
+    beq   next
+    ldr   r3, [r4, #0]
+    cmp   r0, r3
+    bhs   kept
+    str   r0, [r4, #0]
+    str   r6, [r4, #4]
+kept:
+    adds  r7, r0, r1
+    ldr   r3, [r4, #8]
+    cmp   r7, r3
+    bls   older
+    str   r7, [r4, #8]
+    str   r6, [r4, #12]
+older:
+    cmp   r5, r0
+    blo   next
+    subs  r3, r5, r0
+    cmp   r3, r1
+    bhs   next
+    str   r6, [r4, #16]
+next:
+    adds  r6, #1
+    cmp   r6, #48
+    blo   page
+    pop   {r4, r5, r6, r7, pc}
+"""
+
+# FW8c closer step 5, r0 = record, r1 = its minute t.  W = LOG + 0x40: acc_clock, next_seq, page_t, then page, slot, ready,
+# state bytes.  The first store after a boot scans the area and starts a new page.
+STORE = f"""
+    push  {{r4, r5, r6, r7, lr}}
+    sub   sp, #20
+    mov   r6, r0
+    mov   r7, r1
+    ldr   r4, =0x{LOG + 0x40:x}
+    ldrb  r0, [r4, #0xf]
+    cmp   r0, #0
+    bne   out
+    ldrb  r0, [r4, #0xe]
+    cmp   r0, #0
+    bne   ready
+    mov   r0, sp
+    movs  r1, #0
+    bl    SCAN
+    ldr   r0, [sp, #8]
+    str   r0, [r4, #4]
+    ldr   r0, [sp, #12]
+    strb  r0, [r4, #0xc]
+    movs  r0, #62
+    strb  r0, [r4, #0xd]
+    movs  r0, #1
+    strb  r0, [r4, #0xe]
+ready:
+    ldrb  r5, [r4, #0xd]
+    cmp   r5, #62
+    bhs   page
+    movs  r0, #60
+    muls  r0, r5, r0
+    ldr   r1, [r4, #8]
+    adds  r0, r0, r1
+    cmp   r0, r7
+    bne   page
+    ldrb  r1, [r4, #0xc]
+    lsls  r1, r1, #8
+    lsls  r0, r5, #2
+    adds  r1, r1, r0
+    ldr   r0, =0x{AREA + 8:x}
+    adds  r1, r1, r0
+    adds  r5, #1
+    strb  r5, [r4, #0xd]
+    str   r6, [sp]
+    movs  r2, #4
+    b     write
+page:
+    ldrb  r5, [r4, #0xc]
+    adds  r5, #1
+    cmp   r5, #48
+    blo   wrapped
+    movs  r5, #0
+wrapped:
+    lsls  r0, r5, #28
+    bne   fresh
+    lsls  r0, r5, #8
+    ldr   r1, =0x{AREA:x}
+    adds  r0, r0, r1
+    ldrb  r1, [r0]
+    cmp   r1, #0xff
+    beq   fresh
+    cmp   r1, #0x4d
+    beq   erase
+    movs  r0, #1
+    strb  r0, [r4, #0xf]
+    b     out
+erase:
+    bl    0x{FLASH_ERASE:x}
+fresh:
+    ldr   r0, [r4, #4]
+    lsls  r0, r0, #8
+    adds  r0, #0x4d
+    str   r0, [sp, #0]
+    str   r7, [sp, #4]
+    str   r6, [sp, #8]
+    strb  r5, [r4, #0xc]
+    movs  r0, #1
+    strb  r0, [r4, #0xd]
+    str   r7, [r4, #8]
+    lsls  r1, r5, #8
+    ldr   r0, =0x{AREA:x}
+    adds  r1, r1, r0
+    movs  r2, #12
+write:
+    mov   r0, sp
+    bl    0x{FLASH_WRITE:x}
+    ldr   r0, [r4, #4]
+    adds  r0, #1
+    str   r0, [r4, #4]
+out:
+    add   sp, #20
+    pop   {{r4, r5, r6, r7, pc}}
+"""
+
+# FW8c, from MOTION_CMD for sub-types 0D..13 (as DEBUG_CMD: r0 = sub-type, r7 = the request, sp = the zeroed reply buffer, r4-r7
+# restored by the handler).  10..13 go on to DEBUG_CMD.  The last packet goes out through the handler's tail at REPLY.
+LOG_CMD = f"""
+    cmp   r0, #0xf
+    bls   log
+    ldr   r3, =DEBUG_CMD
+    bx    r3
+log:
+    mov   r4, sp
+    ldrb  r5, [r7, #2]
+    ldrb  r1, [r7, #3]
+    lsls  r1, r1, #8
+    orrs  r5, r1
+    ldrb  r1, [r7, #4]
+    lsls  r1, r1, #16
+    orrs  r5, r1
+    ldrb  r1, [r7, #5]
+    lsls  r1, r1, #24
+    orrs  r5, r1
+    movs  r1, #0xa1
+    strb  r1, [r4, #0]
+    strb  r0, [r4, #1]
+    sub   sp, #20
+    mov   r0, sp
+    mov   r1, r5
+    bl    SCAN
+    ldrb  r0, [r4, #1]
+    cmp   r0, #0xe
+    bne   serve
+    ldr   r0, [sp, #8]
+    adds  r1, r4, #6
+    bl    put
+    ldr   r0, [sp, #0]
+    adds  r1, r0, #1
+    bne   oldest
+    ldr   r0, [sp, #8]
+oldest:
+    adds  r1, r4, #2
+    bl    put
+    ldr   r1, =0x{LOG + 0x40:x}
+    ldrb  r0, [r1, #0xf]
+    strb  r0, [r4, #10]
+    b     done
+serve:
+    ldr   r0, =0x{TX_RING:x}
+    ldrh  r1, [r0]
+    ldrh  r0, [r0, #2]
+    subs  r0, r0, r1
+    lsls  r0, r0, #25
+    lsrs  r0, r0, #25
+    cmp   r0, #{LIGHT_ROOM}
+    blo   room
+    movs  r0, #0xfe
+    strb  r0, [r4, #2]
+    b     done
+room:
+    movs  r0, #0x80
+    strb  r0, [r4, #2]
+    movs  r6, #0
+    ldr   r0, [sp, #16]
+    adds  r1, r0, #1
+    bne   found
+    ldr   r1, [sp, #0]
+    adds  r2, r1, #1
+    beq   head
+    cmp   r5, r1
+    bhs   head
+    mov   r5, r1
+    ldr   r0, [sp, #4]
+found:
+    bl    PAGE_INFO
+    subs  r3, r5, r0
+    subs  r6, r1, r3
+    lsls  r7, r3, #2
+    adds  r7, r7, r2
+    adds  r7, #8
+    movs  r1, #60
+    muls  r3, r1, r3
+    ldr   r0, [r2, #4]
+    adds  r0, r0, r3
+    adds  r1, r4, #7
+    bl    put
+head:
+    mov   r0, r5
+    adds  r1, r4, #3
+    bl    put
+    strb  r6, [r4, #11]
+    add   sp, #20
+data:
+    cmp   r6, #0
+    beq   reply
+    mov   r0, sp
+    movs  r1, #15
+    bl    0x{CHECKSUM:x}
+    strb  r0, [r4, #15]
+    mov   r0, sp
+    bl    0x{QUEUE_PACKET:x}
+    movs  r0, #0
+    strh  r0, [r4, #2]
+    str   r0, [r4, #4]
+    str   r0, [r4, #8]
+    str   r0, [r4, #12]
+    movs  r5, #3
+    cmp   r6, r5
+    bhs   three
+    mov   r5, r6
+three:
+    strb  r5, [r4, #2]
+    subs  r6, r6, r5
+    adds  r1, r4, #3
+record:
+    ldr   r0, [r7]
+    adds  r7, #4
+    bl    put
+    adds  r1, #4
+    subs  r5, #1
+    bne   record
+    b     data
+done:
+    add   sp, #20
+reply:
+    ldr   r3, =0x{REPLY | 1:x}
+    bx    r3
+put:
+    strb  r0, [r1, #0]
+    lsrs  r0, r0, #8
+    strb  r0, [r1, #1]
+    lsrs  r0, r0, #8
+    strb  r0, [r1, #2]
+    lsrs  r0, r0, #8
+    strb  r0, [r1, #3]
+    bx    lr
 """
 
 
@@ -1349,7 +1664,8 @@ def patch(stock: bytes) -> bytes:
     img[:] = img.replace(STOCK_TEXT, text)
     scan = append(TAP_SCAN.replace("SEND_TAP", hex(append(SEND_TAP))))                        # FW6
     accel = redirect(HOOK, EPILOGUE, FULL_ACCEL.replace("TAP_SCAN", hex(scan)))               # FW1; FW8b retargets its bl below
-    redirect(UNKNOWN_SUB, UNKNOWN_CODE, MOTION_CMD.replace("DEBUG_CMD", hex(append(DEBUG_CMD) | 1)))   # FW4, FW16a
+    debug = hex(append(DEBUG_CMD) | 1)
+    motion = redirect(UNKNOWN_SUB, UNKNOWN_CODE, MOTION_CMD.replace("DEBUG_CMD", debug))      # FW4, FW16a; FW8c retargets it below
     redirect(STILL_CALL, asm(f"bl 0x{STILL_CHECK:x}", STILL_CALL), STILL_VETO)                # FW4
     redirect(LIGHT_HOOK, LIGHT_EPILOGUE, LIGHT_COPY)                                          # FW7a
     redirect(STOP_HOOK, STOP_CODE, LIGHT_STOP)                                                # FW7a
@@ -1367,7 +1683,14 @@ def patch(stock: bytes) -> bytes:
     code = asm(FULL_ACCEL.replace("TAP_SCAN", hex(append(scans))), accel)
     assert img[off(accel):off(accel) + len(code)] == asm(FULL_ACCEL.replace("TAP_SCAN", hex(scan)), accel)
     img[off(accel):off(accel) + len(code)] = code
-    redirect(CLOCK_CALL, asm(f"bl 0x{CLOCK_STEP:x}", CLOCK_CALL), CLOSER.replace("ISQRT", isqrt))
+    page_info = hex(append(PAGE_INFO))                                                        # FW8c
+    scan_log = hex(append(SCAN.replace("PAGE_INFO", page_info)))
+    store = hex(append(STORE.replace("SCAN", scan_log)))
+    redirect(CLOCK_CALL, asm(f"bl 0x{CLOCK_STEP:x}", CLOCK_CALL), CLOSER.replace("ISQRT", isqrt).replace("STORE", store))
+    log_cmd = append(LOG_CMD.replace("DEBUG_CMD", debug).replace("SCAN", scan_log).replace("PAGE_INFO", page_info))
+    code = asm(MOTION_CMD.replace("DEBUG_CMD", hex(log_cmd | 1)), motion)     # same length: FAULT_SPIN stays put
+    assert len(code) == len(asm(MOTION_CMD.replace("DEBUG_CMD", debug), motion))
+    img[off(motion):off(motion) + len(code)] = code
     assert CRASH >= WEAR + 8 and REC + 60 <= LOG and LOG + 88 <= 0x20EC00 and FAULT_SEL < WEAR    # outside / inside the zero-fill below, below the heap
     assert img[off(BSS_LEN):off(BSS_LEN) + 4] == struct.pack("<I", 0x55DC)
     # FW6, FW12, FW7a, FW15b, FW16g: the startup zero-fill runs on over TAP_STATE, SEQ, LIGHT, FAULT_SEL and WEAR; the overlay is copied in over its part afterwards
