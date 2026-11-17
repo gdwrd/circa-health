@@ -304,7 +304,7 @@ private fun AddWorkout(date: LocalDate, onDismiss: () -> Unit, edit: JsonObject?
 }
 
 private fun androidx.compose.foundation.lazy.LazyListScope.stepsTrend(t: Trend?) =
-    item { TrendCard("Steps · 30 days", t, "steps", AppTheme.colors.activity) }
+    item { TrendCard("Steps · 30 days", t, "steps", AppTheme.colors.activity, bars = true) }
 
 /** Two equal tiles: label, value, one footnote sentence (Heart's Resting HR / HRV row). */
 @Composable

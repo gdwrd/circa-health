@@ -22,6 +22,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.runtime.Composable
@@ -51,7 +52,6 @@ import com.patrykandpatrick.vico.compose.cartesian.layer.rememberColumnCartesian
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLine
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLineCartesianLayer
 import com.patrykandpatrick.vico.compose.cartesian.rememberCartesianChart
-import com.patrykandpatrick.vico.compose.common.component.rememberLineComponent
 import com.patrykandpatrick.vico.compose.common.fill
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianChartModelProducer
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianLayerRangeProvider
@@ -61,7 +61,6 @@ import com.patrykandpatrick.vico.core.cartesian.data.lineSeries
 import com.patrykandpatrick.vico.core.cartesian.layer.CartesianLayer
 import com.patrykandpatrick.vico.core.cartesian.layer.ColumnCartesianLayer
 import com.patrykandpatrick.vico.core.cartesian.layer.LineCartesianLayer
-import com.patrykandpatrick.vico.core.common.shape.CorneredShape
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -74,10 +73,6 @@ import java.time.LocalDate
 import java.time.YearMonth
 import java.time.format.DateTimeFormatter
 import java.util.Locale
-import kotlin.math.ceil
-import kotlin.math.floor
-import kotlin.math.log10
-import kotlin.math.pow
 import kotlin.math.roundToInt
 
 private fun JsonElement?.obj() = this as? JsonObject
@@ -98,20 +93,19 @@ private val METRICS = listOf(
     Metric("steps", "Steps", "Steps", "steps", { it.activity }, true),
     Metric("sleep_min", "Time asleep", "Time asleep", "h", { it.sleep }, true, 60.0),
     Metric("cardio_load", "Cardio load", "Load", "", { it.activity }, columns = true, note = "Heart-rate zone minutes, weighted by zone."),
-    Metric("restorative_min", "Restorative time", "Restorative", "min", { it.readiness }, columns = true, note = "Awake time with a calm heart rate and little movement."),
+    Metric("restorative_min", "Calm and still", "Calm and still", "min", { it.readiness }, columns = true, note = "Awake time with a calm heart rate and little movement."),
     Metric("breath_min", "Mindful minutes", "Mindful min", "min", { it.breathe }, columns = true, note = "Minutes of guided breathing per day."),
     Metric("fitness", "Fitness estimate", "Fitness", "", { it.heart }, note = "Estimated from resting heart rate and age. A trend, not a measurement."),
 )
-
-private val SCORES = setOf("sleep", "readiness", "activity")
 
 /** x = days since [first]; null values are already dropped. */
 private class Pts(val first: LocalDate, val last: LocalDate, val v: List<Pair<Double, Double>>, val b: List<Pair<Double, Double>>)
 
 private fun parse(json: JsonElement?, div: Double): Pts? {
     val pts = (json.obj()?.get("points") as? JsonArray)?.mapNotNull { e -> e.obj()?.let { o -> day(o["date"])?.let { it to o } } } ?: return null
-    val first = pts.firstOrNull()?.first ?: return null
-    fun col(k: String) = pts.mapNotNull { (d, o) -> o[k].num()?.let { (d.toEpochDay() - first.toEpochDay()).toDouble() to it / div } }
+    // From the first day with a value, as trend() in Theme.kt.
+    val first = pts.firstOrNull { it.second["value"].num() != null }?.first ?: return null
+    fun col(k: String) = pts.filter { it.first >= first }.mapNotNull { (d, o) -> o[k].num()?.let { (d.toEpochDay() - first.toEpochDay()).toDouble() to it / div } }
     return Pts(first, pts.last().first, col("value"), col("baseline"))
 }
 
@@ -168,11 +162,10 @@ fun TrendsScreen(backend: Boolean?, openMonth: Boolean, openInsights: Boolean = 
         }
     }) {
         item { Box(Modifier.padding(bottom = AppSpace.m)) { header() } }
-        week?.let { item { WeekCard(it) } }
-        month?.let { item { MonthCard(it, YearMonth.parse(ym), monthOpen, { monthOpen = !monthOpen }) { ym = it.toString() } } }
         item {
             androidx.compose.foundation.layout.Column(verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
-                Segmented(listOf("30 D", "90 D"), if (days == 30) 0 else 1) { days = if (it == 0) 30 else 90 }
+                val ranges = listOf(30, 90, 365)
+                Segmented(listOf("30 D", "90 D", "1 Y"), ranges.indexOf(days)) { days = ranges[it] }
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
                     METRICS.forEach { x ->
                         val sel = x == m
@@ -195,7 +188,7 @@ fun TrendsScreen(backend: Boolean?, openMonth: Boolean, openInsights: Boolean = 
                     "Not enough data yet", style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(AppSpace.l),
                 )
                 val avg = d.v.map { it.second }.average()
-                val dateFmt = DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
+                val dateFmt = DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())
                 Text(m.label, style = AppType.headline, modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.l))
                 Text("Average", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.l))
                 Text(
@@ -216,7 +209,7 @@ fun TrendsScreen(backend: Boolean?, openMonth: Boolean, openInsights: Boolean = 
                     val dot = c.secondaryLabel
                     Canvas(Modifier.fillMaxWidth().height(10.dp).padding(start = AppSpace.l + MARKER_AXIS, end = AppSpace.l)) {
                         inPeriod.forEach {
-                            val f = ((it.first.toEpochDay() - d.first.toEpochDay()) + 0.5) / (span + 1.5)
+                            val f = (it.first.toEpochDay() - d.first.toEpochDay()).toDouble() / span
                             drawCircle(dot, 2.5.dp.toPx(), Offset((f * size.width).toFloat(), size.height / 2))
                         }
                     }
@@ -233,23 +226,27 @@ fun TrendsScreen(backend: Boolean?, openMonth: Boolean, openInsights: Boolean = 
                 }
             }
         }
+        week?.let { item { WeekCard(it) } }
+        month?.let { item { MonthCard(it, YearMonth.parse(ym), monthOpen, { monthOpen = !monthOpen }) { ym = it.toString() } } }
     }
 }
 
 private fun day(e: JsonElement?) = (e as? JsonPrimitive)?.contentOrNull?.let(LocalDate::parse)
 
-/** Seven readiness rings, score means with ▲/▼ vs the previous week, best/worst night, steps + sleep; learning under 3 scored days. */
+/** Seven readiness rings, score means with ▲/▼ vs the previous week, best/worst night, steps + sleep; learning under 3 scored days; "Read the week" opens Reports. */
 @Composable
 private fun WeekCard(w: JsonObject) {
     val c = AppTheme.colors
+    val ctx = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val days = (w["days"] as? JsonArray)?.mapNotNull { it.obj() } ?: return
-    val fmt = DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
+    val fmt = DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())
     val dow = DateTimeFormatter.ofPattern("EEE", Locale.getDefault())
     val scored = w["scored_days"].num()?.toInt() ?: 0
     InsetCard {
-        Column(Modifier.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
+        Column(Modifier.padding(start = AppSpace.l, top = AppSpace.l, end = AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
             Column {
-                Text("This week", style = AppType.headline)
+                Text("Last 7 days", style = AppType.headline)
                 Text("${day(w["start"])?.format(fmt)} – ${day(w["end"])?.format(fmt)}", style = AppType.footnote, color = c.secondaryLabel)
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -273,6 +270,7 @@ private fun WeekCard(w: JsonObject) {
                 "Learning your week · $scored/3 days scored. Your summary appears after 3.", style = AppType.subhead, color = c.secondaryLabel,
             )
             MeansRow(w)
+            Text("▲▼ against the week before", style = AppType.footnote, color = c.secondaryLabel)
             val best = day(w["best_night"].obj()?.get("date"))
             val worst = day(w["worst_night"].obj()?.get("date"))?.takeIf { it != best }
             if (best != null) Text(listOfNotNull("Best night ${best.format(dow)}", worst?.let { "Worst ${it.format(dow)}" }).joinToString(" · "), style = AppType.subhead)
@@ -282,6 +280,17 @@ private fun WeekCard(w: JsonObject) {
                 w["sleep_avg_min"].num()?.let { "Sleep ${duration(it.roundToInt())} avg" },
             ).joinToString(" · ")
             if (line.isNotEmpty()) Text(line, style = AppType.subhead)
+        }
+        Row(
+            Modifier.fillMaxWidth().clickable(role = Role.Button) {
+                haptic.tick()
+                // Same route as Today's "Experiment today" row: MainActivity is singleTop.
+                ctx.startActivity(android.content.Intent(ctx, com.nsheremet.circa.MainActivity::class.java).putExtra("open", "reports"))
+            }.padding(AppSpace.l),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Read the week", style = AppType.body, color = c.tint, modifier = Modifier.weight(1f))
+            Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Open Reports", tint = c.secondaryLabel)
         }
     }
 }
@@ -355,7 +364,7 @@ private fun MonthCard(mo: JsonObject, ym: YearMonth, open: Boolean, onToggle: ()
             val totals = listOfNotNull(
                 mo["steps_total"].num()?.let { "Steps " + stepsText(it) },
                 mo["sleep_avg_min"].num()?.let { "Sleep ${duration(it.roundToInt())} avg" },
-                mo["restorative_avg_min"].num()?.let { "Restorative ${duration(it.roundToInt())} avg" },
+                mo["restorative_avg_min"].num()?.let { "Calm and still ${duration(it.roundToInt())} avg" },
             ).joinToString(" · ")
             if (totals.isNotEmpty()) Text(totals, style = AppType.subhead)
             val wk = mo["workouts"].obj()
@@ -443,59 +452,39 @@ private fun TrendChart(p: Pts, m: Metric, color: Color, avg: Double) {
             }
         }
     }
-    val ys = (p.v + p.b).map { it.second }
-    val top = ys.max()
-    val (lo, hi, step) = when {
-        m.columns -> {
-            val raw = maxOf(top / 3, 1.0)
-            val mag = 10.0.pow(floor(log10(raw)))
-            val s = listOf(1.0, 2.0, 3.0, 5.0, 10.0).first { it * mag >= raw } * mag
-            Triple(0.0, ceil(top * 1.05 / s) * s, s)
-        }
-        m.key in SCORES -> Triple(0.0, 100.0, 25.0)
-        else -> {
-            val span = top - ys.min()
-            val s = if (span > 60) 20.0 else if (span > 24) 10.0 else 5.0
-            val l = floor((ys.min() - span * 0.1) / s) * s
-            Triple(l, maxOf(ceil((top + span * 0.1) / s) * s, l + s), s)
-        }
-    }
-    val span = maxOf(p.last.toEpochDay() - p.first.toEpochDay(), 1L)
-    // Fixed x span keeps a lone column column-sized instead of chart-wide.
-    val range = CartesianLayerRangeProvider.fixed(minX = -0.5, maxX = span + 1.0, minY = lo, maxY = hi)
+    val (lo, hi, step) = roundTicks((p.v + p.b).map { it.second }, zero = m.columns, minutes = m.unit == "min")
+    val span = maxOf(p.last.toEpochDay() - p.first.toEpochDay(), 1L).toDouble()
+    // Fixed x span from the first day with data; keeps a lone column column-sized instead of chart-wide.
+    val range = CartesianLayerRangeProvider.fixed(minX = 0.0, maxX = span, minY = lo, maxY = hi)
     val band = LineCartesianLayer.rememberLine(
         fill = LineCartesianLayer.LineFill.single(fill(color.copy(alpha = 0.18f))),
         stroke = LineCartesianLayer.LineStroke.Continuous(thicknessDp = 22f),
     )
     val colLayer = if (m.columns) {
         rememberColumnCartesianLayer(
-            ColumnCartesianLayer.ColumnProvider.series(
-                rememberLineComponent(
-                    fill = fill(color), thickness = if (span > 30) 5.dp else 9.dp,
-                    shape = CorneredShape.rounded(topLeftPercent = 30, topRightPercent = 30),
-                ),
-            ),
+            ColumnCartesianLayer.ColumnProvider.series(dayColumns(color)),
             columnCollectionSpacing = 1.dp,
             rangeProvider = range,
         )
     } else null
     val lineLayer = if (!m.columns || hasBase) {
-        val main = chartLine(color, area = true)
+        val main = pointLine(color, area = true)
         rememberLineCartesianLayer(
             if (m.columns || !hasBase) LineCartesianLayer.LineProvider.series(if (m.columns) band else main)
             else LineCartesianLayer.LineProvider.series(main, band),
+            pointSpacing = if (m.columns) BAR_SPACING else 32.dp,
             rangeProvider = range,
         )
     } else null
     val kFmt = DecimalFormat("0.#")
-    val dateFmt = DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
+    val dateFmt = DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())
     val byX = p.v.toMap()
     val unit = if (m.unit.isEmpty()) "" else " ${m.unit}"
     ScrubChartHost(
         rememberCartesianChart(
             *listOfNotNull<CartesianLayer<*>>(colLayer, lineLayer).toTypedArray(),
             startAxis = startAxis(step, CartesianValueFormatter { _, y, _ -> if (y >= 1000) kFmt.format(y / 1000) + "k" else kFmt.format(y) }),
-            bottomAxis = bottomAxis(CartesianValueFormatter { _, x, _ -> p.first.plusDays(x.toLong()).format(dateFmt) }, if (span > 30) 15 else 7),
+            bottomAxis = bottomAxis(CartesianValueFormatter { _, x, _ -> p.first.plusDays(x.toLong()).format(dateFmt) }, daySpacing(span)),
             marker = rememberScrubMarker(color) { x -> "${byX[x]?.let { m.format(it) + unit } ?: "—"} · ${p.first.plusDays(x.toLong()).format(dateFmt)}" },
             decorations = listOf(dashedLine(avg, AppTheme.colors.secondaryLabel)),
         ),

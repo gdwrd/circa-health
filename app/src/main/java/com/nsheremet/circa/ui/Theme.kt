@@ -114,14 +114,22 @@ import androidx.compose.material.icons.rounded.MonitorHeart
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
+import com.patrykandpatrick.vico.compose.cartesian.layer.rememberColumnCartesianLayer
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLine
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLineCartesianLayer
 import com.patrykandpatrick.vico.compose.cartesian.rememberCartesianChart
+import com.patrykandpatrick.vico.compose.common.component.rememberLineComponent
 import com.patrykandpatrick.vico.compose.common.fill
+import com.patrykandpatrick.vico.compose.common.shader.verticalGradient
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianChartModelProducer
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianLayerRangeProvider
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianValueFormatter
+import com.patrykandpatrick.vico.core.cartesian.data.columnSeries
 import com.patrykandpatrick.vico.core.cartesian.data.lineSeries
+import com.patrykandpatrick.vico.core.cartesian.layer.CartesianLayer
+import com.patrykandpatrick.vico.core.cartesian.layer.ColumnCartesianLayer
+import com.patrykandpatrick.vico.core.common.shader.ShaderProvider
+import com.patrykandpatrick.vico.core.common.shape.CorneredShape
 import com.patrykandpatrick.vico.core.cartesian.decoration.Decoration
 import com.patrykandpatrick.vico.core.cartesian.CartesianDrawingContext
 import com.patrykandpatrick.vico.core.cartesian.layer.LineCartesianLayer
@@ -630,13 +638,51 @@ internal fun trend(json: JsonElement?): Trend? {
     val pts = ((json as? JsonObject)?.get("points") as? JsonArray)?.mapNotNull { e ->
         (e as? JsonObject)?.let { o -> (o["date"] as? JsonPrimitive)?.takeIf { it.isString }?.let { LocalDate.parse(it.content) to o } }
     } ?: return null
-    val first = pts.firstOrNull()?.first ?: return null
-    fun col(k: String) = pts.mapNotNull { (d, o) -> (o[k] as? JsonPrimitive)?.doubleOrNull?.let { (d.toEpochDay() - first.toEpochDay()).toDouble() to it } }
+    // The x axis starts at the first day with a value; leading empty days are dropped, gaps inside stay gaps.
+    val first = pts.firstOrNull { (it.second["value"] as? JsonPrimitive)?.doubleOrNull != null }?.first ?: return null
+    fun col(k: String) = pts.filter { it.first >= first }
+        .mapNotNull { (d, o) -> (o[k] as? JsonPrimitive)?.doubleOrNull?.let { (d.toEpochDay() - first.toEpochDay()).toDouble() to it } }
     return Trend(first, col("value"), col("baseline"))
 }
 
+/** y range and step for [ys] with 3 to 5 round ticks: 1-2-5 steps (from 5 once values reach 20), 15-30-60… for [minutes]; from 0 for [zero]. */
+internal fun roundTicks(ys: List<Double>, zero: Boolean, minutes: Boolean = false): Triple<Double, Double, Double> {
+    val min = if (zero) 0.0 else ys.min()
+    val max = ys.max()
+    val steps = if (minutes) generateSequence(15.0) { it * 2 } else generateSequence(1.0) { it * 10 }.flatMap { sequenceOf(it, it * 2, it * 5) }
+    val s = steps.filter { it >= 5 || max < 20 }.first { ceil(max / it) - floor(min / it) <= 4 }
+    var lo = floor(min / s) * s
+    var hi = maxOf(ceil(max / s) * s, lo + s)
+    if (hi - lo < 2 * s) if (zero || lo < s) hi += s else lo -= s // never fewer than 3 ticks
+    return Triple(lo, hi, s)
+}
+
+/** Day-axis label spacing for [span] days: about four whole dates ("3 Nov") across the card. */
+internal fun daySpacing(span: Double) = maxOf(1, ceil(span / 4).toInt())
+
+/** 2.5 dp line drawn point to point (never dips past its values); [area] adds the 20 % → 0 % fade of `chartLine`. */
 @Composable
-internal fun TrendCard(title: String, t: Trend?, unit: String, color: Color) {
+internal fun pointLine(color: Color, area: Boolean = false) = LineCartesianLayer.rememberLine(
+    fill = LineCartesianLayer.LineFill.single(fill(color)),
+    stroke = LineCartesianLayer.LineStroke.Continuous(thicknessDp = 2.5f),
+    areaFill = if (area) LineCartesianLayer.AreaFill.single(
+        fill(ShaderProvider.verticalGradient(arrayOf(color.copy(alpha = 0.2f), color.copy(alpha = 0f)))),
+    ) else null,
+    pointConnector = LineCartesianLayer.PointConnector.Sharp,
+)
+
+/** A day column's 9 dp plus the 1 dp gap: a line layer drawn over [dayColumns] must use it as its point spacing. */
+internal val BAR_SPACING = 10.dp
+
+/** One column per day in [color]; the chart's fit-to-width zoom scales it, so a year still fits the card. */
+@Composable
+internal fun dayColumns(color: Color) = rememberLineComponent(
+    fill = fill(color), thickness = 9.dp,
+    shape = CorneredShape.rounded(topLeftPercent = 30, topRightPercent = 30),
+)
+
+@Composable
+internal fun TrendCard(title: String, t: Trend?, unit: String, color: Color, bars: Boolean = false) {
     val c = AppTheme.colors
     Section(title) {
         if (t == null || t.value.isEmpty()) return@Section EmptyState(Icons.Rounded.MonitorHeart, "Not enough data yet", "Keep the ring on; this fills in after a few syncs.")
@@ -647,49 +693,56 @@ internal fun TrendCard(title: String, t: Trend?, unit: String, color: Color) {
         Value(t.value.last().second, unit, color)
         t.base.lastOrNull()?.let {
             Text(
-                "Baseline ${it.second.roundToInt()} $unit", style = AppType.subhead, color = c.secondaryLabel,
+                "Baseline ${"%,d".format(it.second.roundToInt())} $unit", style = AppType.subhead, color = c.secondaryLabel,
                 modifier = Modifier.padding(start = AppSpace.l),
             )
         }
-        val fmt = DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
+        val fmt = DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())
         val byX = t.value.toMap()
+        // The first value is x 0 (see trend), so the axis starts at the first day with data.
+        val span = maxOf(t.value.last().first, 1.0)
         Chart(
-            listOf(t.value, t.base), color, false, 7, 0,
-            marker = { x -> "${byX[x]?.roundToInt()?.let { "$it $unit" } ?: "—"} · ${t.first.plusDays(x.toLong()).format(fmt)}" },
+            listOf(t.value, t.base), color, false, daySpacing(span), 0, x = 0.0..span, bars = bars,
+            marker = { x -> "${byX[x]?.let { "%,d".format(it.roundToInt()) + " $unit" } ?: "—"} · ${t.first.plusDays(x.toLong()).format(fmt)}" },
         ) { x -> t.first.plusDays(x.toLong()).format(fmt) }
     }
 }
 
-/** [series] 0 is the main line with a faded area fill; series 1 (optional) is a wide translucent band. */
+/** [series] 0 is the main line with a faded area fill, or columns from 0 with [bars]; series 1 (optional) is a wide translucent band. */
 @Composable
 internal fun Chart(
     series: List<List<Pair<Double, Double>>>, color: Color, area: Boolean, spacing: Int, offset: Int,
     second: Color? = null, x: ClosedFloatingPointRange<Double>? = null, decorations: List<Decoration> = emptyList(), height: Dp = 180.dp,
-    marker: (Double) -> CharSequence, label: (Double) -> String,
+    bars: Boolean = false, marker: (Double) -> CharSequence, label: (Double) -> String,
 ) {
     val producer = remember { CartesianChartModelProducer() }
+    val lines = series.drop(if (bars) 1 else 0).filter { it.isNotEmpty() }
     LaunchedEffect(series) {
         producer.runTransaction {
-            lineSeries { series.filter { it.isNotEmpty() }.forEach { s -> series(s.map { it.first }, s.map { it.second }) } }
+            if (bars) columnSeries { series(series[0].map { it.first }, series[0].map { it.second }) }
+            if (lines.isNotEmpty()) lineSeries { lines.forEach { s -> series(s.map { it.first }, s.map { it.second }) } }
         }
     }
-    val main = chartLine(color, area)
-    val band = if (second != null) chartLine(second) else LineCartesianLayer.rememberLine(
+    val main = pointLine(color, area)
+    val band = if (second != null) pointLine(second) else LineCartesianLayer.rememberLine(
         fill = LineCartesianLayer.LineFill.single(fill(color.copy(alpha = 0.18f))),
         stroke = LineCartesianLayer.LineStroke.Continuous(thicknessDp = 22f),
     )
-    val ys = series.flatten().map { it.second }
-    val span = ys.max() - ys.min()
-    val step = if (span > 60) 20.0 else if (span > 24) 10.0 else 5.0
-    val lo = floor((ys.min() - span * 0.1) / step) * step
-    val hi = ceil((ys.max() + span * 0.1) / step) * step
+    val (lo, hi, step) = roundTicks(series.flatten().map { it.second }, zero = bars)
+    val range = CartesianLayerRangeProvider.fixed(minX = x?.start, maxX = x?.endInclusive, minY = lo, maxY = hi)
+    val colLayer = if (bars) rememberColumnCartesianLayer(
+        ColumnCartesianLayer.ColumnProvider.series(dayColumns(color)),
+        columnCollectionSpacing = 1.dp, rangeProvider = range,
+    ) else null
+    val lineLayer = if (lines.isNotEmpty()) rememberLineCartesianLayer(
+        if (bars) LineCartesianLayer.LineProvider.series(band) else LineCartesianLayer.LineProvider.series(main, band),
+        pointSpacing = if (bars) BAR_SPACING else 32.dp, // the default 32 dp would set the bars' x spacing and thin them
+        rangeProvider = range,
+    ) else null
     ScrubChartHost(
         rememberCartesianChart(
-            rememberLineCartesianLayer(
-                LineCartesianLayer.LineProvider.series(main, band),
-                rangeProvider = CartesianLayerRangeProvider.fixed(minX = x?.start, maxX = x?.endInclusive, minY = lo, maxY = maxOf(hi, lo + step)),
-            ),
-            startAxis = startAxis(step),
+            *listOfNotNull<CartesianLayer<*>>(colLayer, lineLayer).toTypedArray(),
+            startAxis = startAxis(step, CartesianValueFormatter { _, y, _ -> "%,d".format(y.roundToInt()) }),
             bottomAxis = bottomAxis(CartesianValueFormatter { _, x, _ -> label(x) }, spacing, offset),
             marker = rememberScrubMarker(color, marker),
             decorations = decorations,
