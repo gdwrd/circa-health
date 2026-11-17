@@ -124,6 +124,8 @@ import com.nsheremet.circa.ColmiProtocol
 import com.nsheremet.circa.Metric
 import com.nsheremet.circa.MetricsPusher
 import com.nsheremet.circa.MainActivity
+import com.nsheremet.circa.PulseBeats
+import com.nsheremet.circa.PulseHrv
 import com.nsheremet.circa.R
 import com.nsheremet.circa.SampleStore
 import com.nsheremet.circa.Prefs.apiToken
@@ -1428,6 +1430,7 @@ internal suspend fun runLiveHr(
     var measurementStarted = false
     var packets = 0; var valid = 0; var restarts = 0
     var lastLight = 0L // last light packet since the last start request; 0 = none
+    val wave = ArrayList<Int>(); val waveMs = ArrayList<Long>() // the whole reading for ST1, with arrival times
     SyncWorker.liveHrActive = true // a background sync would take the ring mid-stream
     return try {
         val connected = conn.connect()
@@ -1468,7 +1471,9 @@ internal suspend fun runLiveHr(
             val light = if (onLight != null) ColmiProtocol.parseLightPacket(pkt) else null
             if (onLight != null && light != null) {
                 lastLight = System.currentTimeMillis()
-                onLight(light.filter { ColmiProtocol.lightTag(it) == 1 && ColmiProtocol.lightReading(it) < 0x1FFF00 }.map(ColmiProtocol::lightReading))
+                val pulse = light.filter { ColmiProtocol.lightTag(it) == 1 && ColmiProtocol.lightReading(it) < 0x1FFF00 }.map(ColmiProtocol::lightReading)
+                wave += pulse; repeat(pulse.size) { waveMs += lastLight }
+                onLight(pulse)
                 continue
             }
             val parsed = ColmiProtocol.parseLiveHrPacket(pkt) ?: continue
@@ -1509,6 +1514,38 @@ internal suspend fun runLiveHr(
         conn.disconnect()
         SyncWorker.liveHrActive = false
         if (!stopWhenStable) SyncLog.add(ctx, "Breathe live HR: $packets packets, $valid valid, $restarts restarts")
+        if (wave.isNotEmpty()) runCatching {
+            // NonCancellable: Measure's sheet and Breathe's Done end the reading by cancelling
+            withContext(NonCancellable) {
+                val hrv = withContext(Dispatchers.Default) { PulseBeats.hrv(wave, waveMs) }
+                if (hrv == null) SyncLog.add(ctx, "Pulse reading: ${wave.size} samples, gate failed, nothing sent")
+                else pushPulse(ctx, pulseMetrics(hrv, waveMs.last()))
+            }
+        }.onFailure { Log.w("Settings", "Pulse reading failed", it) }
+    }
+}
+
+/** ST1's reading as three samples at its end ([endMs]); none when the quality gate failed. */
+internal fun pulseMetrics(hrv: PulseHrv?, endMs: Long): List<Metric> {
+    if (hrv == null) return emptyList()
+    val labels = mapOf("device" to "colmi_r02", "source" to "live")
+    return listOf(
+        Metric("biometric_pulse_rmssd", labels, hrv.rmssdMs, endMs),
+        Metric("biometric_pulse_hr", labels, hrv.meanHrBpm, endMs),
+        Metric("biometric_pulse_quality", labels, hrv.validFraction, endMs),
+    )
+}
+
+private suspend fun pushPulse(ctx: Context, metrics: List<Metric>) {
+    val url = ctx.vmUrl
+    if (url.isBlank()) return
+    withContext(Dispatchers.IO) {
+        runCatching {
+            val pusher = MetricsPusher(url, ctx.apiToken)
+            val ok = pusher.push(metrics)
+            SyncLog.add(ctx, "Server: pulse RMSSD %.0f ms, %.0f bpm, quality %.2f %s (${pusher.lastResult})"
+                .format(metrics[0].value, metrics[1].value, metrics[2].value, if (ok) "pushed" else "push FAILED"))
+        }.onFailure { Log.w("Settings", "Pulse push failed", it) }
     }
 }
 
