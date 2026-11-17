@@ -1,6 +1,6 @@
 # Circa v18: everything in its place
 
-Status: plan (user, 2026-11-16). Nothing built. Items UX1 to RL4 are in the ledger; each `###` item below is one
+Status: built and released as v5.0.0 on 2026-11-17 (planned by the user, 2026-11-16). Items UX1 to RL4 are in the ledger with what each one did; each `###` item below is one
 ledger item / one session. App only, unless UX4 finds a backend fault. Builds on every earlier plan: nothing here
 adds a feature, it moves, trims and corrects what exists.
 
