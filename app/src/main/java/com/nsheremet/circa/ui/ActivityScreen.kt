@@ -40,8 +40,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberColumnCartesianLayer
 import com.patrykandpatrick.vico.compose.cartesian.rememberCartesianChart
 import com.patrykandpatrick.vico.compose.common.component.rememberLineComponent
@@ -66,6 +70,9 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
+import java.util.Locale
 import kotlin.math.floor
 import kotlin.math.ceil
 import kotlin.math.roundToInt
@@ -93,7 +100,6 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
     var hr by remember { mutableStateOf<List<Pair<Double, Double>>>(emptyList()) }
     var workouts by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
     var steps by remember { mutableStateOf<Trend?>(null) }
-    var journalWorkout by remember { mutableStateOf<Set<String>>(emptySet()) } // dates with a journal "workout"
     var editing by remember { mutableStateOf<JsonObject?>(null) }
     var adding by remember { mutableStateOf(false) }
     var moving by remember { mutableStateOf<JsonObject?>(null) } // manual workout in the edit sheet
@@ -111,15 +117,17 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
                 ?.sortedBy { it.first }.orEmpty()
         }
     }
-    suspend fun load() {
-        trend(Api.trends(ctx, "steps", 30))?.let { steps = it }
-        Api.journal(ctx, 30).obj()?.let { j ->
-            journalWorkout = (j["entries"] as? JsonArray)?.mapNotNull { it.obj() }
-                ?.filter { it["kind"].str() == "workout" }?.mapNotNull { it["date"].str() }.orEmpty().toSet()
-        }
-    }
+    suspend fun load() { trend(Api.trends(ctx, "steps", 30))?.let { steps = it } }
     LaunchedEffect(Unit) { load() }
     LaunchedEffect(date) { open = null; hours = null; day = null; workouts = emptyList(); hr = emptyList(); loadDay() }
+    // A day with a workout gets its journal entry once: POST /journal replaces the day's row (the backend's auto row would turn
+    // manual), so read the journal window holding the day first.
+    LaunchedEffect(workouts) {
+        if (workouts.isEmpty()) return@LaunchedEffect
+        val d = date.toString()
+        val entries = Api.journal(ctx, ChronoUnit.DAYS.between(date, LocalDate.now()).toInt() + 1).obj()?.get("entries") as? JsonArray ?: return@LaunchedEffect
+        if (entries.none { e -> e.obj()?.let { it["date"].str() == d && it["kind"].str() == "workout" } == true }) Api.addJournal(ctx, d, "workout")
+    }
 
     val c = AppTheme.colors
     val today = date == LocalDate.now()
@@ -130,17 +138,34 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
         val hs = hours ?: return@LargeTitleScaffold
         val total = hs.sumOf { it["steps"].num() ?: 0.0 }
         item {
-            Section("Steps") {
-                if (total <= 0.0) return@Section EmptyState(
+            // Sleep's hero: label, big value, one line on the left, the day's score ring on the right; the hourly chart under it.
+            InsetCard {
+                if (total <= 0.0) return@InsetCard EmptyState(
                     Icons.Rounded.DirectionsWalk, if (today) "No steps yet today" else "No activity for this day",
                     "Steps are read every hour while you wear the ring.",
                 )
                 val goal = ctx.stepGoal
-                Box(Modifier.padding(top = AppSpace.l)) { Value(total, "steps", c.activity) }
-                Text(
-                    "${dayLabel(date)} · ${(total / goal * 100).roundToInt()}% of your ${"%,d".format(goal)} goal", style = AppType.subhead, color = c.secondaryLabel,
-                    modifier = Modifier.padding(start = AppSpace.l),
-                )
+                Row(
+                    Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(c.activity.copy(alpha = 0.12f), c.nightBottom))).padding(AppSpace.l),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Steps", style = AppType.subhead, color = c.secondaryLabel)
+                        Text(
+                            buildAnnotatedString {
+                                append("%,d".format(total.roundToInt()))
+                                withStyle(SpanStyle(fontSize = 17.sp, color = c.secondaryLabel)) { append(" steps") }
+                            },
+                            style = AppType.largeTitle,
+                        )
+                        Text("${(total / goal * 100).roundToInt()}% of your ${"%,d".format(goal)} goal", style = AppType.subhead, color = c.secondaryLabel)
+                    }
+                    day?.get("activity").obj()?.get("score").num()?.let { s ->
+                        ScoreRing(s.toFloat() / 100f, c.activity, Modifier.size(64.dp), stroke = 7.dp) {
+                            Text(s.roundToInt().toString(), style = AppType.headline)
+                        }
+                    }
+                }
                 val rows = hs.mapNotNull { o -> o["h"].num()?.let { Hour(it.toInt(), o["steps"].num() ?: 0.0, o["worn"].str() == "true") } }
                 HourlySteps(rows)
                 // Worn awake hours (08–22, the notify rule) under 50 steps; today's unfinished hour does not count yet.
@@ -156,8 +181,8 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
         val km = hs.sumOf { it["distance_m"].num() ?: 0.0 } / 1000
         if (total > 0.0) item {
             Tiles(
-                Triple("Calories", if (kcal > 0) "${kcal.roundToInt()} kcal" else "—", "Reported by the ring for this day."),
-                Triple("Distance", if (km > 0) "%.1f km".format(km) else "—", "From your steps, as the ring counts them."),
+                "Distance" to if (km > 0) "%.1f km".format(km) else "—",
+                "Calories" to if (kcal > 0) "%,d kcal".format(kcal.roundToInt()) else "—",
             )
         }
         val cardio = day?.get("cardio").obj()
@@ -172,18 +197,29 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
                     if (isOpen) WorkoutHr(w, hr, if (w["manual"].str() == "true") ({ moving = w }) else null) { editing = w }
                 }
                 if (workouts.isNotEmpty()) Hairline(Modifier.padding(start = AppSpace.l))
-                Column(Modifier.padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.m)) {
-                    TintButton("Add workout") { adding = true }
-                    if (workouts.isNotEmpty()) {
-                        if (date.toString() in journalWorkout) Text("In your journal", style = AppType.footnote, color = c.secondaryLabel)
-                        else TintButton("Add to journal") {
-                            scope.launch { if (Api.addJournal(ctx, date.toString(), "workout") != null) journalWorkout = journalWorkout + date.toString() }
-                        }
-                    }
-                }
+                TintButton("Add workout", Modifier.padding(AppSpace.l)) { adding = true }
             }
         }
-        stepsTrend(steps)
+        item {
+            Section("Steps · 30 days") {
+                val t = steps
+                if (t == null || t.value.isEmpty()) return@Section EmptyState(Icons.Rounded.DirectionsWalk, "Not enough data yet", "Keep the ring on; this fills in after a few syncs.")
+                // TrendCard's header with the average over the days shown instead of the latest day (today's steps are in the hero).
+                val avg = t.value.map { it.second }.average()
+                Text("Average", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.l, top = AppSpace.l))
+                Value(avg, "steps", c.activity)
+                t.base.lastOrNull()?.second?.takeIf { it.roundToInt() != avg.roundToInt() }?.let {
+                    Text("Baseline ${"%,d".format(it.roundToInt())} steps", style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(start = AppSpace.l))
+                }
+                val fmt = DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())
+                val byX = t.value.toMap()
+                val span = maxOf(t.value.last().first, 1.0)
+                Chart(
+                    listOf(t.value, t.base), c.activity, false, daySpacing(span), 0, x = 0.0..span, bars = true,
+                    marker = { x -> "${byX[x]?.let { "%,d".format(it.roundToInt()) + " steps" } ?: "—"} · ${t.first.plusDays(x.toLong()).format(fmt)}" },
+                ) { x -> t.first.plusDays(x.toLong()).format(fmt) }
+            }
+        }
     }
     editing?.let { w ->
         val cur = w["kind"].str()
@@ -215,9 +251,8 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
     }
     if (adding) AddWorkout(date, { adding = false }) { on, start, end, kind ->
         val a = Api.addWorkout(ctx, on, start, end, kind)?.get("workouts") as? JsonArray
-        // load before closing (closing cancels this coroutine): the day's journal entry is new
         // the reply lists the start day's workouts: not the shown day's when the start is the evening before
-        if (a != null) { if (on == date) workouts = a.mapNotNull { it.obj() }; load(); adding = false }
+        if (a != null) { if (on == date) workouts = a.mapNotNull { it.obj() }; adding = false }
         a != null
     }
     moving?.let { w ->
@@ -228,7 +263,7 @@ fun ActivityScreen(backend: Boolean?, linkDate: String? = null, onLinkHandled: (
             val a = Api.moveWorkout(ctx, date, old, on, start, end, kind)?.get("workouts") as? JsonArray
             if (a != null) {
                 if (on == date) { workouts = a.mapNotNull { it.obj() }; open = start.toDouble() } else loadDay() // it left the shown day
-                load(); moving = null
+                moving = null
             }
             a != null
         }
@@ -303,20 +338,16 @@ private fun AddWorkout(date: LocalDate, onDismiss: () -> Unit, edit: JsonObject?
     }
 }
 
-private fun androidx.compose.foundation.lazy.LazyListScope.stepsTrend(t: Trend?) =
-    item { TrendCard("Steps · 30 days", t, "steps", AppTheme.colors.activity, bars = true) }
-
-/** Two equal tiles: label, value, one footnote sentence (Heart's Resting HR / HRV row). */
+/** Two equal tiles: label and value. */
 @Composable
-private fun Tiles(vararg tiles: Triple<String, String, String>) {
+private fun Tiles(vararg tiles: Pair<String, String>) {
     val c = AppTheme.colors
     Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(AppSpace.s)) {
-        tiles.forEach { (label, value, foot) ->
+        tiles.forEach { (label, value) ->
             InsetCard(Modifier.weight(1f).fillMaxHeight()) {
                 Column(Modifier.padding(AppSpace.l)) {
                     Text(label, style = AppType.footnote, color = c.secondaryLabel)
                     Text(value, style = AppType.title)
-                    Text(foot, style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(top = AppSpace.xs))
                 }
             }
         }
@@ -437,7 +468,7 @@ internal fun HourlySteps(rows: List<Hour>, height: Dp = 160.dp) {
 
 private val KINDS = listOf("walk" to "Walk", "ride" to "Ride", "workout" to "Workout")
 
-/** "Walk · 42 min" / avg bpm, then "2:10–2:52 PM · max 141 · load 6", " · guessed" until the user confirms the kind. */
+/** "Walk · 42 min" / avg bpm, then "2:10–2:52 PM · max 141 · load 6", " · guessed" until the user confirms the kind; load 0 and "added by you" are in [WorkoutHr]. */
 @Composable
 private fun WorkoutRow(w: JsonObject, open: Boolean, onClick: () -> Unit) {
     val c = AppTheme.colors
@@ -449,8 +480,8 @@ private fun WorkoutRow(w: JsonObject, open: Boolean, onClick: () -> Unit) {
     val span = (if (!a.last().isDigit() && a.takeLast(3) == b.takeLast(3)) a.dropLast(3) else a) + "–" + b
     // A workout entered by hand has bpm / load only where the ring measured something.
     val detail = listOfNotNull(
-        span, w["max_bpm"].num()?.let { "max ${it.roundToInt()}" }, w["load"].num()?.let { "load ${it.roundToInt()}" },
-        if (w["manual"].str() == "true") "added by you" else if (w["phone"].str() == "true") "noticed by your phone" else if (w["confirmed"].str() == "true") null else "guessed",
+        span, w["max_bpm"].num()?.let { "max ${it.roundToInt()}" }, w["load"].num()?.roundToInt()?.takeIf { it > 0 }?.let { "load $it" },
+        if (w["manual"].str() == "true") null else if (w["phone"].str() == "true") "noticed by your phone" else if (w["confirmed"].str() == "true") null else "guessed",
     ).joinToString(" · ")
     Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = AppSpace.l, top = AppSpace.m, bottom = AppSpace.m), verticalAlignment = Alignment.CenterVertically) {
         Icon(icon, null, tint = c.heart, modifier = Modifier.size(28.dp))
@@ -482,6 +513,9 @@ private fun WorkoutHr(w: JsonObject, hr: List<Pair<Double, Double>>, onEdit: (()
                 ?: "The ring recorded no heart rate during this $name.",
             style = AppType.subhead, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l),
         )
+        // what the row leaves out: any load (0 too) and who entered it
+        val more = listOfNotNull(w["load"].num()?.let { "Load ${it.roundToInt()}" }, if (w["manual"].str() == "true") "Added by you" else null)
+        if (more.isNotEmpty()) Text(more.joinToString(" · "), style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.padding(horizontal = AppSpace.l))
         if (xy.isNotEmpty()) {
             val byX = xy.toMap()
             val slots = (e - s) / SLOT_S
