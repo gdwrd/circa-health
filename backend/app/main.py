@@ -78,7 +78,7 @@ def _sessions(d: date) -> list[dict]:
             continue
         start = min(t for t, v in ends.items() if v == end)
         out.append({"start": start, "end": end, **{f"{k}_min": parts[k].get(start, 0.0) for k in parts},
-                    "rem_min": parts["rem"].get(start)})  # no REM sample = a ring that does not measure REM: None, not 0
+                    "rem_min": parts["rem"].get(start)})  # no REM sample = not measured: None, not 0
     kept: list[dict] = []
     for s in sorted(out, key=lambda s: -s["total_min"]):
         if all(s["end"] <= k["start"] or s["start"] >= k["end"] for k in kept):  # overlap = re-sent copy, not a nap
