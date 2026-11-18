@@ -1202,3 +1202,9 @@ def test_rom_patch_hooks_are_installed():
     e = ringemu.Emu(quiet_mem=True, kernel="real", stack="real")
     hooks = {0x20173C: 0x205C35, 0x201644: 0x205C01, 0x201574: 0x20503D, 0x2015FC: 0x205BD9}    # pvPortMalloc, os_timer_create, WDG_SystemReset, queue create
     assert {p: e.r32(p) for p in hooks} == hooks
+
+
+def test_ringprobe_plan_steps_parse():
+    import ringprobe
+    assert ringprobe.parse_steps(["0:03", "2:v2:bc2501003e8102", "1:a10f"]) == [
+        (0.0, False, bytes([3])), (1.0, False, bytes([0xA1, 0x0F])), (2.0, True, bytes.fromhex("bc2501003e8102"))]

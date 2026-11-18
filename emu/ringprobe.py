@@ -1,6 +1,10 @@
 """PC probe for the ring over Bluetooth (bleak).  Debug commands need firmware ca0003 or later (patch_fw.py, FW16a).
 
+  python ringprobe.py scan [10]                    list nearby devices (address, name, RSSI), strongest first; no connect
+  python ringprobe.py info                         device name, firmware/hardware revision (2a26/2a27), every service and characteristic
   python ringprobe.py plan 20 0:03 1:a10f          timed plan: each hex command t s after subscribing, every reply logged
+  python ringprobe.py plan 20 4:v2:bc2501003e8102  t:v2:hex = raw bytes (no framing) to V2 de5bf72a, written with response
+  python ringprobe.py plan 20 0:03 --out run.log   also append every printed line to run.log (date-time and address first)
   python ringprobe.py peek 0x20000c 4              a1 10 reads, hex dump
   python ringprobe.py dump 0x0 0x40a00 rom.bin     same into a file, 12 bytes a request; run it again to resume
   python ringprobe.py crash [--clear]              a1 11: boot counter and crash record (--clear: a1 11 01, then read),
@@ -16,6 +20,7 @@ Ring address: --addr, else RING_ADDR, else 31:37:42:30:68:07.  RESP=1 writes wit
 import argparse, asyncio, collections, os, struct, sys, time
 
 WRITE, NOTIFY = "6e400002-b5a3-f393-e0a9-e50e24dcca9e", "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+V2_WRITE, V2_NOTIFY = "de5bf72a-d711-4e47-af26-65e3012a5dc7", "de5bf729-d711-4e47-af26-65e3012a5dc7"
 STREAM = {(0xA1, 0x0C): "light", (0xA1, 0x05): "motion"}
 REC_MAGIC = 0x48535243
 FRAME = {1: ("r0", "r1", "r2", "r3", "r12", "lr", "pc", "xpsr"), 2: ("mode", "reason", "r2", "r3", "r4", "r5", "r6", "r7")}
@@ -29,6 +34,12 @@ SELECTORS = ("stacked pc", "stacked lr", "stacked r0", "stacked r1", "stacked r2
 def pkt(payload: bytes) -> bytes:
     b = payload.ljust(15, b"\0")
     return b + bytes([sum(b) & 0xFF])
+
+
+def parse_steps(steps: list) -> list:
+    """["t:hex" | "t:v2:hex"] -> [(t, v2, bytes)] in time order."""
+    return sorted((float(t), h[:3] == "v2:", bytes.fromhex(h[3:] if h[:3] == "v2:" else h))
+                  for t, _, h in (a.partition(":") for a in steps))
 
 
 def peek_request(addr: int, n: int) -> bytes:
@@ -96,16 +107,19 @@ class Ring:
         self.last[k] = self.now()
         if k == "light": self.samples[sec] += d[2] // 3
 
-    async def connect(self) -> None:
+    async def connect(self, v2: bool = False, strict: bool = True) -> None:
         from bleak import BleakClient, BleakScanner
         dev = await BleakScanner.find_device_by_address(self.addr, timeout=20)
         if not dev: raise ConnectionError("ring not found in scan")
         self.gone.clear()
         self.client = BleakClient(dev, disconnected_callback=lambda c: (print(f"{self.now():7.2f} DISCONNECTED"), self.gone.set()))
         await self.client.connect()
-        await self.client.start_notify(NOTIFY, self.on)
-        if os.environ.get("V2"):
-            await self.client.start_notify("de5bf729-d711-4e47-af26-65e3012a5dc7", lambda _, d: print(f"{self.now():7.2f} <-V2 {bytes(d).hex()}"))
+        try: await self.client.start_notify(NOTIFY, self.on)
+        except Exception as e:
+            if strict: raise
+            print(f"V1 notify {NOTIFY}: {type(e).__name__} {e}")
+        if v2 or os.environ.get("V2"):
+            await self.client.start_notify(V2_NOTIFY, lambda _, d: print(f"{self.now():7.2f} <-V2 {bytes(d).hex()}"))
         self.t0 = time.monotonic()
 
     async def close(self) -> None:
@@ -167,12 +181,14 @@ async def read(ring: Ring, addr: int, length: int, sink, done: int = 0, tries: i
 
 async def plan(ring: Ring, dur: float, steps: list) -> None:
     ring.echo = True
-    for t, h in sorted((float(a.split(":")[0]), a.split(":")[1]) for a in steps):
+    for t, v2, b in parse_steps(steps):
         try: await asyncio.wait_for(ring.gone.wait(), max(0, t - ring.now()))
         except asyncio.TimeoutError: pass
         if ring.gone.is_set(): break
-        print(f"{ring.now():7.2f} -> {h}")
-        try: await ring.send(pkt(bytes.fromhex(h))); print(f"{ring.now():7.2f}    written")
+        print(f"{ring.now():7.2f} {'->V2' if v2 else '->'} {b.hex()}")
+        try:
+            await (ring.client.write_gatt_char(V2_WRITE, b, response=True) if v2 else ring.send(pkt(b)))
+            print(f"{ring.now():7.2f}    written")
         except Exception as e: print(f"{ring.now():7.2f} WRITE FAILED {e}"); break
     try: await asyncio.wait_for(ring.gone.wait(), max(0, dur - ring.now()))
     except asyncio.TimeoutError: pass
@@ -189,18 +205,42 @@ async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--addr", dest="ring", default=os.environ.get("RING_ADDR", "31:37:42:30:68:07"))
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("plan"); p.add_argument("seconds", type=float); p.add_argument("steps", nargs="*", metavar="t:hex")
+    p = sub.add_parser("scan"); p.add_argument("seconds", type=float, nargs="?", default=10)
+    sub.add_parser("info")
+    p = sub.add_parser("plan"); p.add_argument("seconds", type=float); p.add_argument("steps", nargs="*", metavar="t:hex|t:v2:hex")
+    p.add_argument("--out", metavar="file", help="also append every printed line to this file")
     p = sub.add_parser("peek"); p.add_argument("addr", type=lambda s: int(s, 0)); p.add_argument("len", type=lambda s: int(s, 0))
     p = sub.add_parser("dump"); p.add_argument("addr", type=lambda s: int(s, 0)); p.add_argument("len", type=lambda s: int(s, 0)); p.add_argument("file")
     p = sub.add_parser("crash"); p.add_argument("--clear", action="store_true")
     p = sub.add_parser("aon"); p.add_argument("reg", type=lambda s: int(s, 0)); p.add_argument("count", type=lambda s: int(s, 0))
     p = sub.add_parser("fault-select"); p.add_argument("n", type=lambda s: int(s, 0), choices=range(256), metavar="n")
     a = ap.parse_args()
+    if a.cmd == "scan":
+        from bleak import BleakScanner
+        found = sorted((await BleakScanner.discover(timeout=a.seconds, return_adv=True)).values(), key=lambda x: -x[1].rssi)
+        for d, adv in found: print(f"{d.address}  {d.name or adv.local_name or '?':<24} {adv.rssi:4d} dBm")
+        return print(f"{len(found)} devices")
+    steps = parse_steps(a.steps) if a.cmd == "plan" else []     # bad hex fails here, before connecting
+    if a.cmd == "plan" and a.out:
+        out, real = open(a.out, "a", encoding="utf-8", buffering=1), sys.stdout
+        # tee: the notification callbacks print too, so swap stdout rather than each print
+        sys.stdout = type("Tee", (), {"write": lambda _, s: (real.write(s), out.write(s)), "flush": lambda _: (real.flush(), out.flush())})()
+        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} ring {a.ring}")
     ring = Ring(a.ring)
-    await ring.connect()
+    await ring.connect(v2=any(v2 for _, v2, _ in steps), strict=a.cmd != "info")
     print(f"connected {time.strftime('%H:%M:%S')}")
     try:
         if a.cmd == "plan": await plan(ring, a.seconds, a.steps)
+        elif a.cmd == "info":
+            c = ring.client
+            print(f"name {c.name}")
+            for label, u in (("firmware revision", "00002a26-0000-1000-8000-00805f9b34fb"), ("hardware revision", "00002a27-0000-1000-8000-00805f9b34fb")):
+                if not c.services.get_characteristic(u): print(f"{label} absent"); continue
+                try: print(f"{label} {(await c.read_gatt_char(u)).decode(errors='replace')}")
+                except Exception as e: print(f"{label} {type(e).__name__} {e}")
+            for s in c.services:
+                print(f"service {s.uuid}  {s.description}")
+                for ch in s.characteristics: print(f"  {ch.uuid}  {','.join(ch.properties)}")
         elif a.cmd == "peek":
             data = bytearray()
             await read(ring, a.addr, a.len, data.extend)
