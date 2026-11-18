@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Derive the SR101 firmware-update URL the JRing app/SDK builds, and (optionally) probe it.
+"""Derive the SR101 firmware-update URL the JRing app/SDK builds; --probe checks it, --scan lists the family.
 
-Static-only: the derivation is offline and deterministic. --probe does read-only HTTP GETs
-to the vendor's public CDN (no personal data, no device contact). Run with `python -I`.
+Offline by default. --probe GETs the two URLs for 003A0061; --scan sends 256 HEAD requests
+(fwupdater/en/003A00xx/update.json) and prints each model that has one, with its fwUrl.
+Requests carry only the model code. Run with `python -I`.
 
 Evidence [app]:
   com.sxr.sdk.ble.keepfit.service.b.n0 =
@@ -45,3 +46,13 @@ if __name__ == "__main__":
                 print(f"{e.code}  {u}")
             except Exception as e:
                 print(f"ERR {e}  {u}")
+    if "--scan" in sys.argv:
+        import json, urllib.request, urllib.error
+        for did in range(256):
+            u = urls(f"003A{did:04X}")[0]
+            try:
+                urllib.request.urlopen(urllib.request.Request(u, method="HEAD"), timeout=20)
+            except urllib.error.HTTPError:
+                continue
+            info = json.load(urllib.request.urlopen(u, timeout=20))["updateInfo"]
+            print(info["versionCode"], info["chipType"], info["fwUrl"], info["md5"])
