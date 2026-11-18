@@ -32,6 +32,14 @@ def test_sleep_timing_outside_window():
     assert sleep_score({**GOOD, "midpoint_h": 23.0}, 450)["contributors"]["timing"] == 67
 
 
+def test_sleep_without_rem_drops_only_that_contributor():
+    night = {**SHORT, "regularity_sd": 20}
+    a, b = sleep_score(night, 450), sleep_score({**night, "rem_min": None}, 450)
+    assert a["score"] == 63 and round(a["contributors"]["rem"]) == 44  # a night with REM scores as before
+    assert b["contributors"] == {**a["contributors"], "rem": None} and b["score"] == 67  # mean of 6, not 7
+    assert sleep_score({**night, "rem_min": 0}, 450)["contributors"]["rem"] == 0  # measured, none found
+
+
 NIGHT = {"hr_p10": 52, "hrv_mean": 60, "sleep_score": 95, "recovery_frac": 0.3}
 BASE = {"rhr": 55, "hrv": 55, "sleep_min": 460, "steps": 8200}
 

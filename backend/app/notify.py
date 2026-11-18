@@ -109,7 +109,7 @@ QUALITY = ("total", "efficiency", "restfulness", "rem", "deep")  # timing/regula
 
 def bedtime_window(d: date) -> dict:
     """scoring.bedtime_window over the last 60 days' scored nights (shared by /sleep, /today and _bedtime)."""
-    nights = [(_after_noon(r["c"]["session"]["start"]), mean(r["c"]["sleep"][k] for k in QUALITY))
+    nights = [(_after_noon(r["c"]["session"]["start"]), mean(v for k in QUALITY if (v := r["c"]["sleep"][k]) is not None))  # rem is None on a ring without REM
               for r in db.days(d - timedelta(59), d) if r["c"].get("session") and r["c"].get("sleep")]
     return scoring.bedtime_window(nights)
 

@@ -43,6 +43,29 @@ def test_ingest_rescores_and_today_has_sleep_score(monkeypatch) -> None:
         assert db.days(d, d)
 
 
+def test_night_without_rem_sample(tmp_path, monkeypatch) -> None:
+    """A ring that sends no biometric_sleep_rem_min: rem stays null through the clip, the score, the day routes and an edit."""
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "norem.db"))
+    monkeypatch.delenv("TZ", raising=False)
+    db.init()
+    d = date.today() - timedelta(1)
+    t0 = int(samples.midnight(d).timestamp()) - 3600
+    load({"biometric_sleep_end_ts": {t0: t0 + 440 * 60}, "biometric_sleep_total_min": {t0: 420.0},
+          "biometric_sleep_awake_min": {t0: 20.0}, "biometric_sleep_deep_min": {t0: 80.0},
+          "biometric_screen_on": {t0 + 600: 1.0, t0 + 1200: 0.0},  # clips the start, so the clip line runs
+          "biometric_hr_bpm": {t0 + i * 300: 55.0 for i in range(80)}})
+    monkeypatch.setattr(main, "_vitals", lambda: {})
+    main._score_day(d)
+    with TestClient(app) as c:
+        s = c.get(f"/sleep?date={d}", headers=H).json()
+        assert s["session"]["start"] == t0 + 1200 and s["session"]["rem_min"] is None and s["session"]["deep_min"] == 80
+        assert s["contributors"]["rem"] is None and s["score"] is not None and s["bedtime"] is not None
+        j = c.get(f"/today?date={d}", headers=H).json()
+        assert j["sleep"]["score"] == s["score"] and j["sleep"]["contributors"]["rem"] is None
+        e = c.patch("/sleep", json={"date": d.isoformat(), "start": t0 + 1800, "end": t0 + 400 * 60}, headers=H).json()
+        assert e["session"]["rem_min"] is None and e["contributors"]["rem"] is None
+
+
 def test_hr_drops_nonpositive_and_clamps_hours() -> None:
     now = time.time()
     load({"biometric_hr_bpm": {now - 3600: 0.0, now - 1800: 61.0, now - 47 * 3600: 62.0, now - 50 * 3600: 63.0}})

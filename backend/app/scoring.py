@@ -36,7 +36,7 @@ def confidence(coverage: float, present: int, total: int) -> str:
 
 
 def sleep_score(session: dict, need_min: float) -> dict:
-    """session: total_min (asleep), awake_min, rem_min, deep_min, midpoint_h (local hour 0-24),
+    """session: total_min (asleep), awake_min, rem_min (None = not measured), deep_min, midpoint_h (local hour 0-24),
     regularity_sd (minutes, from regularity(); None while learning)."""
     asleep, awake = session["total_min"], session["awake_min"]
     h, sd = session["midpoint_h"], session.get("regularity_sd")
@@ -46,7 +46,7 @@ def sleep_score(session: dict, need_min: float) -> dict:
         "total": _lin(asleep, 240, need_min),
         "efficiency": _lin(eff, 0.75, 0.95),
         "restfulness": _lin(awake, 60, 10),
-        "rem": _lin(session["rem_min"], 0, 90),
+        "rem": None if session["rem_min"] is None else _lin(session["rem_min"], 0, 90),
         "deep": _lin(session["deep_min"], 0, 90),
         "timing": max(0.0, 100 - 33 * outside),
         "regularity": None if sd is None else _lin(sd, 120, 30),
