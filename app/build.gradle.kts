@@ -76,6 +76,11 @@ dependencies {
     implementation(libs.androidx.glance.appwidget)
     implementation(libs.play.services.location)
     implementation(libs.litertlm.android)
+    implementation(libs.koog.openai.client)
+    implementation(libs.koog.anthropic.client)
+    implementation(libs.koog.openrouter.client)
+    implementation(libs.koog.http.client.ktor)
+    implementation(libs.ktor.client.okhttp)
 
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
