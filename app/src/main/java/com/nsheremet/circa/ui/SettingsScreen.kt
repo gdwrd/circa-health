@@ -129,6 +129,7 @@ import com.nsheremet.circa.PulseHrv
 import com.nsheremet.circa.R
 import com.nsheremet.circa.SampleStore
 import com.nsheremet.circa.Prefs.apiToken
+import com.nsheremet.circa.Prefs.reportProvider
 import com.nsheremet.circa.Prefs.autoReadings
 import com.nsheremet.circa.Prefs.batteryAlerts
 import com.nsheremet.circa.Prefs.carAddress
@@ -205,6 +206,8 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
     var hiddenTiles by remember { mutableStateOf(ctx.hiddenTiles) }
     var reportName by remember { mutableStateOf(ctx.reportName) }
     var offerModel by remember { mutableStateOf(false) }
+    var provider by remember { mutableStateOf(ctx.reportProvider) }
+    var pickWriter by remember { mutableStateOf(false) }
     var pickCar by remember { mutableStateOf<List<BluetoothDevice>?>(null) } // the bonded devices while the Car dialog is open
     var driveNow by remember { mutableStateOf(System.currentTimeMillis()) }
     var pickInterval by remember { mutableStateOf(false) }
@@ -758,8 +761,11 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
         }
         "Reports" -> {
         item {
-            SettingsGroup(null, "Circa can write each report card as a short note, on this phone, with an open model (Gemma 4). " +
-                "Nothing you write or measure leaves the phone for it. Without the model the cards show their plain text.") {
+            val writer = PROVIDERS.first { it.first == provider }.second
+            SettingsGroup(null, if (provider == "phone") "Circa can write each report card as a short note, on this phone, with an open model (Gemma 4). " +
+                "Nothing you write or measure leaves the phone for it. Without the model the cards show their plain text."
+                else "Circa can write each report card as a short note with a model from $writer, using your own key. " +
+                    "The facts in the note's prompt, your health figures and your name, are sent to $writer for it.") {
                 SwitchRow("Write reports", writerOn) { on ->
                     haptic.tick()
                     ctx.reportWriter = on; writerOn = on
@@ -768,7 +774,9 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
                 Hairline(Modifier.padding(start = AppSpace.l))
                 FieldRow("Your name", reportName, "Not set") { reportName = it.take(24); ctx.reportName = reportName }
                 Hairline(Modifier.padding(start = AppSpace.l))
-                ReportModelRows(offerModel) { offerModel = false }
+                ChevronRow("Written by", writer) { pickWriter = true }
+                Hairline(Modifier.padding(start = AppSpace.l))
+                if (provider == "phone") ReportModelRows(offerModel) { offerModel = false } else CloudModelRows(provider)
             }
         }
         }
@@ -821,6 +829,31 @@ fun SettingsScreen(hasPermissions: () -> Boolean, requestPermissions: () -> Unit
             },
             confirmButton = {},
             dismissButton = { TextButton({ pickInterval = false }) { Text("Cancel") } },
+        )
+    }
+
+    if (pickWriter) {
+        AlertDialog(
+            onDismissRequest = { pickWriter = false },
+            containerColor = c.card,
+            title = { Text("Written by") },
+            text = {
+                Column {
+                    PROVIDERS.forEach { (id, name) ->
+                        Text(
+                            name + if (id == provider) "  ✓" else "",
+                            style = AppType.body, color = if (id == provider) c.tint else c.label,
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                haptic.tick()
+                                ctx.reportProvider = id; provider = id
+                                pickWriter = false
+                            }.padding(vertical = AppSpace.m),
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton({ pickWriter = false }) { Text("Cancel", color = c.tint) } },
         )
     }
 
@@ -1324,7 +1357,7 @@ internal fun ValueRow(title: String, value: String) {
 }
 
 @Composable
-private fun FieldRow(
+internal fun FieldRow(
     title: String,
     value: String,
     placeholder: String,
