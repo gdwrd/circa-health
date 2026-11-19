@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.scoring import (FEELINGS, MOMENTS, activity_score, band, baseline, bedtime_window, confidence, derived, drive, guess_stats, low_index, motion_label, moves,
+from app.scoring import (FEELINGS, MOMENTS, activity_score, band, baseline, bedtime_window, confidence, derived, drive, guess_stats, low_index, motion_day, motion_label, moves,
                          readiness_score, regularity, resilience, robust, sleep_debt, sleep_score, social_jetlag, still_hours, strain, stress_zones,
                          suggest, tonight, what_if, wind_down)
 
@@ -280,3 +280,15 @@ def test_motion_label_boundaries() -> None:
     assert motion_label(60, 0, 0) == "unsampled"  # tap-wait minute: still 60 but not desk
     assert motion_label(21, 2000, 60) == "desk" and motion_label(20, 784, 60) == "active"
     assert motion_label(20, 800, 60) == "ride" and motion_label(20, 800, 1) == "ride"
+
+
+def test_motion_day_slots() -> None:
+    desk, act, ride, off = (30, 0, 60), (0, 100, 60), (0, 900, 60), (60, 0, 0)
+    m = {0: act, 60: act, 120: ride, 180: desk,  # slot 0: 3 moving > 1 still -> m
+         600: act, 660: desk, 720: desk,  # slot 1: 1 moving, 2 still -> s
+         1200: off, 1260: off,  # slot 2: unsampled only -> -
+         1800: act, 1860: act, 1920: act, 1980: act,  # slot 3: 4 moving, 0 still
+         5000 * 60: act}  # past the last slot: ignored
+    assert motion_day(m, 0, 5) == {"still_min": 3, "moving_min": 8, "strip": "ms-m-"}
+    assert motion_day({0: act, 60: act}, 0, 1)["strip"] == "s"  # 2 moving is under the 3-minute floor
+    assert motion_day({}, 0, 0) == {"still_min": 0, "moving_min": 0, "strip": ""}

@@ -199,6 +199,7 @@ fun ActivityScreen(backend: Boolean?, date: LocalDate = LocalDate.now(), onDate:
                 TintButton("Add workout", Modifier.padding(AppSpace.l)) { adding = true }
             }
         }
+        day?.get("motion").obj()?.let { mo -> item { Movement(mo) } }
         item {
             Section("Steps · 30 days") {
                 val t = steps
@@ -349,6 +350,39 @@ private fun Tiles(vararg tiles: Pair<String, String>) {
                     Text(value, style = AppType.title)
                 }
             }
+        }
+    }
+}
+
+/** `/today.motion`: the ring's motion log, still / moving minutes and one bar segment per 10-minute slot of the day. */
+@Composable
+private fun Movement(mo: JsonObject) {
+    val c = AppTheme.colors
+    val strip = mo["strip"].str().orEmpty()
+    InsetCard {
+        Column(Modifier.fillMaxWidth().padding(AppSpace.l), verticalArrangement = Arrangement.spacedBy(AppSpace.s)) {
+            Text("Movement", style = AppType.footnote, color = c.secondaryLabel)
+            Row {
+                listOf("Still" to "still_min", "Moving" to "moving_min").forEach { (label, k) ->
+                    Column(Modifier.weight(1f)) {
+                        Text(label, style = AppType.subhead, color = c.secondaryLabel)
+                        Text(duration(mo[k].num()?.roundToInt() ?: 0), style = AppType.title)
+                    }
+                }
+            }
+            Canvas(Modifier.fillMaxWidth().height(8.dp)) {
+                val w = size.width / maxOf(144, strip.length) // a full day (150 on a DST fall-back day); today's strip stops at now
+                drawRoundRect(c.secondaryLabel.copy(alpha = 0.12f), cornerRadius = CornerRadius(size.height / 2))
+                strip.forEachIndexed { i, ch ->
+                    val col = when (ch) { 'm' -> c.activity; 's' -> c.secondaryLabel.copy(alpha = 0.45f); else -> return@forEachIndexed }
+                    drawRect(col, Offset(i * w, 0f), Size(w, size.height))
+                }
+            }
+            Row {
+                Text("00:00", style = AppType.footnote, color = c.secondaryLabel, modifier = Modifier.weight(1f))
+                Text("24:00", style = AppType.footnote, color = c.secondaryLabel)
+            }
+            Text("From the ring's motion log. Moving means your hand was moving, not steps.", style = AppType.footnote, color = c.secondaryLabel)
         }
     }
 }

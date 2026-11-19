@@ -1098,3 +1098,25 @@ def test_today_because_today_only() -> None:
         db.add_journal(d.isoformat(), "alcohol", None, None, 3)
         assert [x["kind"] for x in c.get("/today", headers=H).json()["because"]["today"]] == ["alcohol"]
         assert c.get(f"/today?date={d - timedelta(1)}", headers=H).json()["because"] is None
+
+
+def test_today_motion(tmp_path, monkeypatch) -> None:
+    """Motion log minutes: asleep ones drop out, the strip covers the day; a day without them has motion null."""
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "motion.db"))
+    monkeypatch.delenv("TZ", raising=False)
+    db.init()
+    d = date.today() - timedelta(1)
+    m = int(samples.midnight(d).timestamp())
+    monkeypatch.setattr(main, "_vitals", lambda: {})
+    main._score_day(d)
+    with TestClient(app) as c:
+        assert c.get(f"/today?date={d}", headers=H).json()["motion"] is None
+    ts = [m + 60 * i for i in range(600)]  # 00:00-10:00; asleep until 07:00
+    load({"biometric_sleep_end_ts": {m: m + 7 * 3600}, "biometric_sleep_total_min": {m: 420.0},
+          "motion_still": {t: 0.0 if t < m + 8 * 3600 else 40.0 for t in ts},
+          "motion_jerk": {t: 100.0 for t in ts}, "motion_sampled": {t: 60.0 for t in ts}})
+    main._score_day(d)
+    with TestClient(app) as c:
+        mo = c.get(f"/today?date={d}", headers=H).json()["motion"]
+    assert mo["moving_min"] == 60 and mo["still_min"] == 120
+    assert mo["strip"].startswith("-" * 42 + "m" * 6 + "s" * 12) and set(mo["strip"][60:]) == {"-"}  # 144 slots off DST days

@@ -295,6 +295,11 @@ def _score_day(d: date) -> None:
             db.delete_auto(d.isoformat(), k)
     inputs |= {"cardio_load": load and load["load"], "fitness": cardio.fitness(mh, base["rhr"]),
                "restorative_min": cardio.restorative(day_hr, inputs.get("rhr") or base["rhr"], steps_h, awake)}
+    # ring motion log (FW8d): kept out of inputs, which hold numbers; None before the firmware logged it
+    mo = {k: samples.raw(f"motion_{k}", samples.midnight(d), end) for k in ("still", "jerk", "sampled")}
+    day0 = samples.midnight(d).timestamp()
+    motion = scoring.motion_day({t: (v, mo["jerk"].get(t, 0.0), mo["sampled"].get(t, 0.0)) for t, v in mo["still"].items() if awake(t)},
+                                day0, max(0, ceil((min(end.timestamp() + 1, now.timestamp()) - day0) / 600))) if any(mo.values()) else None
 
     med = cfg["medication_started"]  # rhr/hrv baselines use only days on medication (new normal)
     window = {k: [p["inputs"].get(k) for p in prior if not med or k not in ("rhr", "hrv") or p["date"].isoformat() >= med]
@@ -321,7 +326,7 @@ def _score_day(d: date) -> None:
     contributors = {"sleep": sleep and sleep["contributors"], "readiness": ready and ready["contributors"],
                     "activity": activity and activity["contributors"], "inputs": inputs, "stress": zones, "session": n,
                     "signals": sig, "sleep_extra": extra, "wear": wear, "cardio": load, "workouts": workouts,
-                    "suggest": suggest,
+                    "suggest": suggest, "motion": motion,
                     "confidence": {"sleep": conf(sleep, cover), "readiness": conf(ready, cover),
                                    "activity": conf(activity, worn_share)}}
     kept = {k: v for k, v in base.items() if v is not None}
@@ -515,6 +520,7 @@ def today(day: str | None = Query(None, alias="date")) -> dict:
                    "minutes": (row["c"].get("cardio") or {}).get("minutes"), "days": days,
                    "target": cardio.target(row.get("readiness_score"), m) if status == "ok" else None},
         "workouts": row["c"].get("workouts", []),
+        "motion": row["c"].get("motion"),
         **({"breathe": {"today_min": mins([b for b in wk if _dt(b["start"]).date() == d]), "week_min": mins(wk),
                         "sessions": len(wk)}} if wk or db.query("SELECT 1 FROM breath_session LIMIT 1") else {}),
         "tonight": {"bedtime": notify.bedtime_window(_today()), "debt": debt(_today()), "plan": notify.tonight(_today()),

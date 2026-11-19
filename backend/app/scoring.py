@@ -350,3 +350,15 @@ def motion_label(still: float, jerk: float, sampled: float) -> str:
     if still >= DESK_STILL_S:
         return "desk"
     return "ride" if jerk >= RIDE_JERK_MG else "active"
+
+
+def motion_day(minutes: dict[float, tuple[float, float, float]], start: float, slots: int) -> dict:
+    """Awake motion-log minutes {t: (still, jerk, sampled)} -> still/moving minutes and one char per 10-min slot from start:
+    m (more moving than still, at least 3 moving), s (any still or moving), - (unsampled, asleep or missing). Ride counts as moving."""
+    still, moving = [0] * slots, [0] * slots
+    for t, (st, jerk, sampled) in minutes.items():
+        i = int((t - start) // 600)
+        if 0 <= i < slots and (lab := motion_label(st, jerk, sampled)) != "unsampled":
+            (still if lab == "desk" else moving)[i] += 1
+    strip = "".join("m" if m > s and m >= 3 else "s" if m + s else "-" for s, m in zip(still, moving))
+    return {"still_min": sum(still), "moving_min": sum(moving), "strip": strip}
