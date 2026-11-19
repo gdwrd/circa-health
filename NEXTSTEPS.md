@@ -62,7 +62,7 @@
 - **v20: notes from a cloud model** (user, 2026-11-19): the written notes may come from a cloud model in place of the one on the phone. Settings picks the writer (this phone, OpenRouter, Anthropic or OpenAI), an API key, a model from the provider's own list (OpenRouter's free models marked) and has a Test button; the phone calls the provider directly, no backend. Through JetBrains Koog so provider API changes are a version bump. Usage and cost are left out for now. Items CW1 to CW5 below.
 
 ## Active Task: T2 probe — first read of a real R09 (user, 2026-11-18; waits for a genuine R09)
-**Hold lifted for v20 (user, 2026-11-19: "put the tasks to the ledger so we can start working on them in the new session").** CW1 to CW5 in "Open from v20" may run, and CW1 is the next item for `next` and `orchestrate` while T2b to T2f wait for hardware. The hold below stays for everything else.
+**Hold lifted for v20 (user, 2026-11-19: "put the tasks to the ledger so we can start working on them in the new session").** CW1 to CW5 in "Open from v20" may run, CW1 to CW4 landed on 2026-11-19 (`15e0de9`, `aab19ad`, `b0bcc32`, `f58757f`; not released, not on the phone), and CW5 (user-driven: real keys on the phone, then 5.4.0) is next while T2b to T2f wait for hardware. The hold below stays for everything else.
 
 **ALL OTHER ITEMS ON HOLD (user, 2026-11-18: "put all other ledger items on hold").** Start nothing outside this section, in `next` or `orchestrate`, until T2f is closed or the user lifts the hold. This covers every open item below and in the Backlog, whatever its own hold or "may run" text says. User-driven watching on the R02 (rides, walks, battery, `motion_sampled`) goes on: it is not agent work.
 
