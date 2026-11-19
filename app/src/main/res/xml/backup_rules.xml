@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cloud API keys stay on this phone. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="cloud_keys.xml" />
+</full-backup-content>

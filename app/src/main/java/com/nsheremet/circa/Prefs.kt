@@ -45,6 +45,10 @@ object Prefs {
     private const val KEY_AUTO_READINGS   = "auto_readings"
     private const val KEY_LAST_AUTO_MS    = "last_auto_reading_ms"
     private const val KEY_LAST_MOTION_SEQ = "last_motion_seq"
+    private const val KEY_REPORT_PROVIDER = "report_provider"
+    private const val KEY_CLOUD_MODEL     = "cloud_model_"
+    /** API keys live here; backup_rules.xml and data_extraction_rules.xml keep this file out of backups. */
+    private const val KEYS_NAME = "cloud_keys"
 
     private fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -132,6 +136,19 @@ object Prefs {
     var Context.reportName: String
         get() = prefs(this).getString(KEY_REPORT_NAME, "") ?: ""
         set(v) = prefs(this).edit().putString(KEY_REPORT_NAME, v).apply()
+
+    /** Settings › Reports: who writes the notes, "phone" (default), "openrouter", "anthropic" or "openai". */
+    var Context.reportProvider: String
+        get() = prefs(this).getString(KEY_REPORT_PROVIDER, "phone") ?: "phone"
+        set(v) = prefs(this).edit().putString(KEY_REPORT_PROVIDER, v).apply()
+
+    /** The model id chosen for a cloud provider; "" = none yet. */
+    fun Context.cloudModel(provider: String): String = prefs(this).getString(KEY_CLOUD_MODEL + provider, "") ?: ""
+    fun Context.setCloudModel(provider: String, id: String) = prefs(this).edit().putString(KEY_CLOUD_MODEL + provider, id).apply()
+
+    /** The user's API key for a cloud provider; "" = none. */
+    fun Context.cloudKey(provider: String): String = getSharedPreferences(KEYS_NAME, Context.MODE_PRIVATE).getString(provider, "") ?: ""
+    fun Context.setCloudKey(provider: String, key: String) = getSharedPreferences(KEYS_NAME, Context.MODE_PRIVATE).edit().putString(provider, key).apply()
 
     /** Settings › Ring switch; on (default) = a sync takes a pulse reading when the last one started 30 min or more ago. */
     var Context.autoReadings: Boolean
