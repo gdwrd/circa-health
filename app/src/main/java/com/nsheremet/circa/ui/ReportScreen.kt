@@ -100,7 +100,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.work.WorkManager
 import com.nsheremet.circa.SyncWorker
+import com.nsheremet.circa.Prefs.cloudKey
+import com.nsheremet.circa.Prefs.reportProvider
 import com.nsheremet.circa.Prefs.reportWriter
+import com.nsheremet.circa.writerReady
 import com.nsheremet.circa.writeReports
 import com.nsheremet.circa.writeWeek
 import com.nsheremet.circa.updateSince
@@ -137,8 +140,8 @@ internal data class ReportCard(val kind: String, val verdict: String?, val advic
 
 private val pageOrder = listOf("today", "night", "yesterday", "tonight", "body")
 
-/** Writer off or no model: every card shows its fallback (PLAN12 "Empty and off states"). */
-internal fun reportsOff(ctx: Context) = !ctx.reportWriter || !reportModel(ctx).exists()
+/** Writer off or not ready (no model, no key or no cloud model): every card shows its fallback (PLAN12 "Empty and off states"). */
+internal fun reportsOff(ctx: Context) = !ctx.reportWriter || !writerReady(ctx)
 
 /** `/report` cards in page order (`body` second when it says `watch`) with their notes from `filesDir/reports.json`. Blocking I/O. */
 internal fun reportCards(ctx: Context, reply: JsonElement?): List<ReportCard> {
@@ -1026,14 +1029,19 @@ fun ReportScreen(backend: Boolean?, onBack: () -> Unit) {
                 ) {
                     Icon(Icons.Rounded.AutoAwesome, null, tint = c.tint, modifier = Modifier.size(20.dp))
                     Text(
-                        if (ctx.reportWriter) "Download the model to get written notes" else "Turn on written reports",
+                        when {
+                            !ctx.reportWriter -> "Turn on written reports"
+                            ctx.reportProvider == "phone" -> "Download the model to get written notes"
+                            ctx.cloudKey(ctx.reportProvider).isEmpty() -> "Add your API key in Settings › Reports to get written notes"
+                            else -> "Choose a model in Settings › Reports to get written notes"
+                        },
                         style = AppType.body, color = c.tint, modifier = Modifier.padding(start = AppSpace.m).weight(1f),
                     )
                     Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = c.secondaryLabel)
                 }
             }
         }
-        if (list.any { it.written != null }) item {
+        if (ctx.reportProvider == "phone" && list.any { it.written != null }) item { // a cloud note did leave the device
             Text(
                 "Written on this phone by Gemma. Nothing left the device.", style = AppType.footnote, color = c.secondaryLabel,
                 textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(horizontal = AppSpace.xl),

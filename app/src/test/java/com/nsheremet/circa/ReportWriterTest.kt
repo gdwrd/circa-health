@@ -9,6 +9,7 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlinx.coroutines.runBlocking
 import java.time.LocalDate
 import java.time.ZoneId
 
@@ -229,5 +230,26 @@ class ReportWeekTest {
         assertFalse("week" in kindFocus)
         assertFalse("next_week" in kindFocus)
         kinds.forEach { assertTrue(it, reportSystem("", it).contains("Focus: ${kindFocus[it]}.\n")) }
+    }
+}
+
+class ReportWriterTest {
+    private fun card(kind: String) = JsonObject(mapOf("kind" to JsonPrimitive(kind), "fallback" to JsonPrimitive("Fallback $kind."),
+        "facts" to JsonArray(listOf(JsonPrimitive("Slept 7 h"))), "at" to JsonPrimitive(100)))
+
+    // CW3: a failed cloud call stores nothing (a forced rewrite gets its old entry back); a reply failing the checks stores the fallback.
+    @Test fun cloudFailureSkipsCard() = runBlocking {
+        val old = JsonObject(mapOf("text" to JsonPrimitive("Old night note. Still here.")))
+        val reports = mutableMapOf<String, kotlinx.serialization.json.JsonElement>("d/night" to JsonObject(mapOf("text" to JsonPrimitive(""))))
+        var saves = 0
+        val (fallbacks, failed) = noteCards("", "d", listOf(card("today"), card("night"), card("body")), reports, mapOf("d/night" to old),
+            { system, _ -> when { "stands out this morning" in system -> error("401 Invalid API key"); "unusual" in system -> error("429 Rate limited"); else -> "Too short." } },
+            { saves++ })
+        assertFalse("d/today" in reports)
+        assertEquals(old, reports["d/night"])
+        assertEquals("Fallback body.", (reports["d/body"] as JsonObject)["text"]!!.let { (it as JsonPrimitive).content })
+        assertEquals(1, fallbacks)
+        assertEquals(listOf("401 Invalid API key", "429 Rate limited"), failed)
+        assertEquals(2, saves)
     }
 }

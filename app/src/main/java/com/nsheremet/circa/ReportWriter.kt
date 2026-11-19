@@ -9,7 +9,10 @@ import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.SamplerConfig
+import com.nsheremet.circa.Prefs.cloudKey
+import com.nsheremet.circa.Prefs.cloudModel
 import com.nsheremet.circa.Prefs.reportName
+import com.nsheremet.circa.Prefs.reportProvider
 import com.nsheremet.circa.Prefs.reportWriter
 import com.nsheremet.circa.ui.Api
 import com.nsheremet.circa.ui.checkDownload
@@ -137,6 +140,24 @@ internal fun isQuiet(card: JsonObject) = (card["quiet"] as? JsonPrimitive)?.cont
 /** The first two sentences of [text]: a notification body. */
 internal fun firstSentences(text: String): String = text.trim().split(Regex("(?<=[.!?])\\s+")).take(2).joinToString(" ")
 
+/** CW3: the chosen writer can write: this phone has the model file, a cloud provider has a key and a model id. */
+internal fun writerReady(ctx: Context): Boolean = ctx.reportProvider.let { p ->
+    if (p == "phone") reportModel(ctx).exists() else ctx.cloudKey(p).isNotEmpty() && ctx.cloudModel(p).isNotEmpty()
+}
+
+/** CW3: runs [block] with the chosen writer's `(system, user) -> reply`: one LiteRT engine on the phone, else [cloudNote]. */
+private suspend fun <T> withWriter(ctx: Context, block: suspend (suspend (String, String) -> String) -> T): T {
+    val p = ctx.reportProvider
+    if (p != "phone") return block { system, user -> cloudNote(p, ctx.cloudKey(p), ctx.cloudModel(p), system, user) }
+    return Engine(EngineConfig(modelPath = reportModel(ctx).path, backend = Backend.CPU())).use { engine ->
+        engine.initialize()
+        block { system, user ->
+            val cfg = ConversationConfig(systemInstruction = Contents.of(system), samplerConfig = SamplerConfig(topK = 40, topP = 0.9, temperature = 0.4))
+            engine.createConversation(cfg).use { it.sendMessage(user).toString() }
+        }
+    }
+}
+
 // One writer at a time: the Reports page and a sync may both start one; the second waits, then finds nothing to write.
 private val writing = Mutex()
 
@@ -144,15 +165,14 @@ private val writing = Mutex()
  * Writes the notes of today's `/report` cards that have none yet ([toWrite]) into `filesDir/reports.json`
  * (`{"date/kind": {"hash", "text", "at", "advice", "verdict", "facts", "fallback", "quiet"}}`; text is the card's fallback
  * when a check failed). [force] blanks today's card texts first and rewrites them from the stored inputs, keeping `at`.
- * Returns the Sync log line, or null when the writer is off, the model is missing or nothing changed. Blocks for seconds a card.
+ * Returns the Sync log line, or null when the writer is off or not ready ([writerReady]) or nothing changed. Blocks for seconds a card.
  */
 internal suspend fun writeReports(ctx: Context, force: Boolean = false): String? = writing.withLock { writeLocked(ctx, force) }
 
 private suspend fun writeLocked(ctx: Context, force: Boolean): String? {
     if (!ctx.reportWriter) return null
     runCatching { checkDownload(ctx, ctx.getSystemService(DownloadManager::class.java)) } // a download that ended while Settings was closed
-    val model = reportModel(ctx)
-    if (!model.exists()) return null
+    if (!writerReady(ctx)) return null
     val file = File(ctx.filesDir, "reports.json")
     val stored = runCatching { Json.parseToJsonElement(file.readText()).jsonObject }.getOrDefault(JsonObject(emptyMap()))
     val now = LocalDate.now()
@@ -160,7 +180,7 @@ private suspend fun writeLocked(ctx: Context, force: Boolean): String? {
     val date = (reply["date"] as? JsonPrimitive)?.content ?: return null
     val reports = keepDays(stored, LocalDate.parse(date)).toMutableMap()
     val todo = toWrite(reports, date, (reply["cards"] as? JsonArray).orEmpty().map { it.jsonObject }, force)
-    return writeCards(ctx.reportName, model, file, reports, date, todo, force, "Reports")
+    return writeCards(ctx, file, reports, date, todo, force, "Reports")
 }
 
 /** LW4: the Monday that starts the last finished Mon to Sun week before [today]. */
@@ -180,8 +200,7 @@ internal fun weekToWrite(weeks: Map<String, JsonElement>, start: String, cards: 
  */
 internal suspend fun writeWeek(ctx: Context, force: Boolean = false): String? = writing.withLock {
     if (!ctx.reportWriter) return@withLock null
-    val model = reportModel(ctx)
-    if (!model.exists()) return@withLock null
+    if (!writerReady(ctx)) return@withLock null
     val file = File(ctx.filesDir, "weeks.json")
     val weeks = runCatching { Json.parseToJsonElement(file.readText()).jsonObject }.getOrDefault(JsonObject(emptyMap())).toMutableMap()
     // Battery: the week is stored already, no need to ask the backend.
@@ -189,7 +208,7 @@ internal suspend fun writeWeek(ctx: Context, force: Boolean = false): String? = 
     val reply = Api.reportWeek(ctx) ?: return@withLock null
     val start = (reply["start"] as? JsonPrimitive)?.content ?: return@withLock null
     val todo = weekToWrite(weeks, start, (reply["cards"] as? JsonArray).orEmpty().map { it.jsonObject }, force)
-    writeCards(ctx.reportName, model, file, weeks, start, todo, force, "Week")
+    writeCards(ctx, file, weeks, start, todo, force, "Week")
 }
 
 /**
@@ -197,46 +216,67 @@ internal suspend fun writeWeek(ctx: Context, force: Boolean = false): String? = 
  * [file] after every card. [force] blanks those texts first. Returns the Sync log line headed [label], or null when
  * [todo] is empty.
  */
-private suspend fun writeCards(name: String, model: File, file: File, reports: MutableMap<String, JsonElement>, date: String,
+private suspend fun writeCards(ctx: Context, file: File, reports: MutableMap<String, JsonElement>, date: String,
                                todo: List<JsonObject>, force: Boolean, label: String): String? {
     if (todo.isEmpty()) return null
+    val name = ctx.reportName
     // Through a rename: a killed worker keeps what it wrote and the page never reads half a file.
-    val save = { File(file.path + ".tmp").apply { writeText(JsonObject(reports).toString()) }.renameTo(file) }
+    val save = { File(file.path + ".tmp").apply { writeText(JsonObject(reports).toString()) }.renameTo(file); Unit }
+    val old = reports.toMap()
     if (force) { // blank text: the page shows a placeholder until the note lands; `at` and the rest stay
         todo.forEach { c -> (reports["$date/${c.str("kind")}"] as? JsonObject)?.let { reports["$date/${c.str("kind")}"] = JsonObject(it + ("text" to JsonPrimitive(""))) } }
         save()
     }
     val t0 = SystemClock.elapsedRealtime()
+    val (quiet, loud) = todo.partition(::isQuiet)
+    quiet.forEach { reports["$date/${it.str("kind")}"] = cardEntry(name, it, null); save() }
+    val (fallbacks, failed) = if (loud.isEmpty()) 0 to emptyList() else withWriter(ctx) { noteCards(name, date, loud, reports, old, it, save) }
+    return String.format(Locale.ROOT, "%s: wrote %d cards for %s in %.1f s, %d fallbacks, %d quiet",
+        label, todo.size - failed.size, date, (SystemClock.elapsedRealtime() - t0) / 1000.0, fallbacks, quiet.size) +
+        if (failed.isEmpty()) "" else ", ${failed.size} failed: ${failed.first()}"
+}
+
+/**
+ * Card [c]'s entry; [note] null: the fallback. at and advice (DT3): an update's `since` and `given` start from the morning
+ * card; a rewrite keeps the card's `at`. The inputs (RG1) let Regenerate rewrite the same card later.
+ */
+private fun cardEntry(name: String, c: JsonObject, note: String?): JsonObject {
+    val verdict = (c["verdict"] as? JsonPrimitive)?.contentOrNull
+    val facts = c.strings("facts")
+    val advice = c.strings("advice")
+    return JsonObject(mapOf("hash" to JsonPrimitive(reportHash(name, verdict, facts, advice)),
+        "text" to JsonPrimitive(note ?: c.str("fallback")), "at" to JsonPrimitive(c.long("at") ?: (System.currentTimeMillis() / 1000)),
+        "advice" to JsonArray(advice.map { JsonPrimitive(it) }), "verdict" to JsonPrimitive(verdict), "facts" to JsonArray(facts.map { JsonPrimitive(it) }),
+        "fallback" to JsonPrimitive(c.str("fallback")), "quiet" to JsonPrimitive(isQuiet(c))))
+}
+
+/**
+ * CW3: writes each of [loud] into [reports] from [note] through [checkedNote] (the fallback when a check fails), calling
+ * [save] after every card. A card whose [note] fails ([cloudNote]'s IllegalStateException; LiteRT's own exceptions end
+ * the write as before) stores nothing, so the next sync tries again; a forced rewrite gets its [old] entry back.
+ * Returns the fallback count and the failures' short reasons.
+ */
+internal suspend fun noteCards(name: String, date: String, loud: List<JsonObject>, reports: MutableMap<String, JsonElement>,
+                               old: Map<String, JsonElement>, note: suspend (String, String) -> String, save: () -> Unit): Pair<Int, List<String>> {
     var fallbacks = 0
-    // at and advice (DT3): an update's `since` and `given` start from the morning card; a rewrite keeps the card's `at`.
-    // The inputs (RG1) let Regenerate rewrite the same card later. [note] null: the fallback.
-    val store = { c: JsonObject, note: String? ->
-        val verdict = (c["verdict"] as? JsonPrimitive)?.contentOrNull
+    val failed = mutableListOf<String>()
+    for (c in loud) {
+        val key = "$date/${c.str("kind")}"
         val facts = c.strings("facts")
         val advice = c.strings("advice")
-        reports["$date/${c.str("kind")}"] = JsonObject(mapOf("hash" to JsonPrimitive(reportHash(name, verdict, facts, advice)),
-            "text" to JsonPrimitive(note ?: c.str("fallback")), "at" to JsonPrimitive(c.long("at") ?: (System.currentTimeMillis() / 1000)),
-            "advice" to JsonArray(advice.map { JsonPrimitive(it) }), "verdict" to JsonPrimitive(verdict), "facts" to JsonArray(facts.map { JsonPrimitive(it) }),
-            "fallback" to JsonPrimitive(c.str("fallback")), "quiet" to JsonPrimitive(isQuiet(c))))
+        val reply = try {
+            note(reportSystem(name, c.str("kind")), reportPrompt((c["verdict"] as? JsonPrimitive)?.contentOrNull, facts, advice, c.str("fallback")))
+        } catch (e: IllegalStateException) {
+            failed += e.message.orEmpty()
+            old[key]?.let { reports[key] = it; save() }
+            continue
+        }
+        val checked = checkedNote(reply, facts, advice)
+        if (checked == null) fallbacks++
+        reports[key] = cardEntry(name, c, checked)
         save() // after every card
     }
-    val (quiet, loud) = todo.partition(::isQuiet)
-    quiet.forEach { store(it, null) }
-    if (loud.isNotEmpty()) Engine(EngineConfig(modelPath = model.path, backend = Backend.CPU())).use { engine ->
-        engine.initialize()
-        for (c in loud) {
-            val verdict = (c["verdict"] as? JsonPrimitive)?.contentOrNull
-            val facts = c.strings("facts")
-            val advice = c.strings("advice")
-            val cfg = ConversationConfig(systemInstruction = Contents.of(reportSystem(name, c.str("kind"))),
-                samplerConfig = SamplerConfig(topK = 40, topP = 0.9, temperature = 0.4))
-            val note = engine.createConversation(cfg).use { checkedNote(it.sendMessage(reportPrompt(verdict, facts, advice, c.str("fallback"))).toString(), facts, advice) }
-            if (note == null) fallbacks++
-            store(c, note)
-        }
-    }
-    return String.format(Locale.ROOT, "%s: wrote %d cards for %s in %.1f s, %d fallbacks, %d quiet",
-        label, todo.size, date, (SystemClock.elapsedRealtime() - t0) / 1000.0, fallbacks, quiet.size)
+    return fallbacks to failed
 }
 
 /** DT3: [date]'s update entries (`date/update-<epoch s>`), oldest first. */
@@ -297,13 +337,12 @@ private fun clock(s: Long) = hhmm.format(Instant.ofEpochSecond(s).atZone(ZoneId.
 /**
  * DT3 ("Update me", and the automatic [evening] entry): `/report/update` from the last note, then one note stored as
  * `"date/update-<at>": {at, text, advice, evening}` in `reports.json` (text is the fallback when a check failed).
- * Returns the backend's reply (`nothing_new` true: nothing is written), or null when the writer is off, the model is
- * missing or the backend did not answer. Blocks for seconds.
+ * Returns the backend's reply (`nothing_new` true: nothing is written), or null when the writer is off or not ready,
+ * the backend did not answer or the cloud call failed. Blocks for seconds.
  */
 internal suspend fun writeUpdate(ctx: Context, evening: Boolean = false): JsonObject? = writing.withLock {
     if (!ctx.reportWriter) return@withLock null
-    val model = reportModel(ctx)
-    if (!model.exists()) return@withLock null
+    if (!writerReady(ctx)) return@withLock null
     val date = LocalDate.now().toString()
     val file = File(ctx.filesDir, "reports.json")
     val reports = keepDays(runCatching { Json.parseToJsonElement(file.readText()).jsonObject }.getOrDefault(JsonObject(emptyMap())), LocalDate.parse(date)).toMutableMap()
@@ -316,12 +355,12 @@ internal suspend fun writeUpdate(ctx: Context, evening: Boolean = false): JsonOb
     val advice = reply.strings("advice")
     val times = listOf(clock(since), clock(at))
     val earlier = listOfNotNull((reports["$date/today"] as? JsonObject)?.str("text")) + updates(reports, date).map { it.str("text") }
-    val cfg = ConversationConfig(systemInstruction = Contents.of(updateSystem(ctx.reportName, times[0], times[1], (reply["evening"] as? JsonPrimitive)?.content == "true")),
-        samplerConfig = SamplerConfig(topK = 40, topP = 0.9, temperature = 0.4))
-    val note = Engine(EngineConfig(modelPath = model.path, backend = Backend.CPU())).use { engine ->
-        engine.initialize()
+    val system = updateSystem(ctx.reportName, times[0], times[1], (reply["evening"] as? JsonPrimitive)?.content == "true")
+    val note = try {
         // The two times are in the instruction, so they may appear in the note.
-        engine.createConversation(cfg).use { checkedNote(it.sendMessage(updatePrompt(earlier, given, facts, advice)).toString(), facts + times, advice) }
+        withWriter(ctx) { checkedNote(it(system, updatePrompt(earlier, given, facts, advice)), facts + times, advice) }
+    } catch (e: IllegalStateException) {
+        return@withLock null // a cloud failure stores nothing: the next try writes it
     }
     reports["$date/update-$at"] = updateEntry(at, note ?: reply.str("fallback"), advice, evening)
     File(ctx.filesDir, "reports.json.tmp").apply { writeText(JsonObject(reports).toString()) }.renameTo(file)
