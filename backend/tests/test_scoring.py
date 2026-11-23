@@ -1,9 +1,10 @@
+import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.scoring import (FEELINGS, MOMENTS, activity_score, band, baseline, bedtime_window, confidence, derived, drive, guess_stats, low_index, motion_day, motion_label, moves,
+from app.scoring import (FEELINGS, MOMENTS, activity_score, band, baseline, bedtime_window, confidence, derived, drive, guess_stats, low_index, motion_day, motion_label, motion_rides, moves,
                          readiness_score, regularity, resilience, robust, sleep_debt, sleep_score, social_jetlag, still_hours, strain, stress_zones,
                          suggest, tonight, what_if, wind_down)
 
@@ -277,13 +278,15 @@ def test_drive_one_missing_hour_is_not_worn() -> None:
 
 
 def test_motion_label_boundaries() -> None:
-    assert motion_label(60, 0, 0) == "unsampled"  # tap-wait minute: still 60 but not desk
-    assert motion_label(21, 2000, 60) == "desk" and motion_label(20, 784, 60) == "active"
-    assert motion_label(20, 800, 60) == "ride" and motion_label(20, 800, 1) == "ride"
+    assert motion_label(60, 0, 0, 0) == "unsampled"  # tap-wait minute: still 60 but not desk
+    assert motion_label(21, 2000, 400, 60) == "desk" and motion_label(20, 800, 400, 60) == "active"  # ratio 2.0
+    assert motion_label(20, 840, 400, 60) == "ride" and motion_label(20, 840, 400, 1) == "ride"  # ratio 2.1
+    assert motion_label(20, 700, 300, 60) == "ride" and motion_label(20, 700, 299, 60) == "active"  # the level floor
+    assert motion_label(0, 400, 150, 60) == "active"  # a still hand's noise: ratio 2.7, level under the floor
 
 
 def test_motion_day_slots() -> None:
-    desk, act, ride, off = (30, 0, 60), (0, 100, 60), (0, 900, 60), (60, 0, 0)
+    desk, act, ride, off = (30, 0, 0, 60), (0, 100, 100, 60), (0, 900, 400, 60), (60, 0, 0, 0)
     m = {0: act, 60: act, 120: ride, 180: desk,  # slot 0: 3 moving > 1 still -> m
          600: act, 660: desk, 720: desk,  # slot 1: 1 moving, 2 still -> s
          1200: off, 1260: off,  # slot 2: unsampled only -> -
@@ -292,3 +295,29 @@ def test_motion_day_slots() -> None:
     assert motion_day(m, 0, 5) == {"still_min": 3, "moving_min": 8, "strip": "ms-m-"}
     assert motion_day({0: act, 60: act}, 0, 1)["strip"] == "s"  # 2 moving is under the 3-minute floor
     assert motion_day({}, 0, 0) == {"still_min": 0, "moving_min": 0, "strip": ""}
+
+
+def _day_1123() -> dict[float, tuple[float, float, float, float]]:
+    raw = json.loads((Path(__file__).parent / "motion_20261123.json").read_text())
+    return {float(t): (a, b, c, d) for t, (a, b, c, d) in raw.items()}
+
+
+def test_motion_rides_day_1123() -> None:
+    day0, m = 1795392000, _day_1123()  # 2026-11-23 GMT; the phone saw rides 09:36..09:51 and 17:14..17:29
+    rides = motion_rides(m)
+    assert len(rides) == 2
+    for (a, b), (pa, pb) in zip(rides, [(9 * 60 + 36, 9 * 60 + 51), (17 * 60 + 14, 17 * 60 + 29)]):
+        assert abs(a - day0 - pa * 60) <= 120 and abs(b - day0 - pb * 60) <= 120
+    walk = {t: v for t, v in m.items() if t < day0 + (9 * 60 + 34) * 60}  # walk 09:01..09:33
+    assert motion_rides(walk) == []
+    still = {t: v for t, v in m.items() if day0 + (12 * 60 + 25) * 60 <= t <= day0 + (12 * 60 + 31) * 60}  # the phone's false ride at 12:28
+    assert still and motion_rides(still) == []
+
+
+def test_motion_rides_holes_and_floor() -> None:
+    ride, desk, noise = (0, 900, 400, 60), (40, 0, 0, 60), (0, 400, 150, 60)
+    one = lambda start, kinds: {start + 60 * i: k for i, k in enumerate(kinds)}  # noqa: E731
+    assert motion_rides(one(0, [ride] * 2 + [desk] * 3 + [ride] * 3)) == [(0, 480)]  # a light of 3 minutes joins
+    assert motion_rides(one(0, [ride] * 2 + [desk] * 4 + [ride] * 3)) == []  # 4 minutes apart: two runs of 2 and 3
+    assert motion_rides(one(0, [ride] * 5)) == [(0, 300)] and motion_rides(one(0, [ride] * 4)) == []
+    assert motion_rides(one(0, [noise] * 20)) == []

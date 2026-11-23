@@ -296,9 +296,9 @@ def _score_day(d: date) -> None:
     inputs |= {"cardio_load": load and load["load"], "fitness": cardio.fitness(mh, base["rhr"]),
                "restorative_min": cardio.restorative(day_hr, inputs.get("rhr") or base["rhr"], steps_h, awake)}
     # ring motion log (FW8d): kept out of inputs, which hold numbers; None before the firmware logged it
-    mo = {k: samples.raw(f"motion_{k}", samples.midnight(d), end) for k in ("still", "jerk", "sampled")}
+    mo = {k: samples.raw(f"motion_{k}", samples.midnight(d), end) for k in ("still", "jerk", "level", "sampled")}
     day0 = samples.midnight(d).timestamp()
-    motion = scoring.motion_day({t: (v, mo["jerk"].get(t, 0.0), mo["sampled"].get(t, 0.0)) for t, v in mo["still"].items() if awake(t)},
+    motion = scoring.motion_day({t: (v, mo["jerk"].get(t, 0.0), mo["level"].get(t, 0.0), mo["sampled"].get(t, 0.0)) for t, v in mo["still"].items() if awake(t)},
                                 day0, max(0, ceil((min(end.timestamp() + 1, now.timestamp()) - day0) / 600))) if any(mo.values()) else None
 
     med = cfg["medication_started"]  # rhr/hrv baselines use only days on medication (new normal)

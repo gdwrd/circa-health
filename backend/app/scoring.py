@@ -340,25 +340,39 @@ def strain(night: dict, base: dict) -> dict:
 
 # Motion log minutes (FW8d, docs/MOTION.md). Thresholds fitted to one user and a handful of sessions, not validated.
 DESK_STILL_S = 21  # still seconds of 60 (still share 0.35)
-RIDE_JERK_MG = 800  # mg per sample
+RIDE_RATIO = 2.1  # jerk / level: a walk reads 1.4..2.1, a bike 2.0..2.5; with the level floor, 11-17..19 come out empty
+RIDE_LEVEL_MG = 300  # mg: a still hand reads 56..192 and chores 200..300 at a ratio over 2; the ride minutes read 312 and up (11-23)
+RIDE_HOLE_MIN = 3  # a light or a downhill: ride minutes this far apart are one ride
+RIDE_MIN = 5  # ride minutes a ride needs (a walk's stray high ratios come to 4)
 
 
-def motion_label(still: float, jerk: float, sampled: float) -> str:
+def motion_label(still: float, jerk: float, level: float, sampled: float) -> str:
     """One motion-log minute: unsampled (ring in tap-wait, never desk), desk, ride, else active."""
     if sampled == 0:
         return "unsampled"
     if still >= DESK_STILL_S:
         return "desk"
-    return "ride" if jerk >= RIDE_JERK_MG else "active"
+    return "ride" if level >= RIDE_LEVEL_MG and jerk >= RIDE_RATIO * level else "active"
 
 
-def motion_day(minutes: dict[float, tuple[float, float, float]], start: float, slots: int) -> dict:
-    """Awake motion-log minutes {t: (still, jerk, sampled)} -> still/moving minutes and one char per 10-min slot from start:
+def motion_day(minutes: dict[float, tuple[float, float, float, float]], start: float, slots: int) -> dict:
+    """Awake motion-log minutes {t: (still, jerk, level, sampled)} -> still/moving minutes and one char per 10-min slot from start:
     m (more moving than still, at least 3 moving), s (any still or moving), - (unsampled, asleep or missing). Ride counts as moving."""
     still, moving = [0] * slots, [0] * slots
-    for t, (st, jerk, sampled) in minutes.items():
+    for t, (st, jerk, level, sampled) in minutes.items():
         i = int((t - start) // 600)
-        if 0 <= i < slots and (lab := motion_label(st, jerk, sampled)) != "unsampled":
+        if 0 <= i < slots and (lab := motion_label(st, jerk, level, sampled)) != "unsampled":
             (still if lab == "desk" else moving)[i] += 1
     strip = "".join("m" if m > s and m >= 3 else "s" if m + s else "-" for s, m in zip(still, moving))
     return {"still_min": sum(still), "moving_min": sum(moving), "strip": strip}
+
+
+def motion_rides(minutes: dict[float, tuple[float, float, float, float]]) -> list[tuple[float, float]]:
+    """Minutes {t: (still, jerk, level, sampled)} -> [(start, end)] of rides: ride minutes joined across holes, end = last ride minute + 60."""
+    runs: list[list[float]] = []  # [first, last, ride minutes]
+    for t in sorted(t for t, m in minutes.items() if motion_label(*m) == "ride"):
+        if runs and t - runs[-1][1] <= (RIDE_HOLE_MIN + 1) * 60:
+            runs[-1][1:] = [t, runs[-1][2] + 1]
+        else:
+            runs.append([t, t, 1])
+    return [(a, b + 60) for a, b, n in runs if n >= RIDE_MIN]
