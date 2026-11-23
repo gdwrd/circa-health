@@ -1,5 +1,7 @@
+import json
 import time
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -449,6 +451,48 @@ def test_phone_moves_as_workouts(tmp_path, monkeypatch) -> None:
         c.patch("/workouts", json={"date": d.isoformat(), "start": at(18), "kind": "ride"}, headers=H)
         main._score_day(d)
         assert [(w["start"], w["kind"]) for w in db.days(d, d)[0]["c"]["workouts"]][1] == (at(18), "ride")  # relabel
+
+
+def _ride_day(tmp_path, monkeypatch, name: str, phone: dict[int, float], motion: bool = True) -> tuple[date, int]:
+    """2026-11-23 GMT with the real ring motion log (09:00..10:35, 12:25..12:31, 17:10..17:35) and phone_ride samples {minute: min}."""
+    monkeypatch.setenv("DB_PATH", str(tmp_path / name))
+    monkeypatch.setenv("TZ", "UTC")
+    db.init()
+    d, day0 = date(2026, 11, 23), 1795392000
+    raw = json.loads((Path(__file__).parent / "motion_20261123.json").read_text())
+    load({f"motion_{k}": {int(t): v[i] for t, v in raw.items()} for i, k in enumerate(("still", "jerk", "level", "sampled"))}
+         if motion else {})
+    load({"phone_ride": {day0 + m * 60: v for m, v in phone.items()}} if phone else {})
+    monkeypatch.setattr(main, "_vitals", lambda: {})
+    monkeypatch.setattr(main, "rescore", lambda dates: None)
+    return d, day0
+
+
+def _rides(d: date) -> list[tuple[int, int, str, bool, bool]]:
+    return [((w["start"] - 1795392000) // 60, (w["end"] - 1795392000) // 60, w["kind"], w["confirmed"], "ring" in w)
+            for w in db.days(d, d)[0]["c"]["workouts"]]
+
+
+def test_ring_rides_as_workouts(tmp_path, monkeypatch) -> None:
+    """Real motion log of 2026-11-23: the phone saw rides 09:34+09:36 and 17:13..17:29 (the ring agrees: confirmed) and a
+    6-minute one at 12:25 while the ring was still (unconfirmed). Without phone samples the ring's rides stand alone."""
+    d, day0 = _ride_day(tmp_path, monkeypatch, "a.db", {574: 1.0, 576: 15.0, 745: 6.0, 1033: 1.0, 1034: 10.0, 1045: 4.0})
+    main._score_day(d)
+    assert _rides(d) == [(574, 591, "ride", True, False), (745, 751, "ride", False, False), (1033, 1049, "ride", True, False)]
+    d, day0 = _ride_day(tmp_path, monkeypatch, "b.db", {})
+    main._score_day(d)
+    got = _rides(d)
+    assert [g[2:] for g in got] == [("ride", False, True)] * 2
+    assert abs(got[0][0] - 577) <= 2 and abs(got[0][1] - 591) <= 2 and abs(got[1][0] - 1035) <= 2 and abs(got[1][1] - 1048) <= 2
+    db.add_manual_workout(d, day0 + 580 * 60, day0 + 600 * 60, "walk")  # a manual entry over the morning ride: no ring ride there
+    kind = {"date": d.isoformat(), "start": day0 + 1036 * 60, "kind": "none"}
+    with TestClient(app) as c:
+        assert c.patch("/workouts", json=kind, headers=H).status_code == 200  # the user dismissed the evening one
+    main._score_day(d)
+    assert [(g[2], "ring" in g) for g in _rides(d)] == [("walk", False)]
+    d, day0 = _ride_day(tmp_path, monkeypatch, "c.db", {1033: 16.0}, motion=False)  # no motion samples: the phone ride stays confirmed
+    main._score_day(d)
+    assert [g[2:] for g in _rides(d)] == [("ride", True, False)]
 
 
 def test_sleep_debt_and_bedtime_fields(tmp_path, monkeypatch) -> None:

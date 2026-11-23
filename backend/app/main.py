@@ -266,22 +266,34 @@ def _score_day(d: date) -> None:
             "avg_bpm": round(mean(seg.values())) if seg else None, "max_bpm": max(seg.values(), default=None),
             "load": cardio.load(seg, bounds)["load"] if bounds else None, "kind": m["kind"], "confirmed": True,
             "manual": True}]
+    mo = {k: samples.raw(f"motion_{k}", samples.midnight(d), end) for k in ("still", "jerk", "level", "sampled")}
+    mins = {t: (v, mo["jerk"].get(t, 0.0), mo["level"].get(t, 0.0), mo["sampled"].get(t, 0.0)) for t, v in mo["still"].items()}
     segs = [(int(t), int(t) + round(v * 60), k) for k in ("walk", "ride", "run")
             for t, v in samples.raw(f"phone_{k}", samples.midnight(d), end).items()]
-    for s, e, k in scoring.moves(segs):  # noticed by the phone: replaces a detected session, yields to a manual one
-        k = "workout" if k == "run" else k
-        for st, lab in db.workout_kinds(d).items():
-            if s - 600 <= st <= e:
-                k = lab
-                break
-        if k == "none" or any(w.get("manual") and w["start"] < e and s < w["end"] for w in workouts):
-            continue
+    kinds = db.workout_kinds(d)
+
+    def add(s: int, e: int, k: str, confirmed: bool, tag: str) -> None:  # replaces the detected sessions it overlaps
+        nonlocal workouts
         seg = {t: v for t, v in day_hr.items() if s <= t < e}
         ok = bounds and seg and mean(seg.values()) >= 2 * bounds[0] - bounds[1]  # the cardio.workouts floor
         workouts = [w for w in workouts if w["end"] <= s or w["start"] >= e] + [{
             "start": s, "end": e, "minutes": (e - s) // 60,
             "avg_bpm": round(mean(seg.values())) if ok else None, "max_bpm": max(seg.values()) if ok else None,
-            "load": cardio.load(seg, bounds)["load"] if ok else 0, "kind": k, "confirmed": True, "phone": True}]
+            "load": cardio.load(seg, bounds)["load"] if ok else 0, "kind": k, "confirmed": confirmed, tag: True}]
+
+    for s, e, k in scoring.moves(segs):  # noticed by the phone: replaces a detected session, yields to a manual one
+        lab = next((v for st, v in kinds.items() if s - 600 <= st <= e), None)
+        k = lab or ("workout" if k == "run" else k)
+        if k == "none" or any(w.get("manual") and w["start"] < e and s < w["end"] for w in workouts):
+            continue
+        span = [m for t, m in mins.items() if s <= t < e]  # the ring sampled it and saw no ride minute: not confirmed
+        unseen = k == "ride" and not lab and any(m[3] > 0 for m in span) and all(scoring.motion_label(*m) != "ride" for m in span)
+        add(s, e, k, not unseen, "phone")
+    for s, e in ((int(a), int(b)) for a, b in scoring.motion_rides(mins)):  # seen by the ring: yields to a manual or phone one
+        lab = next((v for st, v in kinds.items() if s - 600 <= st <= e), None)
+        if lab == "none" or any((w.get("manual") or w.get("phone")) and w["start"] < e and s < w["end"] for w in workouts):
+            continue
+        add(s, e, lab or "ride", bool(lab), "ring")
     workouts.sort(key=lambda w: w["start"])
     if any(w["minutes"] >= 20 or w["confirmed"] for w in workouts):  # auto journal row; a manual entry is never touched
         db.add_auto(d.isoformat(), "workout")
@@ -295,11 +307,9 @@ def _score_day(d: date) -> None:
             db.delete_auto(d.isoformat(), k)
     inputs |= {"cardio_load": load and load["load"], "fitness": cardio.fitness(mh, base["rhr"]),
                "restorative_min": cardio.restorative(day_hr, inputs.get("rhr") or base["rhr"], steps_h, awake)}
-    # ring motion log (FW8d): kept out of inputs, which hold numbers; None before the firmware logged it
-    mo = {k: samples.raw(f"motion_{k}", samples.midnight(d), end) for k in ("still", "jerk", "level", "sampled")}
     day0 = samples.midnight(d).timestamp()
-    motion = scoring.motion_day({t: (v, mo["jerk"].get(t, 0.0), mo["level"].get(t, 0.0), mo["sampled"].get(t, 0.0)) for t, v in mo["still"].items() if awake(t)},
-                                day0, max(0, ceil((min(end.timestamp() + 1, now.timestamp()) - day0) / 600))) if any(mo.values()) else None
+    motion = scoring.motion_day({t: m for t, m in mins.items() if awake(t)},
+                                day0, max(0, ceil((min(end.timestamp() + 1, now.timestamp()) - day0) / 600))) if any(mo.values()) else None  # ring motion log (FW8d): kept out of inputs; None before the firmware logged it
 
     med = cfg["medication_started"]  # rhr/hrv baselines use only days on medication (new normal)
     window = {k: [p["inputs"].get(k) for p in prior if not med or k not in ("rhr", "hrv") or p["date"].isoformat() >= med]
